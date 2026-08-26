@@ -1,0 +1,11 @@
+type: command/shell
+typeVersion: 2026.02.09.1
+id: 3566a0a4-4746-45a4-a8ca-52a6e8c0fda5
+name: hermes-profile-bootstrap
+version: 1
+tags:
+  domain: hermes-platform
+  safety: scoped-writes-profiles-only
+  owner: swe
+globalArguments: {}
+methods: {}
