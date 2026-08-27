@@ -35,6 +35,7 @@ OPS_BROKER_SCHEMA = {
                     "validate_model",
                     "validate_workflow",
                     "run_readonly_workflow",
+                    "plan_github_cloudflare_repository",
                     "get_result",
                 ],
             },

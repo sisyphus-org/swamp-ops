@@ -55,6 +55,38 @@ No existing issue/project is moved between projects, re-parented, status-changed
 
 Recommended Linear board settings: group by **Project milestone** and turn **Sub-issues** off. The board then shows milestone groups with top-level issues as cards; sub-issues remain inside their parent issue. Milestones are assigned only to top-level issues; sub-issues belong to that grouping through their parent and do not receive a direct milestone assignment.
 
+## `github-cloudflare-repo-bootstrap`
+
+Read-only Phase 1 planner for the standard Cloudflare repository bootstrap. The owner-facing interaction has exactly one required question: the repository name.
+
+```text
+Owner: create a repository
+Agent: what should the repository be called?
+Owner: example-site
+```
+
+The SWE agent then sends one typed A2A request to `ops-broker`:
+
+```json
+{
+  "request_id": "<fresh-uuid>",
+  "integration": "swamp",
+  "operation": "plan_github_cloudflare_repository",
+  "arguments": {"repository": "example-site"},
+  "mode": "plan"
+}
+```
+
+The broker operation is available only to authenticated caller `swe`. It validates the repository slug and constructs one fixed `shell=False` argv for `github-cloudflare-repo-bootstrap`; callers cannot select another workflow, add arbitrary Swamp inputs, or request apply mode. SWE never receives `SWAMP_API_KEY` and does not invoke the Swamp CLI directly.
+
+All other values are versioned defaults: organization `sisyphus-org`, public visibility, approved GitHub template plus an exact reviewed commit SHA, derived production/preview Worker names, `branch-preview` Environment, reviewer `alexxpetrov`, required Cloudflare org secret names, CI, production deploy, approval-gated protected preview, and no Cloudflare Git Builds integration. Until the template exists and `approvedTemplateRevision` is set to a reviewed 40-character SHA, every plan fails closed.
+
+Phase 1 performs GitHub GET requests only. It validates repository-name availability, the template default branch against the approved SHA, scaffold files at that exact SHA, organization membership visibility, required secret names, Worker/DNS names and the preview Access contract. The JSON result lists exact future writes, blockers and approval gates. The future write plan creates an empty repository and materializes the approved template tree instead of calling the mutable GitHub template-generation endpoint. There is no `apply` input or write path.
+
+An apply phase may be added only after two manually invoked read-only runs are reviewed and narrow write approvals are defined. No webhooks, schedules, secret values or modifications of existing repositories are allowed.
+
+Script: `scripts/github_cloudflare_repo_bootstrap.py`.
+
 ## Repository rules
 
 - Work on `agent/<name>` branches; commit verified changes before merge/review.

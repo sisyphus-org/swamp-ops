@@ -40,9 +40,12 @@ A Hermes profile is not an OS sandbox. This broker limits delegated capability, 
 | `swamp.validate_model` | `model` | yes |
 | `swamp.validate_workflow` | `workflow` | yes |
 | `swamp.run_readonly_workflow` | `workflow` | yes, allowlisted workflows only |
+| `swamp.plan_github_cloudflare_repository` | `repository` | yes, `swe` only; fixed workflow and typed slug |
 | `swamp.get_result` | `model`, `name` | yes, allowlisted artifacts only |
 
 No write operation is implemented in phase 1. A future write slice must add a separately reviewed plan artifact, replay protection, an explicit human approval record, and an apply executor.
+
+Repository bootstrap plans fail closed until `approvedTemplateRevision` contains a reviewed 40-character template commit SHA. Default-branch drift and scaffold reads are checked against that exact SHA. The future write plan creates an empty repository and materializes the approved tree; it does not use GitHub's mutable template-generation endpoint.
 
 ## Installation and activation
 
@@ -201,6 +204,8 @@ Expected: one advertised skill/toolset, `ops-broker`; no terminal, file, memory,
 - `github.repository_access` on `sisyphus-org/swamp-ops`;
 - `swamp.validate_workflow` for `ops-broker-readonly-smoke`;
 - `swamp.run_readonly_workflow` for `ops-broker-readonly-smoke`.
+
+After SIS-47 is merged and the reviewed plugin is reinstalled, `swe` additionally runs two real requests for `swamp.plan_github_cloudflare_repository` using two unused probe names. Each result must report `readOnly: true`; the target repository must remain absent. The same operation from `books`, `crypto-analyst`, or `ideas`, an invalid slug, an extra argument, a generic request for `github-cloudflare-repo-bootstrap`, and `mode: apply` must all be rejected.
 
 3. Negative requests must be rejected:
 

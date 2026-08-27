@@ -106,6 +106,7 @@ class CommandConstructionTests(unittest.TestCase):
         policy = {
             "github": {"repositories": ["sisyphus-org/swamp-ops"]},
             "swamp": {
+                "repositoryBootstrapWorkflow": "github-cloudflare-repo-bootstrap",
                 "models": ["ops-broker-readonly-smoke"],
                 "workflows": ["ops-broker-readonly-smoke"],
                 "data": [
@@ -176,6 +177,19 @@ class CommandConstructionTests(unittest.TestCase):
                 ],
             ),
             (
+                "swamp.plan_github_cloudflare_repository",
+                {"repository": "example-site"},
+                [
+                    "swamp",
+                    "workflow",
+                    "run",
+                    "github-cloudflare-repo-bootstrap",
+                    "--input",
+                    "repository=example-site",
+                    "--json",
+                ],
+            ),
+            (
                 "swamp.get_result",
                 {"model": "ops-broker-readonly-smoke", "name": "result"},
                 [
@@ -208,6 +222,60 @@ class CommandConstructionTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(ValueError, "arguments must be an object"):
             build_command("swamp.auth_whoami", [], policy)  # type: ignore[arg-type]
+
+    def test_repository_bootstrap_name_is_strict_and_not_shell_extensible(self):
+        policy = {
+            "swamp": {
+                "repositoryBootstrapWorkflow": "github-cloudflare-repo-bootstrap"
+            }
+        }
+        for value in (
+            "Example-Site",
+            "example_site",
+            "a",
+            "1example",
+            "example-site;env",
+            "example-site' --input mode=apply",
+            "x" * 56,
+        ):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "repository must match"):
+                    build_command(
+                        "swamp.plan_github_cloudflare_repository",
+                        {"repository": value},
+                        policy,
+                    )
+
+    def test_repository_bootstrap_requires_dedicated_policy_target(self):
+        with self.assertRaisesRegex(ValueError, "bootstrap workflow is not allowed"):
+            build_command(
+                "swamp.plan_github_cloudflare_repository",
+                {"repository": "example-site"},
+                {"swamp": {"workflows": ["github-cloudflare-repo-bootstrap"]}},
+            )
+
+
+class PolicyTests(unittest.TestCase):
+    def test_repository_bootstrap_capability_is_swe_only(self):
+        path = Path(__file__).parents[1] / "plugins" / "ops_broker" / "policy.json"
+        policy = json.loads(path.read_text())
+        operation = "swamp.plan_github_cloudflare_repository"
+
+        self.assertIn(operation, policy["peers"]["swe"]["operations"])
+        for peer in ("books", "crypto-analyst", "ideas"):
+            self.assertNotIn(operation, policy["peers"][peer]["operations"])
+        self.assertEqual(
+            policy["swamp"]["repositoryBootstrapWorkflow"],
+            "github-cloudflare-repo-bootstrap",
+        )
+        self.assertNotIn(
+            "github-cloudflare-repo-bootstrap", policy["swamp"]["workflows"]
+        )
+        self.assertNotIn("github-cloudflare-repo-bootstrap", policy["swamp"]["models"])
+        self.assertNotIn(
+            {"model": "github-cloudflare-repo-bootstrap", "name": "result"},
+            policy["swamp"]["data"],
+        )
 
 
 class ExecutionTests(unittest.TestCase):
@@ -289,6 +357,307 @@ class ExecutionTests(unittest.TestCase):
             ],
         )
         self.assertEqual(response["result"], {"valid": True})
+
+    def test_repository_bootstrap_executes_fixed_argv_for_swe_only(self):
+        policy_path = (
+            Path(__file__).parents[1] / "plugins" / "ops_broker" / "policy.json"
+        )
+        policy = json.loads(policy_path.read_text())
+        request = validate_request(
+            {
+                "request_id": "50fc8927-c331-4d1b-bf42-b192c3f8e43a",
+                "integration": "swamp",
+                "operation": "plan_github_cloudflare_repository",
+                "arguments": {"repository": "example-site"},
+                "mode": "plan",
+            }
+        )
+        calls = []
+
+        def runner(argv, **kwargs):
+            calls.append((argv, kwargs))
+            if argv[:3] == ["swamp", "workflow", "run"]:
+                return {
+                    "returncode": 0,
+                    "stdout": json.dumps(
+                        {
+                            "id": "run-1",
+                            "jobs": [
+                                {
+                                    "steps": [
+                                        {
+                                            "dataArtifacts": [
+                                                {"name": "result", "version": 7}
+                                            ]
+                                        }
+                                    ]
+                                }
+                            ],
+                        }
+                    ),
+                    "stderr": "",
+                }
+            return {
+                "returncode": 0,
+                "stdout": json.dumps(
+                    {
+                        "modelName": "github-cloudflare-repo-bootstrap",
+                        "name": "result",
+                        "version": 7,
+                        "ownerDefinition": {"workflowRunId": "run-1"},
+                        "content": {
+                            "exitCode": 0,
+                            "stdout": json.dumps(
+                                {
+                                    "schemaVersion": 1,
+                                    "mode": "plan",
+                                    "readOnly": True,
+                                    "ready": False,
+                                    "target": {
+                                        "repository": "sisyphus-org/example-site"
+                                    },
+                                    "blockers": ["template missing"],
+                                }
+                            ),
+                        },
+                    }
+                ),
+                "stderr": "",
+            }
+
+        response = execute_request(
+            request,
+            caller="swe",
+            policy=policy,
+            runner=runner,
+            workspace=Path("/Users/hermes/workspaces/swamp-ops"),
+        )
+        self.assertEqual(
+            calls[0][0],
+            [
+                "swamp",
+                "workflow",
+                "run",
+                "github-cloudflare-repo-bootstrap",
+                "--input",
+                "repository=example-site",
+                "--json",
+            ],
+        )
+        self.assertEqual(
+            calls[1][0],
+            [
+                "swamp",
+                "data",
+                "get",
+                "github-cloudflare-repo-bootstrap",
+                "result",
+                "--version",
+                "7",
+                "--json",
+            ],
+        )
+        self.assertEqual(
+            response["result"],
+            {
+                "workflowRunId": "run-1",
+                "artifactVersion": 7,
+                "plan": {
+                    "schemaVersion": 1,
+                    "mode": "plan",
+                    "readOnly": True,
+                    "ready": False,
+                    "target": {
+                        "repository": "sisyphus-org/example-site"
+                    },
+                    "blockers": ["template missing"],
+                },
+            },
+        )
+
+        with self.assertRaisesRegex(ValueError, "not allowed for caller"):
+            execute_request(
+                request,
+                caller="books",
+                policy=policy,
+                runner=lambda *_args, **_kwargs: self.fail("runner must not execute"),
+                workspace=Path("/Users/hermes/workspaces/swamp-ops"),
+            )
+
+    def test_repository_bootstrap_rejects_artifact_from_another_run(self):
+        policy = json.loads(
+            (
+                Path(__file__).parents[1]
+                / "plugins"
+                / "ops_broker"
+                / "policy.json"
+            ).read_text()
+        )
+        request = validate_request(
+            {
+                "request_id": "7a69c848-8711-47a5-a55b-22fcace1b7c8",
+                "integration": "swamp",
+                "operation": "plan_github_cloudflare_repository",
+                "arguments": {"repository": "example-site"},
+                "mode": "plan",
+            }
+        )
+
+        def runner(argv, **_kwargs):
+            if argv[:3] == ["swamp", "workflow", "run"]:
+                payload = {
+                    "id": "run-expected",
+                    "jobs": [
+                        {
+                            "steps": [
+                                {"dataArtifacts": [{"name": "result", "version": 8}]}
+                            ]
+                        }
+                    ],
+                }
+            else:
+                payload = {
+                    "modelName": "github-cloudflare-repo-bootstrap",
+                    "name": "result",
+                    "version": 8,
+                    "ownerDefinition": {"workflowRunId": "run-other"},
+                    "content": {
+                        "exitCode": 0,
+                        "stdout": json.dumps(
+                            {
+                                "schemaVersion": 1,
+                                "mode": "plan",
+                                "readOnly": True,
+                                "ready": True,
+                                "blockers": [],
+                            }
+                        ),
+                    },
+                }
+            return {"returncode": 0, "stdout": json.dumps(payload), "stderr": ""}
+
+        with self.assertRaisesRegex(ValueError, "provenance is invalid"):
+            execute_request(
+                request,
+                caller="swe",
+                policy=policy,
+                runner=runner,
+                workspace=Path("/Users/hermes/workspaces/swamp-ops"),
+            )
+
+    def test_repository_bootstrap_rejects_non_object_artifact(self):
+        policy = json.loads(
+            (
+                Path(__file__).parents[1]
+                / "plugins"
+                / "ops_broker"
+                / "policy.json"
+            ).read_text()
+        )
+        request = validate_request(
+            {
+                "request_id": "54550fa0-df15-4264-bf19-30169f65d53a",
+                "integration": "swamp",
+                "operation": "plan_github_cloudflare_repository",
+                "arguments": {"repository": "example-site"},
+                "mode": "plan",
+            }
+        )
+
+        def runner(argv, **_kwargs):
+            if argv[:3] == ["swamp", "workflow", "run"]:
+                stdout = json.dumps(
+                    {
+                        "id": "run-expected",
+                        "jobs": [
+                            {
+                                "steps": [
+                                    {
+                                        "dataArtifacts": [
+                                            {"name": "result", "version": 9}
+                                        ]
+                                    }
+                                ]
+                            }
+                        ],
+                    }
+                )
+            else:
+                stdout = "[]"
+            return {"returncode": 0, "stdout": stdout, "stderr": ""}
+
+        with self.assertRaisesRegex(ValueError, "invalid JSON object"):
+            execute_request(
+                request,
+                caller="swe",
+                policy=policy,
+                runner=runner,
+                workspace=Path("/Users/hermes/workspaces/swamp-ops"),
+            )
+
+    def test_repository_bootstrap_rejects_plan_for_another_repository(self):
+        policy = json.loads(
+            (
+                Path(__file__).parents[1]
+                / "plugins"
+                / "ops_broker"
+                / "policy.json"
+            ).read_text()
+        )
+        request = validate_request(
+            {
+                "request_id": "b0b3c9cb-3ae5-4580-a969-d5b8e301124a",
+                "integration": "swamp",
+                "operation": "plan_github_cloudflare_repository",
+                "arguments": {"repository": "example-site"},
+                "mode": "plan",
+            }
+        )
+
+        def runner(argv, **_kwargs):
+            if argv[:3] == ["swamp", "workflow", "run"]:
+                payload = {
+                    "id": "run-expected",
+                    "jobs": [
+                        {
+                            "steps": [
+                                {"dataArtifacts": [{"name": "result", "version": 10}]}
+                            ]
+                        }
+                    ],
+                }
+            else:
+                payload = {
+                    "modelName": "github-cloudflare-repo-bootstrap",
+                    "name": "result",
+                    "version": 10,
+                    "ownerDefinition": {"workflowRunId": "run-expected"},
+                    "content": {
+                        "exitCode": 0,
+                        "stdout": json.dumps(
+                            {
+                                "schemaVersion": 1,
+                                "mode": "plan",
+                                "readOnly": True,
+                                "ready": False,
+                                "target": {
+                                    "repository": "sisyphus-org/other-site"
+                                },
+                                "blockers": ["template missing"],
+                            }
+                        ),
+                    },
+                }
+            return {"returncode": 0, "stdout": json.dumps(payload), "stderr": ""}
+
+        with self.assertRaisesRegex(ValueError, "target does not match request"):
+            execute_request(
+                request,
+                caller="swe",
+                policy=policy,
+                runner=runner,
+                workspace=Path("/Users/hermes/workspaces/swamp-ops"),
+            )
 
     def test_pending_github_checks_exit_code_is_a_typed_result(self):
         response = execute_request(
