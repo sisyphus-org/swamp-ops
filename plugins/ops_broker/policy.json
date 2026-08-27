@@ -47,6 +47,7 @@
         "swamp.validate_model",
         "swamp.validate_workflow",
         "swamp.run_readonly_workflow",
+        "swamp.plan_github_cloudflare_repository",
         "swamp.get_result"
       ]
     }
@@ -57,6 +58,7 @@
     ]
   },
   "swamp": {
+    "repositoryBootstrapWorkflow": "github-cloudflare-repo-bootstrap",
     "models": [
       "ops-broker-readonly-smoke"
     ],

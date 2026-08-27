@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +21,7 @@ ALLOWED_OPERATIONS = {
     ("swamp", "validate_model"),
     ("swamp", "validate_workflow"),
     ("swamp", "run_readonly_workflow"),
+    ("swamp", "plan_github_cloudflare_repository"),
     ("swamp", "get_result"),
 }
 
@@ -57,6 +59,7 @@ def build_command(
         "swamp.validate_model": {"model"},
         "swamp.validate_workflow": {"workflow"},
         "swamp.run_readonly_workflow": {"workflow"},
+        "swamp.plan_github_cloudflare_repository": {"repository"},
         "swamp.get_result": {"model", "name"},
     }
     if operation_key not in expected_arguments:
@@ -97,6 +100,24 @@ def build_command(
             raise BrokerError("workflow is not allowed")
         action = "validate" if operation_key == "swamp.validate_workflow" else "run"
         return ["swamp", "workflow", action, str(workflow), "--json"]
+    if operation_key == "swamp.plan_github_cloudflare_repository":
+        workflow = "github-cloudflare-repo-bootstrap"
+        if workflow != policy.get("swamp", {}).get("repositoryBootstrapWorkflow"):
+            raise BrokerError("repository bootstrap workflow is not allowed")
+        repository = arguments.get("repository")
+        if not isinstance(repository, str) or re.fullmatch(
+            r"[a-z][a-z0-9-]{1,54}", repository
+        ) is None:
+            raise BrokerError("repository must match ^[a-z][a-z0-9-]{1,54}$")
+        return [
+            "swamp",
+            "workflow",
+            "run",
+            workflow,
+            "--input",
+            f"repository={repository}",
+            "--json",
+        ]
     if operation_key == "swamp.get_result":
         model = arguments.get("model")
         name = arguments.get("name")
@@ -131,6 +152,95 @@ def _append_audit(
         handle.write(json.dumps(record, sort_keys=True) + "\n")
 
 
+def _repository_plan_result(
+    workflow_result: dict[str, Any],
+    *,
+    expected_repository: str,
+    runner: Callable[..., dict[str, Any]],
+    workspace: Path,
+) -> dict[str, Any]:
+    if not isinstance(workflow_result, dict):
+        raise BrokerError("repository bootstrap run returned an invalid result")
+    workflow_run_id = workflow_result.get("id")
+    if not isinstance(workflow_run_id, str) or not workflow_run_id:
+        raise BrokerError("repository bootstrap run did not return an id")
+    versions: list[int] = []
+    for job in workflow_result.get("jobs", []):
+        if not isinstance(job, dict):
+            continue
+        for step in job.get("steps", []):
+            if not isinstance(step, dict):
+                continue
+            for artifact in step.get("dataArtifacts", []):
+                if (
+                    isinstance(artifact, dict)
+                    and artifact.get("name") == "result"
+                    and isinstance(artifact.get("version"), int)
+                    and not isinstance(artifact.get("version"), bool)
+                    and artifact["version"] > 0
+                ):
+                    versions.append(artifact["version"])
+    if len(versions) != 1:
+        raise BrokerError("repository bootstrap run did not produce exactly one result artifact")
+    version = versions[0]
+    command = [
+        "swamp",
+        "data",
+        "get",
+        "github-cloudflare-repo-bootstrap",
+        "result",
+        "--version",
+        str(version),
+        "--json",
+    ]
+    completed = runner(command, cwd=workspace, timeout=60)
+    if completed["returncode"] != 0:
+        raise BrokerError("repository bootstrap result retrieval failed")
+    try:
+        artifact = json.loads(completed["stdout"])
+    except json.JSONDecodeError as exc:
+        raise BrokerError("repository bootstrap result returned invalid JSON") from exc
+    if not isinstance(artifact, dict):
+        raise BrokerError("repository bootstrap result returned an invalid JSON object")
+    owner = artifact.get("ownerDefinition")
+    content = artifact.get("content")
+    if (
+        artifact.get("modelName") != "github-cloudflare-repo-bootstrap"
+        or artifact.get("name") != "result"
+        or artifact.get("version") != version
+        or not isinstance(owner, dict)
+        or owner.get("workflowRunId") != workflow_run_id
+        or not isinstance(content, dict)
+        or content.get("exitCode") != 0
+        or not isinstance(content.get("stdout"), str)
+    ):
+        raise BrokerError("repository bootstrap result provenance is invalid")
+    try:
+        plan = json.loads(content["stdout"])
+    except json.JSONDecodeError as exc:
+        raise BrokerError("repository bootstrap plan returned invalid JSON") from exc
+    target = plan.get("target") if isinstance(plan, dict) else None
+    if (
+        not isinstance(plan, dict)
+        or plan.get("schemaVersion") != 1
+        or plan.get("mode") != "plan"
+        or plan.get("readOnly") is not True
+        or not isinstance(plan.get("ready"), bool)
+        or not isinstance(plan.get("blockers"), list)
+    ):
+        raise BrokerError("repository bootstrap plan violated the read-only contract")
+    if (
+        not isinstance(target, dict)
+        or target.get("repository") != expected_repository
+    ):
+        raise BrokerError("repository bootstrap plan target does not match request")
+    return {
+        "workflowRunId": workflow_run_id,
+        "artifactVersion": version,
+        "plan": plan,
+    }
+
+
 def execute_request(
     request: dict[str, Any],
     *,
@@ -155,6 +265,15 @@ def execute_request(
             result = json.loads(completed["stdout"])
         except json.JSONDecodeError as exc:
             raise BrokerError("operation returned invalid JSON") from exc
+        if operation_key == "swamp.plan_github_cloudflare_repository":
+            result = _repository_plan_result(
+                result,
+                expected_repository=(
+                    "sisyphus-org/" + str(request["arguments"]["repository"])
+                ),
+                runner=runner,
+                workspace=workspace,
+            )
     except Exception:
         _append_audit(
             audit_path,
