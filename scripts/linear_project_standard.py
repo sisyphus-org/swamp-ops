@@ -5,9 +5,11 @@ Contract: Project -> Milestones -> Issues -> Sub-issues.
 Milestones are assigned to top-level issues. Sub-issues inherit the grouping
 through their parent and intentionally receive no direct milestone assignment.
 
-Plan mode performs live reads only. Apply mode creates missing objects and never
-updates, moves, archives, or deletes existing Linear objects. Ambiguous matches
-fail closed rather than producing duplicates.
+Plan mode performs live reads only. Apply mode creates missing objects and may
+assign or reassign an explicitly identified existing top-level issue to a
+declared milestone. It never changes existing issue status, project, parent, or
+other fields, and never archives or deletes objects. Ambiguous or inconsistent
+matches fail closed rather than producing duplicates.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -23,6 +26,7 @@ from typing import Any
 
 API_URL = "https://api.linear.app/graphql"
 MAX_ITEMS = 100
+ISSUE_IDENTIFIER = re.compile(r"^[A-Z][A-Z0-9]*-[1-9][0-9]*$")
 
 
 class ContractError(RuntimeError):
@@ -81,6 +85,7 @@ def validate_manifest(raw: dict[str, Any]) -> None:
         raise ContractError("milestones must be a non-empty array")
     seen_milestones: set[str] = set()
     seen_titles: set[str] = set()
+    seen_identifiers: set[str] = set()
     for mi, milestone in enumerate(milestones):
         if not isinstance(milestone, dict):
             raise ContractError(f"milestones[{mi}] must be an object")
@@ -105,6 +110,11 @@ def validate_manifest(raw: dict[str, Any]) -> None:
                 raise ContractError(f"duplicate title across manifest hierarchy: {title}")
             seen_issues.add(title)
             seen_titles.add(title)
+            identifier = issue.get("identifier")
+            if identifier is not None:
+                if identifier in seen_identifiers:
+                    raise ContractError(f"duplicate issue identifier: {identifier}")
+                seen_identifiers.add(identifier)
             for child in issue.get("subIssues", []):
                 child_title = child["title"].strip()
                 if child_title in seen_titles:
@@ -119,10 +129,16 @@ def validate_issue(raw: Any, path: str, *, allow_children: bool) -> None:
         raise ContractError(f"{path} must be an object")
     allowed = {"title", "description", "state"}
     if allow_children:
-        allowed.add("subIssues")
+        allowed.update({"identifier", "subIssues"})
     if set(raw) - allowed:
         raise ContractError(f"{path} contains unsupported fields")
     require_string(raw.get("title"), f"{path}.title")
+    if "identifier" in raw:
+        identifier = require_string(raw["identifier"], f"{path}.identifier")
+        if not ISSUE_IDENTIFIER.fullmatch(identifier):
+            raise ContractError(
+                f"{path}.identifier must be an explicit Linear issue identifier such as SIS-6"
+            )
     if "description" in raw:
         require_string(raw["description"], f"{path}.description")
     if "state" in raw:
@@ -263,6 +279,21 @@ mutation CreateIssue($input: IssueCreateInput!) {
 }
 """
 
+ISSUE_UPDATE = """
+mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) {
+  issueUpdate(id: $id, input: $input) {
+    success
+    issue {
+      id
+      identifier
+      title
+      parent { id }
+      projectMilestone { id name }
+    }
+  }
+}
+"""
+
 
 class LiveContext:
     def __init__(
@@ -353,9 +384,46 @@ def validate_live_references(manifest: dict[str, Any], live: LiveContext) -> Non
                 resolve_state(live.team, child.get("state"))
 
 
+def resolve_identified_issue(
+    live: LiveContext, spec: dict[str, Any]
+) -> dict[str, Any]:
+    """Resolve an existing issue by identifier and verify its immutable scope."""
+    identifier = spec["identifier"]
+    issue = unique(
+        [item for item in live.issues if item["identifier"] == identifier],
+        f"issue identifier {identifier}",
+    )
+    if issue is None:
+        project_name = live.project["name"] if live.project is not None else "<missing>"
+        raise ContractError(
+            f"identified issue not found in project {project_name}: {identifier}"
+        )
+    if issue["title"] != spec["title"]:
+        raise ContractError(
+            f"identified issue title mismatch for {identifier}: expected {spec['title']!r}, "
+            f"found {issue['title']!r}"
+        )
+    if issue["parent"] is not None:
+        raise ContractError(
+            f"identified issue must be top-level and cannot receive a direct milestone: {identifier}"
+        )
+    return issue
+
+
 def build_plan(manifest: dict[str, Any], live: LiveContext) -> list[dict[str, str]]:
     actions: list[dict[str, str]] = []
     if live.project is None:
+        identified = [
+            issue["identifier"]
+            for milestone in manifest["milestones"]
+            for issue in milestone["issues"]
+            if "identifier" in issue
+        ]
+        if identified:
+            raise ContractError(
+                "cannot reconcile identified existing issues because the declared project "
+                f"does not exist: {identified}"
+            )
         actions.append({"action": "create_project", "name": manifest["project"]["name"]})
         for milestone in manifest["milestones"]:
             actions.append({"action": "create_milestone", "name": milestone["name"]})
@@ -376,37 +444,52 @@ def build_plan(manifest: dict[str, Any], live: LiveContext) -> list[dict[str, st
         else:
             milestone_id = live_milestone["id"]
         for issue in milestone["issues"]:
-            same_title = [item for item in live.issues if item["title"] == issue["title"]]
-            if len(same_title) > 1:
-                raise ContractError(
-                    f"duplicate live issue title in project: {issue['title']}"
-                )
-            correct = [
-                item
-                for item in same_title
-                if item["parent"] is None
-                and milestone_id is not None
-                and item["projectMilestone"] is not None
-                and item["projectMilestone"]["id"] == milestone_id
-            ]
-            parent = unique(correct, f"top-level issue {issue['title']}")
-            if parent is None and same_title:
-                raise ContractError(
-                    f"issue title already exists in a different hierarchy: {issue['title']}"
-                )
-            if parent is None:
-                for child in issue.get("subIssues", []):
-                    collisions = [
-                        item for item in live.issues if item["title"] == child["title"]
-                    ]
-                    if collisions:
-                        raise ContractError(
-                            f"sub-issue title already exists in a different hierarchy: {child['title']}"
-                        )
-                actions.append({"action": "create_issue", "milestone": milestone["name"], "title": issue["title"]})
-                for child in issue.get("subIssues", []):
-                    actions.append({"action": "create_sub_issue", "parent": issue["title"], "title": child["title"]})
-                continue
+            if "identifier" in issue:
+                parent = resolve_identified_issue(live, issue)
+                current = parent["projectMilestone"]
+                if milestone_id is None or current is None or current["id"] != milestone_id:
+                    action = "assign_issue_milestone" if current is None else "reassign_issue_milestone"
+                    planned = {
+                        "action": action,
+                        "id": issue["identifier"],
+                        "title": issue["title"],
+                        "milestone": milestone["name"],
+                    }
+                    if current is not None:
+                        planned["from"] = current["name"]
+                    actions.append(planned)
+            else:
+                same_title = [item for item in live.issues if item["title"] == issue["title"]]
+                if len(same_title) > 1:
+                    raise ContractError(
+                        f"duplicate live issue title in project: {issue['title']}"
+                    )
+                correct = [
+                    item
+                    for item in same_title
+                    if item["parent"] is None
+                    and milestone_id is not None
+                    and item["projectMilestone"] is not None
+                    and item["projectMilestone"]["id"] == milestone_id
+                ]
+                parent = unique(correct, f"top-level issue {issue['title']}")
+                if parent is None and same_title:
+                    raise ContractError(
+                        f"issue title already exists in a different hierarchy: {issue['title']}"
+                    )
+                if parent is None:
+                    for child in issue.get("subIssues", []):
+                        collisions = [
+                            item for item in live.issues if item["title"] == child["title"]
+                        ]
+                        if collisions:
+                            raise ContractError(
+                                f"sub-issue title already exists in a different hierarchy: {child['title']}"
+                            )
+                    actions.append({"action": "create_issue", "milestone": milestone["name"], "title": issue["title"]})
+                    for child in issue.get("subIssues", []):
+                        actions.append({"action": "create_sub_issue", "parent": issue["title"], "title": child["title"]})
+                    continue
             for child in issue.get("subIssues", []):
                 same_child_title = [
                     item for item in live.issues if item["title"] == child["title"]
@@ -483,17 +566,39 @@ def create_issue(
     return payload["issue"]
 
 
+def update_issue_milestone(
+    client: LinearClient, *, issue: dict[str, Any], milestone: dict[str, Any]
+) -> dict[str, Any]:
+    """Change only the milestone of a verified existing top-level issue."""
+    payload = client.execute(
+        ISSUE_UPDATE,
+        {
+            "id": issue["id"],
+            "input": {"projectMilestoneId": milestone["id"]},
+        },
+    )["issueUpdate"]
+    updated = payload["issue"]
+    if not payload["success"] or updated is None:
+        raise ContractError(f"Linear did not update issue {issue['identifier']}")
+    if (
+        updated["id"] != issue["id"]
+        or updated["identifier"] != issue["identifier"]
+        or updated["title"] != issue["title"]
+        or updated["parent"] is not None
+        or updated["projectMilestone"] is None
+        or updated["projectMilestone"]["id"] != milestone["id"]
+    ):
+        raise ContractError(
+            f"Linear returned an inconsistent milestone update for {issue['identifier']}"
+        )
+    return updated
+
+
 def apply_manifest(client: LinearClient, manifest: dict[str, Any], live: LiveContext) -> list[dict[str, str]]:
+    # Re-run the complete read-only reconciliation first so every identifier,
+    # title, parent, milestone, and collision is validated before the first write.
+    build_plan(manifest, live)
     applied: list[dict[str, str]] = []
-    declared_titles = {
-        spec["title"]
-        for milestone in manifest["milestones"]
-        for issue in milestone["issues"]
-        for spec in [issue, *issue.get("subIssues", [])]
-    }
-    for title in declared_titles:
-        if sum(1 for item in live.issues if item["title"] == title) > 1:
-            raise ContractError(f"duplicate live issue title in project: {title}")
     project = live.project
     if project is None:
         project = create_project(client, manifest, live.team["id"])
@@ -516,18 +621,37 @@ def apply_manifest(client: LinearClient, manifest: dict[str, Any], live: LiveCon
             milestone_by_name[milestone["name"]] = milestone
             applied.append({"action": "created_milestone", "name": milestone["name"], "id": milestone["id"]})
         for issue_spec in milestone_spec["issues"]:
-            parent_key = (milestone["id"], issue_spec["title"])
-            parent = parent_by_scope.get(parent_key)
-            if parent is None:
-                parent = create_issue(
-                    client,
-                    team=live.team,
-                    project_id=project["id"],
-                    milestone_id=milestone["id"],
-                    spec=issue_spec,
-                )
-                parent_by_scope[parent_key] = parent
-                applied.append({"action": "created_issue", "title": parent["title"], "id": parent["identifier"]})
+            if "identifier" in issue_spec:
+                parent = resolve_identified_issue(live, issue_spec)
+                current = parent["projectMilestone"]
+                if current is None or current["id"] != milestone["id"]:
+                    action = "assigned_issue_milestone" if current is None else "reassigned_issue_milestone"
+                    previous = current["name"] if current is not None else None
+                    parent = update_issue_milestone(
+                        client, issue=parent, milestone=milestone
+                    )
+                    result = {
+                        "action": action,
+                        "id": parent["identifier"],
+                        "title": parent["title"],
+                        "milestone": milestone["name"],
+                    }
+                    if previous is not None:
+                        result["from"] = previous
+                    applied.append(result)
+            else:
+                parent_key = (milestone["id"], issue_spec["title"])
+                parent = parent_by_scope.get(parent_key)
+                if parent is None:
+                    parent = create_issue(
+                        client,
+                        team=live.team,
+                        project_id=project["id"],
+                        milestone_id=milestone["id"],
+                        spec=issue_spec,
+                    )
+                    parent_by_scope[parent_key] = parent
+                    applied.append({"action": "created_issue", "title": parent["title"], "id": parent["identifier"]})
             for child_spec in issue_spec.get("subIssues", []):
                 existing_child = next(
                     (

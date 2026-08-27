@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "team": "Sisyphusx",
+  "project": {"name": "Home Infrastructure"},
+  "milestones": [
+    {
+      "name": "Host and DNS baseline",
+      "issues": [
+        {"identifier": "SIS-7", "title": "Проверка сети: Ethernet подтверждён"},
+        {"identifier": "SIS-14", "title": "Pi-hole: DNS всего дома"},
+        {"identifier": "SIS-21", "title": "Pihole + grafana, prometheus"}
+      ]
+    },
+    {
+      "name": "Secure preview delivery",
+      "issues": [
+        {"identifier": "SIS-44", "title": "Защитить Cloudflare previews через Tailscale и ручной deploy из PR"}
+      ]
+    },
+    {
+      "name": "Cloudflare delivery automation",
+      "issues": [
+        {"identifier": "SIS-47", "title": "Стандартизировать создание Cloudflare repositories через Swamp"}
+      ]
+    }
+  ]
+}

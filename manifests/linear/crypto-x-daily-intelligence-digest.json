@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "team": "Sisyphusx",
+  "project": {"name": "Crypto X Daily Intelligence Digest"},
+  "milestones": [
+    {
+      "name": "Read-only digest MVP",
+      "issues": [
+        {"identifier": "SIS-25", "title": "Crypto X daily intelligence digest (Telegram, read-only)"}
+      ]
+    }
+  ]
+}

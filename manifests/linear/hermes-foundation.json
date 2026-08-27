@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "team": "Sisyphusx",
+  "project": {"name": "Hermes Foundation"},
+  "milestones": [
+    {
+      "name": "Core platform baseline",
+      "issues": [
+        {"identifier": "SIS-6", "title": "Установка memory bank и справочника инфраструктуры"},
+        {"identifier": "SIS-10", "title": "Obsidian: установка headless-клиента"},
+        {"identifier": "SIS-12", "title": "Создание workspace hermes setup в Linear"},
+        {"identifier": "SIS-13", "title": "Obsidian: подключение и синхронизация"},
+        {"identifier": "SIS-17", "title": "Obsidian: синхронизация и рабочий процесс"}
+      ]
+    },
+    {
+      "name": "Integrations and secrets",
+      "issues": [
+        {"identifier": "SIS-8", "title": "GitHub: свести токен к одному источнику"},
+        {"identifier": "SIS-9", "title": "Linear: подключение и проверка записи"},
+        {"identifier": "SIS-11", "title": "GitHub PR workflow: проверка в algos"},
+        {"identifier": "SIS-18", "title": "Varlock https://varlock.dev/"},
+        {"identifier": "SIS-20", "title": "Swampclub , настроить"}
+      ]
+    },
+    {
+      "name": "Secure multi-agent operations",
+      "issues": [
+        {"identifier": "SIS-45", "title": "Operations broker: общий GitHub и Swamp доступ без раздачи ключей"},
+        {"identifier": "SIS-46", "title": "Привести все проекты Linear к структуре Project → Milestone → Issue → Sub-issue"}
+      ]
+    }
+  ]
+}

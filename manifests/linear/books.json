@@ -38,6 +38,32 @@
             {"title": "Ипполит", "state": "Todo"},
             {"title": "Ефигения в Авлиде", "state": "Todo"}
           ]
+        },
+        {
+          "identifier": "SIS-48",
+          "title": "Гомер",
+          "subIssues": [
+            {"title": "Илиада", "state": "In Progress"},
+            {"title": "Одиссея", "state": "Todo"}
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Английская литература",
+      "issues": [
+        {
+          "identifier": "SIS-28",
+          "title": "Джеффри Чосер — Кентерберийские рассказы"
+        }
+      ]
+    },
+    {
+      "name": "Испанская литература",
+      "issues": [
+        {
+          "identifier": "SIS-51",
+          "title": "Мигель де Сервантес — Дон Кихот"
         }
       ]
     }

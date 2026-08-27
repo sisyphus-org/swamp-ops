@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "team": "Sisyphusx",
+  "project": {"name": "Knowledge System"},
+  "milestones": [
+    {
+      "name": "Knowledge foundation",
+      "issues": [
+        {"identifier": "SIS-19", "title": "Knowledge System: структура памяти и самоактуализация"}
+      ]
+    },
+    {
+      "name": "Auditable automation",
+      "issues": [
+        {"identifier": "SIS-22", "title": "Swamp: read-only аудит дрейфа документации"}
+      ]
+    }
+  ]
+}
