@@ -14,14 +14,20 @@ The deterministic Swamp smoke workflow is `ops-broker-readonly-smoke`. Installat
 
 Deterministic bootstrap of a new Hermes profile. Two-phase usage:
 
-1. `swamp workflow run hermes-profile-bootstrap --input profile=<name>` — read-only **plan** (default in the committed workflow).
-2. After reviewing the plan, the operator switches the step to `--mode apply` (or runs the script directly) to create the profile.
+1. `swamp workflow run hermes-profile-bootstrap --input profile=<name> --input role=<general|broker|project-manager>` — read-only **plan** (default in the committed workflow).
+2. After reviewing the plan, run the deterministic script with the same profile and role plus `--mode apply`; it creates only the new profile directory and refuses overwrite.
 
-Writes are scoped to `/Users/hermes/.hermes/profiles/<name>/` only; existing profiles are never overwritten. The default baseline is `openai-codex/gpt-5.6-sol-900k`, local Qwen3-ASR (`ru`), terminal cwd under `/Users/hermes/workspaces`, Linear MCP, and the keyless free fallback chain (`laguna-s-2.1-free`, `nemotron-3.5-lightning-free` via `opencode-free`).
+Writes are scoped to `/Users/hermes/.hermes/profiles/<name>/` only; existing profiles are never overwritten. Every role receives config version 38, `openai-codex/gpt-5.6-sol-900k`, local Qwen3-ASR (`ru`), terminal cwd under `/Users/hermes/workspaces`, and the keyless free fallback chain (`laguna-s-2.1-free`, `nemotron-3.5-lightning-free` via `opencode-free`).
 
-The plan result always lists the variables required before activation. `LINEAR_TOKEN` and `TELEGRAM_ALLOWED_USERS` default to `/Users/hermes/.hermes/.env` through Hermes' command secret source and are not duplicated into profile `.env` files. A profile may explicitly define either key to override the shared default. Each profile keeps its unique `TELEGRAM_BOT_TOKEN` plus optional role-scoped `GH_TOKEN`, `SWAMP_API_KEY`, or `XAI_API_KEY`. Secrets, Telegram tokens, model authentication, LaunchDaemons, and gateway starts remain manual/approval-gated.
+Role baselines fail closed:
 
-Script: `scripts/hermes_profile_bootstrap.py`. Verified 2026-08-26: plan run, apply run, refuse-on-existing — all passed with real inputs.
+- `general`: the established Linear MCP + shared Linear/Telegram allowlist fallback contract.
+- `broker`: Telegram explicitly disabled, dispatcher left disabled for the separate cutover slice, and no Linear MCP or shared secret helper.
+- `project-manager`: Linear MCP enabled through the shared command-secret fallback; Telegram explicitly disabled until the owner inserts a unique profile token and enables the adapter.
+
+The plan reports role-specific required variables and dedicated Gateway safe roots. Secrets, Telegram tokens, model authentication, LaunchDaemon installation, and gateway service starts remain manual/approval-gated. Profile `.env` files are never created or copied by the workflow.
+
+Script: `scripts/hermes_profile_bootstrap.py`. Verified 2026-08-27: role-specific plan runs, apply for `broker` and `project-manager`, config/model/STT checks, and refuse-on-existing behavior passed with real inputs.
 
 ## `linear-project-standard`
 

@@ -17,6 +17,11 @@ inputs:
     type: string
     pattern: "^[a-z][a-z0-9-]{1,30}$"
     description: Name of the Hermes profile to bootstrap.
+  role:
+    type: string
+    enum: [general, broker, project-manager]
+    default: general
+    description: Bounded capability baseline for the profile.
 jobs:
   - name: main
     description: >-
@@ -32,7 +37,7 @@ jobs:
           modelIdOrName: hermes-profile-bootstrap
           methodName: execute
           inputs:
-            run: python3 scripts/hermes_profile_bootstrap.py --profile '${{ inputs.profile }}' --mode plan
+            run: python3 scripts/hermes_profile_bootstrap.py --profile '${{ inputs.profile }}' --role '${{ inputs.role }}' --mode plan
             workingDir: /Users/hermes/workspaces/swamp-ops
             timeout: 60000
             ignoreExitCode: false
