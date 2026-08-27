@@ -11,7 +11,7 @@ Deterministic bootstrap of a new Hermes profile. Two-phase usage:
 
 Writes are scoped to `/Users/hermes/.hermes/profiles/<name>/` only; existing profiles are never overwritten. The default baseline is `openai-codex/gpt-5.6-sol-900k`, local Qwen3-ASR (`ru`), terminal cwd under `/Users/hermes/workspaces`, Linear MCP, and the keyless free fallback chain (`laguna-s-2.1-free`, `nemotron-3.5-lightning-free` via `opencode-free`).
 
-The plan result always lists the variables required before activation. `LINEAR_TOKEN` and the default `TELEGRAM_ALLOWED_USERS` are shared from `/Users/hermes/.hermes/.env` through Hermes' command secret source and are never duplicated into a profile `.env`. A profile may explicitly define `TELEGRAM_ALLOWED_USERS` to override the shared allowlist. Each profile keeps its unique `TELEGRAM_BOT_TOKEN` plus optional role-scoped `GH_TOKEN`, `SWAMP_API_KEY`, or `XAI_API_KEY`. Secrets, Telegram tokens, model authentication, LaunchDaemons, and gateway starts remain manual/approval-gated.
+The plan result always lists the variables required before activation. `LINEAR_TOKEN` and `TELEGRAM_ALLOWED_USERS` default to `/Users/hermes/.hermes/.env` through Hermes' command secret source and are not duplicated into profile `.env` files. A profile may explicitly define either key to override the shared default. Each profile keeps its unique `TELEGRAM_BOT_TOKEN` plus optional role-scoped `GH_TOKEN`, `SWAMP_API_KEY`, or `XAI_API_KEY`. Secrets, Telegram tokens, model authentication, LaunchDaemons, and gateway starts remain manual/approval-gated.
 
 Script: `scripts/hermes_profile_bootstrap.py`. Verified 2026-08-26: plan run, apply run, refuse-on-existing — all passed with real inputs.
 

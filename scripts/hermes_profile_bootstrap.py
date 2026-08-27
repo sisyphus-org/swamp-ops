@@ -57,6 +57,10 @@ PROFILE_ENV_VARS = [
 ]
 OPTIONAL_PROFILE_ENV_VARS = [
     {
+        "name": "LINEAR_TOKEN",
+        "purpose": "optional profile override for the shared Linear MCP credential",
+    },
+    {
         "name": "TELEGRAM_ALLOWED_USERS",
         "purpose": "optional profile override for the shared Telegram allowlist",
     },
@@ -93,14 +97,15 @@ stt:
 gateway:
   multiplex_profiles: false
 
-# Fetch shared LINEAR_TOKEN and, unless the profile explicitly defines its own
-# value, TELEGRAM_ALLOWED_USERS from the default Hermes secret file at startup.
+# Fetch LINEAR_TOKEN and TELEGRAM_ALLOWED_USERS from the default Hermes secret
+# file only when the profile does not explicitly define its own value.
 # Profile-specific bot/GitHub/Swamp credentials remain isolated in this .env.
 secrets:
   command:
     enabled: true
     command: >-
-      grep '^LINEAR_TOKEN=' /Users/hermes/.hermes/.env;
+      if ! grep -q '^LINEAR_TOKEN=' "${{HERMES_HOME}}/.env" 2>/dev/null;
+      then grep '^LINEAR_TOKEN=' /Users/hermes/.hermes/.env; fi;
       if ! grep -q '^TELEGRAM_ALLOWED_USERS=' "${{HERMES_HOME}}/.env" 2>/dev/null;
       then grep '^TELEGRAM_ALLOWED_USERS=' /Users/hermes/.hermes/.env; fi
     helper_timeout_seconds: 3
@@ -256,6 +261,7 @@ def main() -> int:
             "sharedTokenSource": str(SHARED_ENV),
             "sharedTokenPresent": shared_linear_present,
             "profileTokenRequired": False,
+            "profileOverrideSupported": True,
         },
         "telegramAllowlist": {
             "sharedSource": str(SHARED_ENV),

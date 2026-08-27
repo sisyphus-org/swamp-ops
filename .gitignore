@@ -2,9 +2,11 @@
 
 # Runtime data (not needed in version control)
 .swamp/
-__pycache__/
-*.py[cod]
 
 # Local extension sources (developer-specific, not shared)
 .swamp-sources.yaml
 # END swamp managed section
+
+# Python bytecode
+__pycache__/
+*.py[cod]
