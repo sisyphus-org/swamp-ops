@@ -8,6 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import yaml
+
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "hermes_profile_bootstrap.py"
 SPEC = importlib.util.spec_from_file_location("hermes_profile_bootstrap", SCRIPT)
@@ -41,14 +43,18 @@ class BootstrapContractTests(unittest.TestCase):
         self.assertIn("nemotron-3.5-lightning-free", rendered)
         self.assertIn("https://mcp.linear.app/mcp", rendered)
 
-    def test_shared_secrets_and_profile_allowlist_override_contract(self):
+    def test_shared_secrets_and_profile_overrides_contract(self):
         rendered = bootstrap.render_config(
             "openai-codex",
             "gpt-5.6-sol-900k",
             Path("/Users/hermes/workspaces"),
         )
         self.assertIn(
-            "grep '^LINEAR_TOKEN=' /Users/hermes/.hermes/.env",
+            "if ! grep -q '^LINEAR_TOKEN=' \"${HERMES_HOME}/.env\"",
+            rendered,
+        )
+        self.assertIn(
+            "then grep '^LINEAR_TOKEN=' /Users/hermes/.hermes/.env",
             rendered,
         )
         self.assertIn(
@@ -76,6 +82,48 @@ class BootstrapContractTests(unittest.TestCase):
             "TELEGRAM_ALLOWED_USERS",
             [item["name"] for item in bootstrap.OPTIONAL_PROFILE_ENV_VARS],
         )
+        self.assertIn(
+            "LINEAR_TOKEN",
+            [item["name"] for item in bootstrap.OPTIONAL_PROFILE_ENV_VARS],
+        )
+
+    def test_secret_helper_prefers_profile_values_and_falls_back_per_key(self):
+        rendered = bootstrap.render_config(
+            "openai-codex",
+            "gpt-5.6-sol-900k",
+            Path("/Users/hermes/workspaces"),
+        )
+        command = yaml.safe_load(rendered)["secrets"]["command"]["command"]
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = Path(tmp)
+            shared_env = fixture / "shared.env"
+            profile_home = fixture / "profile"
+            profile_home.mkdir()
+            shared_env.write_text(
+                "LINEAR_TOKEN=shared-linear-fixture\n"
+                "TELEGRAM_ALLOWED_USERS=shared-telegram-fixture\n"
+            )
+            (profile_home / ".env").write_text(
+                "LINEAR_TOKEN=profile-linear-fixture\n"
+            )
+            command = command.replace(str(bootstrap.SHARED_ENV), str(shared_env))
+            proc = subprocess.run(
+                command,
+                shell=True,
+                capture_output=True,
+                text=True,
+                check=True,
+                env={"HERMES_HOME": str(profile_home), "PATH": "/usr/bin:/bin"},
+            )
+            values = dict(
+                line.split("=", 1)
+                for line in proc.stdout.splitlines()
+                if "=" in line
+            )
+            self.assertNotIn("LINEAR_TOKEN", values)
+            self.assertEqual(
+                values["TELEGRAM_ALLOWED_USERS"], "shared-telegram-fixture"
+            )
 
     def test_plan_lists_owner_variables_without_writing(self):
         profile = "bootstrap-contract-test"
@@ -94,6 +142,7 @@ class BootstrapContractTests(unittest.TestCase):
             "gpt-5.6-sol-900k (via openai-codex)",
         )
         self.assertFalse(payload["linear"]["profileTokenRequired"])
+        self.assertTrue(payload["linear"]["profileOverrideSupported"])
         self.assertFalse(payload["telegramAllowlist"]["profileValueRequired"])
         self.assertTrue(payload["telegramAllowlist"]["profileOverrideSupported"])
         self.assertEqual(
