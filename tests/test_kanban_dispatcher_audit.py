@@ -1,4 +1,6 @@
+import contextlib
 import importlib.util
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -18,6 +20,11 @@ class DispatcherConfigTests(unittest.TestCase):
         self.assertIs(audit.parse_dispatch_flag("kanban:\n  dispatch_in_gateway: true\n"), True)
         self.assertIs(audit.parse_dispatch_flag("kanban:\n  dispatch_in_gateway: false\n"), False)
         self.assertIsNone(audit.parse_dispatch_flag("kanban:\n  interval: 60\n"))
+        self.assertIsNone(
+            audit.parse_dispatch_flag(
+                "kanban:\n  worker:\n    dispatch_in_gateway: false\n"
+            )
+        )
 
     def test_audit_configs_requires_only_broker_true(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -87,6 +94,14 @@ class DispatcherConfigTests(unittest.TestCase):
             )
             self.assertEqual(report["result"], "pass")
             self.assertTrue(report["readOnly"])
+
+    def test_main_exit_status_tracks_report_result(self):
+        for result, expected in (("pass", 0), ("drift", 1)):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = audit.main(lambda *_args, value=result: {"result": value})
+            self.assertEqual(code, expected)
+            self.assertIn(f'"result": "{result}"', output.getvalue())
 
 
 if __name__ == "__main__":

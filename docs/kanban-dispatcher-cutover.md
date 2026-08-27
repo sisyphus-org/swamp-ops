@@ -22,7 +22,7 @@ The lock is `/Users/hermes/.hermes/kanban/.dispatcher.lock`. Notification delive
 
 ```bash
 cd /Users/hermes/workspaces/swamp-ops
-python3 scripts/kanban_dispatcher_audit.py
+/Users/hermes/.hermes/hermes-agent/venv/bin/python scripts/kanban_dispatcher_audit.py
 swamp workflow run kanban-dispatcher-audit
 ```
 

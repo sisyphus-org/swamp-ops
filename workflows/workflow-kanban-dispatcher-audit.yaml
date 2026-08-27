@@ -19,7 +19,7 @@ jobs:
           modelIdOrName: kanban-dispatcher-audit
           methodName: execute
           inputs:
-            run: python3 scripts/kanban_dispatcher_audit.py
+            run: /Users/hermes/.hermes/hermes-agent/venv/bin/python scripts/kanban_dispatcher_audit.py
             workingDir: /Users/hermes/workspaces/swamp-ops
             timeout: 60000
             ignoreExitCode: false

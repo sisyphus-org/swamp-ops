@@ -4,12 +4,13 @@
 from __future__ import annotations
 
 import json
-import re
 import shlex
 import subprocess
 import sys
 from pathlib import Path
 from typing import Callable
+
+import yaml
 
 
 HERMES_ROOT = Path("/Users/hermes/.hermes")
@@ -26,18 +27,15 @@ EXPECTED_OWNER = "broker"
 
 
 def parse_dispatch_flag(config_text: str) -> bool | None:
-    """Return an explicit kanban.dispatch_in_gateway boolean, or None."""
-    in_kanban = False
-    for raw in config_text.splitlines():
-        if raw and not raw[0].isspace():
-            in_kanban = raw.strip() == "kanban:"
-            continue
-        if not in_kanban:
-            continue
-        match = re.fullmatch(r"\s+dispatch_in_gateway:\s*(true|false)\s*", raw)
-        if match:
-            return match.group(1) == "true"
-    return None
+    """Return a direct boolean kanban.dispatch_in_gateway value, or None."""
+    parsed = yaml.safe_load(config_text)
+    if not isinstance(parsed, dict):
+        return None
+    kanban = parsed.get("kanban")
+    if not isinstance(kanban, dict):
+        return None
+    value = kanban.get("dispatch_in_gateway")
+    return value if type(value) is bool else None
 
 
 def profile_from_gateway_command(command: str) -> str | None:
@@ -124,16 +122,17 @@ def build_report(
     }
 
 
-def main() -> int:
-    """Print the fixed production topology audit without making writes."""
+def main(report_builder: Callable = build_report) -> int:
+    """Print the fixed production topology audit and fail on drift."""
+    report = report_builder(HERMES_ROOT, PROFILES, EXPECTED_OWNER)
     print(
         json.dumps(
-            build_report(HERMES_ROOT, PROFILES, EXPECTED_OWNER),
+            report,
             ensure_ascii=False,
             sort_keys=True,
         )
     )
-    return 0
+    return 0 if report["result"] == "pass" else 1
 
 
 if __name__ == "__main__":
