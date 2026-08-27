@@ -1,0 +1,44 @@
+id: 3f275d3d-8e42-4ccd-92bd-324f7cdb29e0
+name: hermes-profile-bootstrap
+description: >-
+  Deterministic bootstrap of a new Hermes profile: creates the profile
+  directory under /Users/hermes/.hermes/profiles, writes a baseline
+  config.yaml (primary model, keyless free fallback chain, ru STT) and
+  validates the YAML. Plan mode is read-only; apply mode writes only inside
+  the new profile directory and refuses to touch existing profiles. Secrets,
+  Telegram tokens, LaunchDaemons and gateway processes are OUT OF SCOPE and
+  require explicit owner approval outside this workflow.
+tags:
+  domain: hermes-platform
+  safety: scoped-writes-profiles-only
+  owner: swe
+inputs:
+  profile:
+    type: string
+    pattern: "^[a-z][a-z0-9-]{1,30}$"
+    description: Name of the Hermes profile to bootstrap.
+jobs:
+  - name: main
+    description: >-
+      Run the bootstrap script in plan mode first; a separate apply run is
+      performed by the operator after reviewing the plan output.
+    steps:
+      - name: plan
+        description: >-
+          Read-only dry-run: report what would be created for the requested
+          profile name.
+        task:
+          type: model_method
+          modelIdOrName: hermes-profile-bootstrap
+          methodName: execute
+          inputs:
+            run: python3 scripts/hermes_profile_bootstrap.py --profile '${{ inputs.profile }}' --mode plan
+            workingDir: /Users/hermes/workspaces/swamp-ops
+            timeout: 60000
+            ignoreExitCode: false
+        dependsOn: []
+        weight: 1
+        allowFailure: false
+    dependsOn: []
+    weight: 1
+version: 1
