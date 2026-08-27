@@ -70,6 +70,7 @@ Run this exact block from the owner account. It generates 32 random bytes per pe
 ```bash
 sudo -u hermes -H /bin/sh -c 'cd /Users/hermes/workspaces && exec /usr/bin/python3 -' <<'PY'
 from pathlib import Path
+import os
 import secrets
 
 root = Path("/Users/hermes/.hermes")
@@ -96,9 +97,18 @@ tokens = {name: secrets.token_hex(32) for name in profiles}
 
 def append_lines(path: Path, lines: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    existing = path.read_text() if path.exists() else ""
-    separator = "" if not existing or existing.endswith("\n") else "\n"
-    path.write_text(existing + separator + "\n".join(lines) + "\n")
+    needs_separator = False
+    if path.exists() and path.stat().st_size:
+        with path.open("rb") as current:
+            current.seek(-1, os.SEEK_END)
+            needs_separator = current.read(1) != b"\n"
+    # Append-only: existing bytes in the .env file are never rewritten.
+    with path.open("a", encoding="utf-8") as target:
+        if needs_separator:
+            target.write("\n")
+        target.write("\n".join(lines) + "\n")
+        target.flush()
+        os.fsync(target.fileno())
     path.chmod(0o600)
 
 append_lines(
