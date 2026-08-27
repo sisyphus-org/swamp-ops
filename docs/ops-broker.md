@@ -63,7 +63,64 @@ Do not install the plugin into secondary profiles.
 
 ### 2. Create peer credentials — owner only
 
-Generate one independent value for each peer. Never paste values into chat or commit them.
+The placeholders are not provider-issued credentials. Generate four new random local secrets: one each for `books`, `crypto-analyst`, `ideas`, and `swe`. The same peer secret must appear in two places because it is a client/server credential: in default's `A2A_PEER_TOKENS` mapping and only in that peer's profile `.env` as `OPS_BROKER_A2A_TOKEN`.
+
+Run this exact block from the owner account. It generates 32 random bytes per peer, writes them as 64 hexadecimal characters, refuses to overwrite or duplicate existing keys, sets `.env` permissions to `0600`, and never prints the values:
+
+```bash
+sudo -u hermes /usr/bin/python3 <<'PY'
+from pathlib import Path
+import secrets
+
+root = Path("/Users/hermes/.hermes")
+profiles = ["books", "crypto-analyst", "ideas", "swe"]
+root_env = root / ".env"
+profile_envs = {name: root / "profiles" / name / ".env" for name in profiles}
+
+def has_key(path: Path, key: str) -> bool:
+    if not path.exists():
+        return False
+    return any(line.startswith(f"{key}=") for line in path.read_text().splitlines())
+
+# Preflight everything before writing anything.
+for key in ("A2A_PEER_TOKENS", "A2A_TRUSTED_PEERS"):
+    if has_key(root_env, key):
+        raise SystemExit(f"Refusing to continue: {key} already exists in {root_env}")
+for name, path in profile_envs.items():
+    if has_key(path, "OPS_BROKER_A2A_TOKEN"):
+        raise SystemExit(
+            f"Refusing to continue: OPS_BROKER_A2A_TOKEN already exists in {path}"
+        )
+
+tokens = {name: secrets.token_hex(32) for name in profiles}
+
+def append_lines(path: Path, lines: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = path.read_text() if path.exists() else ""
+    separator = "" if not existing or existing.endswith("\n") else "\n"
+    path.write_text(existing + separator + "\n".join(lines) + "\n")
+    path.chmod(0o600)
+
+append_lines(
+    root_env,
+    [
+        "A2A_PEER_TOKENS=" + ",".join(
+            f"{name}:{tokens[name]}" for name in profiles
+        ),
+        "A2A_TRUSTED_PEERS=" + ",".join(profiles),
+    ],
+)
+for name, path in profile_envs.items():
+    append_lines(path, [f"OPS_BROKER_A2A_TOKEN={tokens[name]}"])
+
+# Remove references as soon as writes complete; values were never printed.
+for name in profiles:
+    tokens[name] = ""
+print("Created four distinct A2A peer credentials without displaying them.")
+PY
+```
+
+Resulting placement (placeholders below explain the mapping; do not copy them literally):
 
 Default `/Users/hermes/.hermes/.env`:
 
@@ -72,12 +129,14 @@ A2A_PEER_TOKENS=books:<books-token>,crypto-analyst:<crypto-token>,ideas:<ideas-t
 A2A_TRUSTED_PEERS=books,crypto-analyst,ideas,swe
 ```
 
-Each profile stores only its own broker credential:
+Each profile stores only its own corresponding credential:
 
 ```dotenv
 # ~/.hermes/profiles/<profile>/.env
 OPS_BROKER_A2A_TOKEN=<that-profile-token>
 ```
+
+Never paste token values into chat, notes, commits, or command arguments.
 
 ### 3. Configure default through the Hermes CLI
 
