@@ -15,6 +15,34 @@ The plan result always lists the variables required before activation. `LINEAR_T
 
 Script: `scripts/hermes_profile_bootstrap.py`. Verified 2026-08-26: plan run, apply run, refuse-on-existing — all passed with real inputs.
 
+## `linear-project-standard`
+
+Organization-wide Linear hierarchy contract:
+
+```text
+Project → Milestones → Issues → Sub-issues
+```
+
+Each project instance is declared in `manifests/linear/<slug>.json`. The manifest contains no credentials and uses neutral structural names: milestones are the grouping layer inside a project, issues are the primary tracked work/entities, and sub-issues are the concrete child work.
+
+Run through Swamp in two phases:
+
+```bash
+# Read-only live reconciliation plan
+swamp workflow run linear-project-standard \
+  --input manifest=books \
+  --input mode=plan
+
+# Apply only after reviewing the plan
+swamp workflow run linear-project-standard \
+  --input manifest=books \
+  --input mode=apply
+```
+
+The workflow reads `LINEAR_TOKEN` from the calling environment, creates only missing objects, fails closed on ambiguous titles or hierarchy conflicts, and reads the project back after apply. Manifest titles must be unique across the declared hierarchy so reconciliation remains deterministic. It never moves, edits, archives, or deletes existing Linear objects. The initial `books` manifest demonstrates the standard with the project «Книги» and its milestone «Древнегреческая литература».
+
+Recommended Linear board settings: group by **Project milestone** and turn **Sub-issues** off. The board then shows milestone groups with top-level issues as cards; sub-issues remain inside their parent issue. Milestones are assigned only to top-level issues; sub-issues belong to that grouping through their parent and do not receive a direct milestone assignment.
+
 ## Repository rules
 
 - Work on `agent/<name>` branches; commit verified changes before merge/review.
