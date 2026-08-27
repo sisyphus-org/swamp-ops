@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "team": "Sisyphusx",
+  "project": {"name": "Hermes Experience"},
+  "milestones": [
+    {
+      "name": "Voice interaction",
+      "issues": [
+        {"identifier": "SIS-15", "title": "TTS: завести синтез речи"}
+      ]
+    },
+    {
+      "name": "Profiles and role separation",
+      "issues": [
+        {"identifier": "SIS-16", "title": "Профили Hermes: раскладка и ограничения"}
+      ]
+    }
+  ]
+}

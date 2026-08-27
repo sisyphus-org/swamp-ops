@@ -3,12 +3,13 @@ name: linear-project-standard
 description: >-
   Reconcile a Linear project to the organization-wide hierarchy Project ->
   Milestones -> Issues -> Sub-issues from a committed manifest. Plan mode is
-  read-only. Apply mode is create-only, fails closed on ambiguous matches, and
-  verifies the resulting hierarchy by reading it back from Linear.
+  read-only. Apply creates missing hierarchy objects and may change only the
+  milestone of an explicitly identified, exact-title, top-level existing issue.
+  It fails closed and verifies the hierarchy by reading it back from Linear.
 tags:
   domain: project-management
   integration: linear
-  safety: plan-first-create-only
+  safety: plan-first-narrow-update
 inputs:
   manifest:
     type: string
@@ -17,22 +18,22 @@ inputs:
   mode:
     type: string
     pattern: "^(plan|apply)$"
-    description: Run a read-only plan or apply the reviewed create-only plan.
+    description: Run a read-only plan or apply the reviewed narrow-write plan.
 jobs:
   - name: main
     description: Apply the standard Linear hierarchy from a validated manifest.
     steps:
       - name: reconcile
         description: >-
-          Plan or create missing project hierarchy objects. Existing objects
-          are never moved, edited, archived, or deleted.
+          Plan or reconcile project hierarchy. Existing issues may only have
+          projectMilestoneId assigned after identifier, title, and parent checks.
         task:
           type: model_method
           modelIdOrName: linear-project-standard
           methodName: execute
           inputs:
             run: python3 scripts/linear_project_standard.py --manifest 'manifests/linear/${{ inputs.manifest }}.json' --mode '${{ inputs.mode }}'
-            workingDir: /Users/hermes/workspaces/swamp-ops
+            workingDir: .
             timeout: 120000
             ignoreExitCode: false
         dependsOn: []
