@@ -68,7 +68,8 @@ The placeholders are not provider-issued credentials. Generate four new random l
 Run this exact block from the owner account. It generates 32 random bytes per peer, writes them as 64 hexadecimal characters, refuses to overwrite or duplicate existing keys, sets `.env` permissions to `0600`, and never prints the values:
 
 ```bash
-sudo -u hermes /usr/bin/python3 <<'PY'
+cd /Users/hermes/workspaces || exit 1
+sudo -u hermes -H /usr/bin/python3 <<'PY'
 from pathlib import Path
 import secrets
 
