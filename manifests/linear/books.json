@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "team": "Sisyphusx",
+  "project": {
+    "name": "Книги",
+    "description": "Чтение: книги, прогресс, направления и заметки."
+  },
+  "milestones": [
+    {
+      "name": "Древнегреческая литература",
+      "description": "Направление чтения древнегреческой драматургии.",
+      "issues": [
+        {
+          "title": "Эсхил",
+          "state": "Todo",
+          "subIssues": [
+            {"title": "Персы", "state": "Todo"},
+            {"title": "Агамемнон", "state": "Todo"},
+            {"title": "Эвмениды", "state": "Todo"},
+            {"title": "Прометей прикованный", "state": "Done"}
+          ]
+        },
+        {
+          "title": "Софокл",
+          "state": "Todo",
+          "subIssues": [
+            {"title": "Антигона", "state": "Done"},
+            {"title": "Царь Эдип", "state": "Done"},
+            {"title": "Электра", "state": "Todo"}
+          ]
+        },
+        {
+          "title": "Эврипид",
+          "state": "Todo",
+          "subIssues": [
+            {"title": "Медея", "state": "Todo"},
+            {"title": "Вакханки", "state": "Todo"},
+            {"title": "Ипполит", "state": "Todo"},
+            {"title": "Ефигения в Авлиде", "state": "Todo"}
+          ]
+        }
+      ]
+    }
+  ]
+}

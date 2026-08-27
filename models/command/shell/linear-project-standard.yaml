@@ -1,0 +1,11 @@
+type: command/shell
+typeVersion: 2026.02.09.1
+id: f1ca2079-70f9-4f54-9d35-b1883ca24eea
+name: linear-project-standard
+version: 1
+tags:
+  domain: project-management
+  integration: linear
+  safety: plan-first-create-only
+globalArguments: {}
+methods: {}
