@@ -1,0 +1,30 @@
+id: 09b4dd34-f62f-48ae-a999-9505a832b27b
+name: ops-broker-readonly-smoke
+description: >-
+  Deterministic read-only smoke workflow for the Hermes operations broker.
+  It performs no network calls and writes only Swamp's normal immutable run artifacts.
+tags:
+  domain: hermes-platform
+  safety: read-only
+  owner: default
+jobs:
+  - name: main
+    description: Verify the broker workflow runtime with a fixed command.
+    steps:
+      - name: smoke
+        description: Emit a typed read-only health result.
+        task:
+          type: model_method
+          modelIdOrName: ops-broker-readonly-smoke
+          methodName: execute
+          inputs:
+            run: python3 scripts/ops_broker_readonly_smoke.py
+            workingDir: /Users/hermes/workspaces/swamp-ops
+            timeout: 60000
+            ignoreExitCode: false
+        dependsOn: []
+        weight: 1
+        allowFailure: false
+    dependsOn: []
+    weight: 1
+version: 1
