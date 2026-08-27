@@ -1,6 +1,14 @@
 # Swamp operations
 
-init
+Operational workflows and the reviewed Hermes operations-broker plugin. Runtime state under `.swamp/` and credentials are never committed.
+
+## `ops-broker`
+
+`plugins/ops_broker` is the narrow A2A capability surface for the trusted `default` Hermes Manager. It derives caller identity from the authenticated A2A session, validates an exact request contract, applies per-peer/target allowlists, executes only fixed `shell=False` argv, and writes secret-free audit records.
+
+The initial surface is read-only: GitHub repository/PR/check reads and allowlisted Swamp identity/validation/run/result operations. `mode: apply`, arbitrary commands, URLs, credentials, and unlisted targets fail closed.
+
+The deterministic Swamp smoke workflow is `ops-broker-readonly-smoke`. Installation, peer-token setup, A2A configuration, verification, recovery, and remote-access constraints are documented in [`docs/ops-broker.md`](docs/ops-broker.md).
 
 ## `hermes-profile-bootstrap`
 

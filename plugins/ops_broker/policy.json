@@ -1,0 +1,73 @@
+{
+  "version": 1,
+  "workspace": "/Users/hermes/workspaces/swamp-ops",
+  "peers": {
+    "books": {
+      "operations": [
+        "github.repository_access",
+        "github.list_pull_requests",
+        "github.pull_request_checks",
+        "swamp.auth_whoami",
+        "swamp.validate_model",
+        "swamp.validate_workflow",
+        "swamp.run_readonly_workflow",
+        "swamp.get_result"
+      ]
+    },
+    "crypto-analyst": {
+      "operations": [
+        "github.repository_access",
+        "github.list_pull_requests",
+        "github.pull_request_checks",
+        "swamp.auth_whoami",
+        "swamp.validate_model",
+        "swamp.validate_workflow",
+        "swamp.run_readonly_workflow",
+        "swamp.get_result"
+      ]
+    },
+    "ideas": {
+      "operations": [
+        "github.repository_access",
+        "github.list_pull_requests",
+        "github.pull_request_checks",
+        "swamp.auth_whoami",
+        "swamp.validate_model",
+        "swamp.validate_workflow",
+        "swamp.run_readonly_workflow",
+        "swamp.get_result"
+      ]
+    },
+    "swe": {
+      "operations": [
+        "github.repository_access",
+        "github.list_pull_requests",
+        "github.pull_request_checks",
+        "swamp.auth_whoami",
+        "swamp.validate_model",
+        "swamp.validate_workflow",
+        "swamp.run_readonly_workflow",
+        "swamp.get_result"
+      ]
+    }
+  },
+  "github": {
+    "repositories": [
+      "sisyphus-org/swamp-ops"
+    ]
+  },
+  "swamp": {
+    "models": [
+      "ops-broker-readonly-smoke"
+    ],
+    "workflows": [
+      "ops-broker-readonly-smoke"
+    ],
+    "data": [
+      {
+        "model": "ops-broker-readonly-smoke",
+        "name": "result"
+      }
+    ]
+  }
+}
