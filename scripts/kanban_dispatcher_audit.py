@@ -28,7 +28,10 @@ EXPECTED_OWNER = "broker"
 
 def parse_dispatch_flag(config_text: str) -> bool | None:
     """Return a direct boolean kanban.dispatch_in_gateway value, or None."""
-    parsed = yaml.safe_load(config_text)
+    try:
+        parsed = yaml.safe_load(config_text)
+    except (yaml.YAMLError, ValueError, KeyError, IndexError):
+        return None
     if not isinstance(parsed, dict):
         return None
     kanban = parsed.get("kanban")

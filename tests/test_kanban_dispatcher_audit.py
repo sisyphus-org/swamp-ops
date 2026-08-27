@@ -25,6 +25,7 @@ class DispatcherConfigTests(unittest.TestCase):
                 "kanban:\n  worker:\n    dispatch_in_gateway: false\n"
             )
         )
+        self.assertIsNone(audit.parse_dispatch_flag("kanban: [unterminated\n"))
 
     def test_audit_configs_requires_only_broker_true(self):
         with tempfile.TemporaryDirectory() as tmp:
