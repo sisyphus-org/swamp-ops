@@ -176,7 +176,10 @@ HERMES_HOME="$HOME_PATH" hermes config check
 ### 5. Restart — owner only
 
 ```bash
-sudo launchctl kickstart -k system/local.hermes.gateway
+# default is currently supervised by user LaunchAgent ai.hermes.gateway
+sudo -u hermes -H /bin/sh -c 'cd /Users/hermes/.hermes && exec /Users/hermes/.local/bin/hermes gateway restart'
+
+# secondary profiles are system LaunchDaemons
 sudo launchctl kickstart -k system/local.hermes.gateway-books
 sudo launchctl kickstart -k system/local.hermes.gateway-crypto-analyst
 sudo launchctl kickstart -k system/local.hermes.gateway-ideas
