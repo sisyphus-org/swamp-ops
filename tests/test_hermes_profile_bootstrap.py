@@ -42,6 +42,20 @@ class BootstrapContractTests(unittest.TestCase):
         self.assertIn("laguna-s-2.1-free", rendered)
         self.assertIn("nemotron-3.5-lightning-free", rendered)
         self.assertIn("https://mcp.linear.app/mcp", rendered)
+        self.assertEqual(yaml.safe_load(rendered)["_config_version"], 38)
+
+    def test_broker_role_is_headless_and_has_no_linear_mcp(self):
+        rendered = bootstrap.render_config(
+            "openai-codex",
+            "gpt-5.6-sol-900k",
+            Path("/Users/hermes/workspaces"),
+            role="broker",
+        )
+        parsed = yaml.safe_load(rendered)
+        self.assertFalse(parsed["gateway"]["platforms"]["telegram"]["enabled"])
+        self.assertFalse(parsed["kanban"]["dispatch_in_gateway"])
+        self.assertNotIn("mcp_servers", parsed)
+        self.assertNotIn("secrets", parsed)
 
     def test_shared_secrets_and_profile_overrides_contract(self):
         rendered = bootstrap.render_config(
@@ -151,6 +165,60 @@ class BootstrapContractTests(unittest.TestCase):
         )
         self.assertFalse(profile_dir.exists())
 
+    def test_project_manager_plan_requires_unique_token_before_activation(self):
+        profile = "project-manager-contract-test"
+        profile_dir = bootstrap.HERMES_ROOT / profile
+        self.assertFalse(profile_dir.exists())
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "--profile",
+                profile,
+                "--role",
+                "project-manager",
+                "--mode",
+                "plan",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        payload = json.loads(proc.stdout)
+        self.assertEqual(payload["role"], "project-manager")
+        self.assertFalse(payload["telegram"]["enabledAtBootstrap"])
+        self.assertTrue(payload["linear"]["enabled"])
+        self.assertEqual(
+            {item["name"] for item in payload["requiredProfileEnv"]},
+            {"TELEGRAM_BOT_TOKEN"},
+        )
+        self.assertFalse(profile_dir.exists())
+
+    def test_broker_plan_requires_no_shared_or_profile_secrets(self):
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "--profile",
+                "broker-contract-test",
+                "--role",
+                "broker",
+                "--mode",
+                "plan",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        payload = json.loads(proc.stdout)
+        self.assertEqual(payload["role"], "broker")
+        self.assertEqual(payload["requiredSharedEnv"], [])
+        self.assertEqual(payload["requiredProfileEnv"], [])
+        self.assertFalse(payload["linear"]["enabled"])
+        self.assertFalse(payload["telegram"]["preparedForOwnerToken"])
+        self.assertFalse(payload["telegramAllowlist"]["profileOverrideSupported"])
+        self.assertIsNone(payload["telegramAllowlist"]["sharedSource"])
+
     def test_rejects_invalid_profile_name(self):
         proc = subprocess.run(
             [sys.executable, str(SCRIPT), "--profile", "BAD", "--mode", "plan"],
@@ -247,6 +315,18 @@ class BootstrapContractTests(unittest.TestCase):
         self.assertNotIn("inputs.model", workflow)
         self.assertNotIn("inputs.workspace", workflow)
         self.assertIn("--profile '${{ inputs.profile }}'", workflow)
+
+    def test_workflow_routes_a_bounded_role_input(self):
+        workflow_path = (
+            SCRIPT.parents[1] / "workflows" / "workflow-hermes-profile-bootstrap.yaml"
+        )
+        parsed = yaml.safe_load(workflow_path.read_text())
+        self.assertEqual(
+            parsed["inputs"]["role"]["enum"],
+            ["general", "broker", "project-manager"],
+        )
+        command = parsed["jobs"][0]["steps"][0]["task"]["inputs"]["run"]
+        self.assertIn("--role '${{ inputs.role }}'", command)
 
     def test_apply_writes_only_fixture_root_and_refuses_overwrite(self):
         old_root = getattr(bootstrap, "HERMES_ROOT")
