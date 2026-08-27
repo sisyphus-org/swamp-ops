@@ -17,10 +17,6 @@ inputs:
     type: string
     pattern: "^[a-z][a-z0-9-]{1,30}$"
     description: Name of the Hermes profile to bootstrap.
-  model:
-    type: string
-    default: nous/stealth/ox-alpha
-    description: Primary model as provider/model.
 jobs:
   - name: main
     description: >-
@@ -36,7 +32,7 @@ jobs:
           modelIdOrName: hermes-profile-bootstrap
           methodName: execute
           inputs:
-            run: python3 scripts/hermes_profile_bootstrap.py --profile ${{ inputs.profile }} --mode plan --model ${{ inputs.model }}
+            run: python3 scripts/hermes_profile_bootstrap.py --profile '${{ inputs.profile }}' --mode plan
             workingDir: /Users/hermes/workspaces/swamp-ops
             timeout: 60000
             ignoreExitCode: false
