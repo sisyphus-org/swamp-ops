@@ -106,9 +106,9 @@ secrets:
   command:
     enabled: true
     command: >-
-      if ! grep -q '^LINEAR_TOKEN=' "${HERMES_HOME}/.env" 2>/dev/null;
+      if ! grep -q '^LINEAR_TOKEN=.*[^[:space:]]' "${HERMES_HOME}/.env" 2>/dev/null;
       then grep '^LINEAR_TOKEN=' /Users/hermes/.hermes/.env; fi;
-      if ! grep -q '^TELEGRAM_ALLOWED_USERS=' "${HERMES_HOME}/.env" 2>/dev/null;
+      if ! grep -q '^TELEGRAM_ALLOWED_USERS=.*[^[:space:]]' "${HERMES_HOME}/.env" 2>/dev/null;
       then grep '^TELEGRAM_ALLOWED_USERS=' /Users/hermes/.hermes/.env; fi
     helper_timeout_seconds: 3
     override_existing: true

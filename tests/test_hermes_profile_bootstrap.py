@@ -64,7 +64,7 @@ class BootstrapContractTests(unittest.TestCase):
             Path("/Users/hermes/workspaces"),
         )
         self.assertIn(
-            "if ! grep -q '^LINEAR_TOKEN=' \"${HERMES_HOME}/.env\"",
+            "if ! grep -q '^LINEAR_TOKEN=.*[^[:space:]]' \"${HERMES_HOME}/.env\"",
             rendered,
         )
         self.assertIn(
@@ -72,7 +72,7 @@ class BootstrapContractTests(unittest.TestCase):
             rendered,
         )
         self.assertIn(
-            "if ! grep -q '^TELEGRAM_ALLOWED_USERS=' \"${HERMES_HOME}/.env\"",
+            "if ! grep -q '^TELEGRAM_ALLOWED_USERS=.*[^[:space:]]' \"${HERMES_HOME}/.env\"",
             rendered,
         )
         self.assertIn(
@@ -135,6 +135,44 @@ class BootstrapContractTests(unittest.TestCase):
                 if "=" in line
             )
             self.assertNotIn("LINEAR_TOKEN", values)
+            self.assertEqual(
+                values["TELEGRAM_ALLOWED_USERS"], "shared-telegram-fixture"
+            )
+
+    def test_secret_helper_treats_blank_profile_values_as_absent(self):
+        rendered = bootstrap.render_config(
+            "openai-codex",
+            "gpt-5.6-sol-900k",
+            Path("/Users/hermes/workspaces"),
+        )
+        command = yaml.safe_load(rendered)["secrets"]["command"]["command"]
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = Path(tmp)
+            shared_env = fixture / "shared.env"
+            profile_home = fixture / "profile"
+            profile_home.mkdir()
+            shared_env.write_text(
+                "LINEAR_TOKEN=shared-linear-fixture\n"
+                "TELEGRAM_ALLOWED_USERS=shared-telegram-fixture\n"
+            )
+            (profile_home / ".env").write_text(
+                "LINEAR_TOKEN=\nTELEGRAM_ALLOWED_USERS=   \n"
+            )
+            command = command.replace(str(bootstrap.SHARED_ENV), str(shared_env))
+            proc = subprocess.run(
+                command,
+                shell=True,
+                capture_output=True,
+                text=True,
+                check=True,
+                env={"HERMES_HOME": str(profile_home), "PATH": "/usr/bin:/bin"},
+            )
+            values = dict(
+                line.split("=", 1)
+                for line in proc.stdout.splitlines()
+                if "=" in line
+            )
+            self.assertEqual(values["LINEAR_TOKEN"], "shared-linear-fixture")
             self.assertEqual(
                 values["TELEGRAM_ALLOWED_USERS"], "shared-telegram-fixture"
             )
