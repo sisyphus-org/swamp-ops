@@ -29,7 +29,6 @@ jobs:
           methodName: execute
           inputs:
             run: python3 scripts/github_cloudflare_repo_bootstrap.py --repository '${{ inputs.repository }}'
-            workingDir: /Users/hermes/workspaces/swamp-ops
             timeout: 60000
             ignoreExitCode: false
         dependsOn: []

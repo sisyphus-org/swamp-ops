@@ -78,6 +78,21 @@ class InputTests(unittest.TestCase):
         self.assertLessEqual(len(f"{value}-preview"), 63)
 
 
+class WorkflowContractTests(unittest.TestCase):
+    def test_workflow_uses_the_broker_configured_workspace(self):
+        workflow = (
+            Path(__file__).parents[1]
+            / "workflows"
+            / "workflow-github-cloudflare-repo-bootstrap.yaml"
+        ).read_text()
+
+        self.assertNotIn("workingDir:", workflow)
+        self.assertIn(
+            "run: python3 scripts/github_cloudflare_repo_bootstrap.py --repository",
+            workflow,
+        )
+
+
 class PlanTests(unittest.TestCase):
     def setUp(self):
         self.previous_approved_revision = planner.STANDARD.get(
