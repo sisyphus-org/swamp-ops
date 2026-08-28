@@ -132,6 +132,17 @@ class ExecutionTests(unittest.TestCase):
         self.assertIn("https://linear.app/SIS-61", human_summary(applied))
         self.assertIn("уже выполнен", human_summary(replay))
 
+    def test_human_summary_distinguishes_create(self):
+        created = {
+            "operation": "create_issue",
+            "result": "applied",
+            "verified": True,
+            "target": {"identifier": "SIS-99", "url": "https://linear.app/SIS-99"},
+        }
+        summary = human_summary(created)
+        self.assertIn("создана", summary)
+        self.assertIn("https://linear.app/SIS-99", summary)
+
     def test_human_summary_renders_read_before_noop(self):
         read = {
             "operation": "read_issue",

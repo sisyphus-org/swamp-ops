@@ -5,15 +5,16 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .audit import audit_route as bundled_audit_route
-from .route import RouteError, SourceContext, route_request
+from .route import RouteError, SourceContext, is_source_profile, route_request
 
-SWE_LINEAR_REQUEST_SCHEMA = {
-    "name": "swe_linear_request",
+LINEAR_SOURCE_REQUEST_SCHEMA = {
+    "name": "linear_source_request",
     "description": (
-        "Route one bounded owner request about an exact SIS-N Linear issue through "
-        "the project-manager Kanban lane. Use this for an exact request such as "
-        "'Добавь к SIS-61 комментарий: ...'. The tool never mutates Linear from SWE; "
-        "it creates or replays one audited wake-only task and returns its state."
+        "Route one bounded Linear request from an allowed user-facing profile "
+        "through the project-manager Kanban lane. Accepts an exact comment text, "
+        "a structured change_state request, or a structured create_issue request. "
+        "The calling profile never mutates Linear directly; the tool creates or "
+        "replays one audited wake-only task and returns its state."
     ),
     "parameters": {
         "type": "object",
@@ -23,10 +24,39 @@ SWE_LINEAR_REQUEST_SCHEMA = {
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 4200,
-                "description": "The owner's original request text, preserved exactly.",
-            }
+                "description": "Exact bounded comment request text.",
+            },
+            "operation": {"type": "string", "enum": ["change_state", "create_issue"]},
+            "identifier": {
+                "type": "string",
+                "pattern": "^SIS-[1-9][0-9]*$",
+            },
+            "state": {
+                "type": "string",
+                "enum": ["Backlog", "Todo", "Research", "In Progress", "In Review"],
+            },
+            "title": {"type": "string", "minLength": 1, "maxLength": 200},
+            "description": {"type": "string", "maxLength": 10000},
+            "parent_identifier": {
+                "type": "string",
+                "pattern": "^SIS-[1-9][0-9]*$",
+            },
+            "priority": {"type": "string", "enum": ["High", "Medium", "Low"]},
         },
-        "required": ["request"],
+        "oneOf": [
+            {"required": ["request"]},
+            {"required": ["operation", "identifier", "state"]},
+            {
+                "required": [
+                    "operation",
+                    "title",
+                    "description",
+                    "parent_identifier",
+                    "state",
+                    "priority",
+                ]
+            },
+        ],
     },
 }
 
@@ -45,14 +75,18 @@ class HermesKanbanBoard:
         self,
         *,
         board: str = "default",
+        source_profile: str = "swe",
         kb: Any | None = None,
         audit_func: Callable[..., dict[str, Any]] | None = None,
     ) -> None:
+        if not is_source_profile(source_profile):
+            raise RouteError("source profile is not an allowed user-facing profile")
         if kb is None:
             from hermes_cli import kanban_db as kb_module
 
             kb = kb_module
         self.board = board
+        self.source_profile = source_profile
         self.kb = kb
         self.audit_func = audit_func or bundled_audit_route
 
@@ -83,7 +117,7 @@ class HermesKanbanBoard:
         try:
             task_id = self.kb.create_task(
                 conn,
-                created_by="swe",
+                created_by=self.source_profile,
                 workspace_kind="scratch",
                 board=self.board,
                 **kwargs,
@@ -106,7 +140,7 @@ class HermesKanbanBoard:
                 thread_id=source.thread_id,
                 user_id=source.user_id,
                 chat_type="dm",
-                notifier_profile="swe",
+                notifier_profile=source.profile,
                 delivery_mode="wake",
                 delivery_metadata={"chat_type": "dm"},
             )
@@ -117,7 +151,7 @@ class HermesKanbanBoard:
         return self.audit_func(
             self.kb.kanban_db_path(self.board),
             task_id=task_id,
-            source_profile="swe",
+            source_profile=source.profile,
             chat_id=source.chat_id,
             user_id=source.user_id,
             source_thread_id=source.thread_id,
@@ -135,7 +169,7 @@ class HermesKanbanBoard:
                 ok = self.kb.specify_triage_task(
                     conn,
                     task_id,
-                    author="swe-linear-route",
+                    author="linear-source-route",
                 )
                 if not ok:
                     raise RouteError("triage release failed")
@@ -146,7 +180,7 @@ class HermesKanbanBoard:
             ok, error = self.kb.promote_task(
                 conn,
                 task_id,
-                actor="swe-linear-route",
+                actor="linear-source-route",
                 reason=reason,
             )
             if not ok:
@@ -174,8 +208,8 @@ def _source_context(
     runtime_profile: str,
     session_getter: Callable[[str, str], str],
 ) -> SourceContext:
-    if runtime_profile != "swe":
-        raise RouteError("runtime profile must be swe")
+    if not is_source_profile(runtime_profile):
+        raise RouteError("runtime profile is not an allowed user-facing profile")
     contextual_session_id = session_getter("HERMES_SESSION_ID", "")
     if (
         handler_session_id
@@ -198,14 +232,28 @@ def _source_context(
     )
 
 
-def handle_swe_linear_request(args: dict[str, Any], **kwargs: Any) -> str:
-    """Validate the live SWE route and create/replay one PM Kanban task."""
+def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
+    """Validate one live user-facing source route and create or replay its PM task."""
     try:
-        if not isinstance(args, dict) or set(args) != {"request"}:
-            raise RouteError("tool input must contain exactly request")
-        request = args["request"]
-        if not isinstance(request, str):
-            raise RouteError("request must be text")
+        if not isinstance(args, dict):
+            raise RouteError("tool input must be an object")
+        if set(args) == {"request"}:
+            request: Any = args["request"]
+            if not isinstance(request, str):
+                raise RouteError("request must be text")
+        elif set(args) == {"operation", "identifier", "state"}:
+            request = dict(args)
+        elif set(args) == {
+            "operation",
+            "title",
+            "description",
+            "parent_identifier",
+            "state",
+            "priority",
+        }:
+            request = dict(args)
+        else:
+            raise RouteError("tool input does not match a bounded request shape")
         session_getter = kwargs.get("session_getter") or _default_session_getter
         runtime_profile_getter = (
             kwargs.get("runtime_profile_getter") or _default_runtime_profile_getter
@@ -216,7 +264,7 @@ def handle_swe_linear_request(args: dict[str, Any], **kwargs: Any) -> str:
             session_getter=session_getter,
         )
         board_factory = kwargs.get("board_factory") or HermesKanbanBoard
-        board = board_factory()
+        board = board_factory(source_profile=source.profile)
         result = route_request(request, source=source, board=board)
         return json.dumps(result, ensure_ascii=False, sort_keys=True)
     except (RouteError, KeyError, TypeError, ValueError, OSError) as exc:
@@ -229,10 +277,10 @@ def handle_swe_linear_request(args: dict[str, Any], **kwargs: Any) -> str:
 
 def register(ctx: Any) -> None:
     ctx.register_tool(
-        name="swe_linear_request",
-        toolset="swe-linear-route",
-        schema=SWE_LINEAR_REQUEST_SCHEMA,
-        handler=handle_swe_linear_request,
-        description=SWE_LINEAR_REQUEST_SCHEMA["description"],
+        name="linear_source_request",
+        toolset="linear-source-route",
+        schema=LINEAR_SOURCE_REQUEST_SCHEMA,
+        handler=handle_linear_source_request,
+        description=LINEAR_SOURCE_REQUEST_SCHEMA["description"],
         emoji="🔁",
     )

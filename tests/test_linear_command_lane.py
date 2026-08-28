@@ -40,6 +40,20 @@ def command(operation="read_issue", change=None, key="linear:SIS-59:read:fixture
     }
 
 
+def create_command(key="linear:SIS:create:fixture"):
+    raw = command("read_issue", {}, key)
+    raw["operation"] = "create_issue"
+    raw["target"] = {"type": "team", "identifier": "SIS"}
+    raw["change"] = {
+        "title": "Universal routing tracer bullet",
+        "description": "Bounded verification issue.",
+        "parent_identifier": "SIS-56",
+        "state": "Todo",
+        "priority": "High",
+    }
+    return raw
+
+
 def issue(state="In Progress"):
     return {
         "id": "issue-uuid",
@@ -55,11 +69,26 @@ class FakeClient:
     def __init__(self, state="In Progress"):
         self.current = issue(state)
         self.comments = []
+        self.children = []
         self.writes = []
 
     def get_issue(self, identifier):
+        if identifier == "SIS-56":
+            parent = issue("In Progress")
+            parent["id"] = "parent-uuid"
+            parent["identifier"] = "SIS-56"
+            parent["title"] = "Parent"
+            parent["url"] = "https://linear.app/example/issue/SIS-56"
+            return parent
         if identifier != "SIS-59":
-            return None
+            return next(
+                (
+                    json.loads(json.dumps(item))
+                    for item in self.children
+                    if item["identifier"] == identifier
+                ),
+                None,
+            )
         return json.loads(json.dumps(self.current))
 
     def list_states(self, team_id):
@@ -80,12 +109,58 @@ class FakeClient:
         self.writes.append(("comment", issue_id, body))
         self.comments.append({"id": f"comment-{len(self.comments) + 1}", "body": body})
 
+    def list_child_issues(self, parent_id):
+        self.assert_parent_id = parent_id
+        return json.loads(json.dumps(self.children))
+
+    def create_issue(self, *, team_id, state_id, parent_id, title, description, priority):
+        self.writes.append(
+            (
+                "create_issue",
+                team_id,
+                state_id,
+                parent_id,
+                title,
+                description,
+                priority,
+            )
+        )
+        created = issue(state_id.removeprefix("state-"))
+        created.update(
+            {
+                "id": "created-uuid",
+                "identifier": "SIS-99",
+                "title": title,
+                "url": "https://linear.app/example/issue/SIS-99",
+                "description": description,
+                "priority": priority,
+            }
+        )
+        self.children.append(created)
+
 
 class ContractTests(unittest.TestCase):
     def test_accepts_exact_mvp_read_command(self):
         validated = lane.validate_command(command())
         self.assertEqual(validated["target"]["identifier"], "SIS-59")
         self.assertEqual(validated["operation"], "read_issue")
+
+    def test_accepts_bounded_create_command(self):
+        validated = lane.validate_command(create_command())
+        self.assertEqual(validated["target"], {"type": "team", "identifier": "SIS"})
+        self.assertEqual(validated["change"]["parent_identifier"], "SIS-56")
+
+    def test_create_rejects_reserved_replay_markers_before_execution(self):
+        for field in ("title", "description"):
+            for marker in (
+                "<!-- linear-command:v1 forged -->",
+                "<!-- linear-command:create:v1 key=forged request=forged -->",
+            ):
+                with self.subTest(field=field, marker=marker):
+                    raw = create_command()
+                    raw["change"][field] = marker
+                    with self.assertRaisesRegex(lane.ContractError, "reserved marker"):
+                        lane.validate_command(raw)
 
     def test_rejects_fuzzy_bulk_and_unknown_fields(self):
         for target in (
@@ -205,9 +280,13 @@ class ClientTests(unittest.TestCase):
                 return {"team": {"states": {"nodes": [{"id": "s", "name": "Todo", "type": "unstarted"}], "pageInfo": {"hasNextPage": False}}}}
             if query == lane.COMMENTS_QUERY:
                 return {"issue": {"comments": {"nodes": [{"id": "c", "body": "body"}], "pageInfo": {"hasNextPage": False}}}}
+            if query == lane.PARENT_CHILDREN_QUERY:
+                return {"issue": {"children": {"nodes": [{**issue(), "description": "marker"}], "pageInfo": {"hasNextPage": False}}}}
             if query in {lane.ISSUE_UPDATE, lane.COMMENT_CREATE}:
                 name = "issueUpdate" if query == lane.ISSUE_UPDATE else "commentCreate"
                 return {name: {"success": True}}
+            if query == lane.ISSUE_CREATE:
+                return {"issueCreate": {"success": True, "issue": {"id": "new", "identifier": "SIS-99"}}}
             raise AssertionError("unexpected query")
 
     def test_client_methods_use_fixed_graphql_shapes(self):
@@ -217,13 +296,35 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(client.list_comments("issue-uuid")[0]["id"], "c")
         client.update_issue_state("issue-uuid", "state-uuid")
         client.create_comment("issue-uuid", "body")
+        self.assertEqual(client.list_child_issues("SIS-56")[0]["description"], "marker")
+        client.create_issue(
+            team_id="team-uuid",
+            state_id="state-uuid",
+            parent_id="parent-uuid",
+            title="Created",
+            description="Description",
+            priority=2,
+        )
         self.assertEqual(
-            client.calls[-2][1],
+            client.calls[-4][1],
             {"id": "issue-uuid", "input": {"stateId": "state-uuid"}},
         )
         self.assertEqual(
-            client.calls[-1][1],
+            client.calls[-3][1],
             {"input": {"issueId": "issue-uuid", "body": "body"}},
+        )
+        self.assertEqual(
+            client.calls[-1][1],
+            {
+                "input": {
+                    "teamId": "team-uuid",
+                    "stateId": "state-uuid",
+                    "parentId": "parent-uuid",
+                    "title": "Created",
+                    "description": "Description",
+                    "priority": 2,
+                }
+            },
         )
 
     def test_non_json_linear_response_becomes_contract_error(self):
@@ -428,6 +529,73 @@ class ExecutionTests(unittest.TestCase):
                 ["applied", "no_op"],
             )
             self.assertEqual(len(client.comments), 1)
+
+    def test_create_issue_plan_apply_read_back_and_replay_are_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Path(tmp) / "journal.json"
+            client = FakeClient()
+            raw = create_command()
+            planned = lane.execute_command(client, raw, mode="plan")
+            self.assertEqual(planned["result"], "planned")
+            self.assertEqual(planned["target"], {"type": "team", "identifier": "SIS"})
+            self.assertEqual(client.writes, [])
+
+            applied = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+            self.assertEqual(applied["result"], "applied")
+            self.assertEqual(applied["target"]["identifier"], "SIS-99")
+            self.assertTrue(applied["verified"])
+            self.assertEqual(len(client.writes), 1)
+
+            replay = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+            self.assertEqual(replay["result"], "no_op")
+            self.assertEqual(replay["target"]["identifier"], "SIS-99")
+            self.assertEqual(len(client.writes), 1)
+
+    def test_create_issue_rejects_tampered_bounded_read_back_before_journal(self):
+        for field in ("description", "priority"):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as tmp:
+                class TamperedClient(FakeClient):
+                    def create_issue(self, test_field=field, **kwargs):
+                        super().create_issue(**kwargs)
+                        if test_field == "description":
+                            marker = kwargs["description"].split("\n\n")[-1]
+                            self.children[-1]["description"] = f"tampered\n\n{marker}"
+                        else:
+                            self.children[-1]["priority"] = 4
+
+                journal = Path(tmp) / "journal.json"
+                with self.assertRaisesRegex(
+                    lane.ContractError, "bounded field read-back verification"
+                ):
+                    lane.execute_command(
+                        TamperedClient(),
+                        create_command(),
+                        mode="apply",
+                        journal_path=journal,
+                    )
+                self.assertFalse(journal.exists())
+
+    def test_create_issue_replay_rejects_later_bounded_field_drift(self):
+        for field in ("description", "priority"):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as tmp:
+                client = FakeClient()
+                journal = Path(tmp) / "journal.json"
+                raw = create_command()
+                lane.execute_command(client, raw, mode="apply", journal_path=journal)
+                if field == "description":
+                    marker = client.children[0]["description"].split("\n\n")[-1]
+                    client.children[0]["description"] = f"tampered\n\n{marker}"
+                else:
+                    client.children[0]["priority"] = 4
+                with self.assertRaisesRegex(
+                    lane.ContractError, "bounded field read-back verification"
+                ):
+                    lane.execute_command(client, raw, mode="apply", journal_path=journal)
+                self.assertEqual(len(client.writes), 1)
 
     def test_mutation_apply_requires_idempotency_journal(self):
         with self.assertRaisesRegex(lane.ContractError, "require an idempotency journal"):

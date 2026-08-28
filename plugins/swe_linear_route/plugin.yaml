@@ -1,8 +1,0 @@
-name: swe-linear-route
-version: 0.1.2
-description: >-
-  Exact-session SWE ingress for bounded Linear commands through Project Manager.
-author: sisyphus-org
-kind: backend
-provides_tools:
-  - swe_linear_request

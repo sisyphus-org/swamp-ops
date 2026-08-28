@@ -16,6 +16,8 @@ COMMENT_REQUEST = re.compile(
     re.DOTALL,
 )
 SESSION_ID = re.compile(r"^[0-9]{8}_[0-9]{6}_[a-f0-9]{8}$")
+PROFILE_NAME = re.compile(r"^[a-z][a-z0-9-]{1,30}$")
+SPECIAL_PROFILES = {"broker", "project-manager"}
 NUMERIC_ID = re.compile(r"^[1-9][0-9]*$")
 TERMINAL_IN_FLIGHT = {"todo", "ready", "running", "review"}
 CREDENTIAL_SHAPES = (
@@ -75,43 +77,107 @@ def _semantic_key(command: dict[str, Any]) -> str:
 
 
 def parse_linear_request(
-    text: str,
+    request: Any,
     *,
+    source_profile: str = "swe",
     uuid_factory: UUIDFactory = _uuid4,
 ) -> ParsedRequest:
-    """Parse the exact supported Russian comment request into linear-command.v1."""
-    if not isinstance(text, str):
-        raise RouteError("request must be text")
-    match = COMMENT_REQUEST.fullmatch(text.strip())
-    if match is None:
-        raise RouteError(
-            "unsupported Linear request; expected exact SIS-N comment command"
-        )
-    identifier, body = match.groups()
-    body = body.strip()
-    if len(body) > 4000:
-        raise RouteError("comment body must be 1-4000 characters")
-    if any(pattern.search(body) for pattern in CREDENTIAL_SHAPES):
-        raise RouteError("comment body contains credential-shaped data")
+    """Parse one bounded source request into linear-command.v1."""
+    if not PROFILE_NAME.fullmatch(source_profile):
+        raise RouteError("source profile is invalid")
+    if isinstance(request, str):
+        match = COMMENT_REQUEST.fullmatch(request.strip())
+        if match is None:
+            raise RouteError(
+                "unsupported Linear request; expected exact SIS-N comment command"
+            )
+        identifier, body = match.groups()
+        body = body.strip()
+        if len(body) > 4000:
+            raise RouteError("comment body must be 1-4000 characters")
+        if any(pattern.search(body) for pattern in CREDENTIAL_SHAPES):
+            raise RouteError("comment body contains credential-shaped data")
+        operation = "add_comment"
+        target = {"type": "issue", "identifier": identifier}
+        change = {"body": body}
+    elif isinstance(request, dict):
+        operation = request.get("operation")
+        if operation == "change_state":
+            if set(request) != {"operation", "identifier", "state"}:
+                raise RouteError("structured state request has invalid fields")
+            identifier = request.get("identifier")
+            state = request.get("state")
+            if not isinstance(identifier, str) or not re.fullmatch(
+                r"SIS-[1-9][0-9]*", identifier
+            ):
+                raise RouteError("target must be an exact SIS-N identifier")
+            if state not in {"Backlog", "Todo", "Research", "In Progress", "In Review"}:
+                raise RouteError("state is not in the safe-state allowlist")
+            target = {"type": "issue", "identifier": identifier}
+            change = {"state": state}
+        elif operation == "create_issue":
+            expected = {
+                "operation",
+                "title",
+                "description",
+                "parent_identifier",
+                "state",
+                "priority",
+            }
+            if set(request) != expected:
+                raise RouteError("structured create request has invalid fields")
+            title = request.get("title")
+            description = request.get("description")
+            parent = request.get("parent_identifier")
+            state = request.get("state")
+            priority = request.get("priority")
+            if not isinstance(title, str) or not title.strip() or len(title) > 200:
+                raise RouteError("title must be 1-200 characters")
+            if not isinstance(description, str) or len(description) > 10000:
+                raise RouteError("description must be 0-10000 characters")
+            if any(pattern.search(title + "\n" + description) for pattern in CREDENTIAL_SHAPES):
+                raise RouteError("create request contains credential-shaped data")
+            if not isinstance(parent, str) or not re.fullmatch(r"SIS-[1-9][0-9]*", parent):
+                raise RouteError("parent must be an exact SIS-N identifier")
+            if state not in {"Backlog", "Todo", "Research", "In Progress", "In Review"}:
+                raise RouteError("state is not in the safe-state allowlist")
+            if priority not in {"High", "Medium", "Low"}:
+                raise RouteError("priority is not in the bounded allowlist")
+            target = {"type": "team", "identifier": "SIS"}
+            change = {
+                "title": title.strip(),
+                "description": description.strip(),
+                "parent_identifier": parent,
+                "state": state,
+                "priority": priority,
+            }
+        else:
+            raise RouteError("structured operation is not allowed")
+    else:
+        raise RouteError("request must be text or a structured request")
     command: dict[str, Any] = {
         "schema_version": "linear-command.v1",
         "command_id": uuid_factory(),
         "correlation_id": uuid_factory(),
         "idempotency_key": "pending",
-        "source_profile": "swe",
-        "operation": "add_comment",
-        "target": {"type": "issue", "identifier": identifier},
-        "change": {"body": body},
+        "source_profile": source_profile,
+        "operation": operation,
+        "target": target,
+        "change": change,
         "policy": {"mode": "standard"},
     }
     command["idempotency_key"] = _semantic_key(command)
     return ParsedRequest(command=command)
 
 
+def is_source_profile(profile: str) -> bool:
+    return bool(PROFILE_NAME.fullmatch(profile)) and profile not in SPECIAL_PROFILES
+
+
 def validate_source_context(source: SourceContext) -> None:
-    """Require an exact SWE Telegram DM session thread."""
-    if source.profile != "swe":
-        raise RouteError("source profile must be swe")
+    """Require an exact user-facing Telegram DM session thread."""
+    if not is_source_profile(source.profile):
+        raise RouteError("source profile is not an allowed user-facing profile")
     if source.platform != "telegram":
         raise RouteError("source platform must be telegram")
     if source.chat_type != "dm":
@@ -163,7 +229,7 @@ def _verified_replay(task: dict[str, Any], idempotency_key: str) -> dict[str, An
 
 
 def route_request(
-    text: str,
+    request: Any,
     *,
     source: SourceContext,
     board: Any,
@@ -171,7 +237,11 @@ def route_request(
 ) -> dict[str, Any]:
     """Create or replay one audited PM task and promote only after route pass."""
     validate_source_context(source)
-    parsed = parse_linear_request(text, uuid_factory=uuid_factory)
+    parsed = parse_linear_request(
+        request,
+        source_profile=source.profile,
+        uuid_factory=uuid_factory,
+    )
     command = parsed.command
     idempotency_key = command["idempotency_key"]
     task = board.find_task(idempotency_key)

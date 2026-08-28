@@ -21,6 +21,9 @@ from pathlib import Path
 HERMES_ROOT = Path("/Users/hermes/.hermes/profiles")
 SHARED_ENV = Path("/Users/hermes/.hermes/.env")
 WORKSPACES_ROOT = Path("/Users/hermes/workspaces")
+REPO_ROOT = Path(__file__).parents[1]
+SOURCE_PLUGIN = REPO_ROOT / "plugins" / "linear_source_route"
+SOURCE_SKILL = REPO_ROOT / "skills" / "linear-source-request-routing"
 HERMES_PYTHON = Path("/Users/hermes/.hermes/hermes-agent/venv/bin/python")
 DEFAULT_MODEL = "openai-codex/gpt-5.6-sol-900k"
 DEFAULT_WORKSPACE = WORKSPACES_ROOT
@@ -122,8 +125,37 @@ mcp_servers:
     resources: false
 """
 
+TELEGRAM_SECRET_CONFIG = """\
+# Fetch only the shared Telegram allowlist. Source profiles never receive LINEAR_TOKEN.
+secrets:
+  command:
+    enabled: true
+    command: >-
+      if ! grep -q '^TELEGRAM_ALLOWED_USERS=.*[^[:space:]]' "${HERMES_HOME}/.env" 2>/dev/null;
+      then grep '^TELEGRAM_ALLOWED_USERS=' /Users/hermes/.hermes/.env; fi
+    helper_timeout_seconds: 3
+    override_existing: true
+"""
+
+SOURCE_ROUTING_CONFIG = """\
+gateway:
+  multiplex_profiles: false
+
+kanban:
+  dispatch_in_gateway: false
+
+plugins:
+  enabled:
+    - linear-source-route
+  disabled: []
+  entries:
+    linear-source-route:
+      allow_tool_override: false
+
+""" + TELEGRAM_SECRET_CONFIG
+
 ROLE_CONFIGS = {
-    "general": "gateway:\n  multiplex_profiles: false\n\n" + LINEAR_SECRET_AND_MCP_CONFIG,
+    "general": SOURCE_ROUTING_CONFIG,
     "broker": """\
 gateway:
   multiplex_profiles: false
@@ -273,7 +305,8 @@ def main() -> int:
     if not yaml_ok:
         return fail([f"rendered config failed YAML validation: {yaml_error}"], args.mode)
 
-    linear_enabled = args.role != "broker"
+    linear_enabled = args.role == "project-manager"
+    source_routing_enabled = args.role == "general"
     telegram_prepared = args.role != "broker"
     shared_linear_present = env_has_key(SHARED_ENV, "LINEAR_TOKEN")
     shared_telegram_allowlist_present = env_has_key(
@@ -286,8 +319,20 @@ def main() -> int:
         shared_env_issues.append(
             f"TELEGRAM_ALLOWED_USERS is missing from {SHARED_ENV}"
         )
-    required_shared_env = SHARED_ENV_VARS if args.role != "broker" else []
+    if args.role == "project-manager":
+        required_shared_env = SHARED_ENV_VARS
+    elif args.role == "general":
+        required_shared_env = [
+            item for item in SHARED_ENV_VARS if item["name"] == "TELEGRAM_ALLOWED_USERS"
+        ]
+    else:
+        required_shared_env = []
     required_profile_env = PROFILE_ENV_VARS if telegram_prepared else []
+    optional_profile_env = [
+        item
+        for item in OPTIONAL_PROFILE_ENV_VARS
+        if args.role == "project-manager" or item["name"] != "LINEAR_TOKEN"
+    ]
     owner_steps = [
         "authenticate the profile's model provider without copying auth files",
         "review and install the dedicated system LaunchDaemon draft",
@@ -299,6 +344,14 @@ def main() -> int:
             "chmod 600 the profile .env",
             "enable gateway.platforms.telegram only after the unique token is present",
         ]
+    if source_routing_enabled:
+        owner_steps.extend(
+            [
+                "restart the new profile Gateway after plugin installation",
+                "restart broker after the source toolset is installed",
+                "require PM read-back, exact-session wake, and literal replay gates",
+            ]
+        )
     planned = {
         "profile": name,
         "role": args.role,
@@ -323,6 +376,30 @@ def main() -> int:
             "profileTokenRequired": False,
             "profileOverrideSupported": linear_enabled,
         },
+        "sourceRouting": {
+            "enabled": source_routing_enabled,
+            "plugin": "linear-source-route" if source_routing_enabled else None,
+            "skill": (
+                "linear-source-request-routing" if source_routing_enabled else None
+            ),
+            "dispatcherProfile": "broker" if source_routing_enabled else None,
+            "linearWriterProfile": (
+                "project-manager" if source_routing_enabled else None
+            ),
+            "directLinearMutationAvailable": False if source_routing_enabled else None,
+        },
+        "verificationGates": (
+            [
+                "run config check and a real model response",
+                "run a real Russian STT transcription",
+                "run Plugin Doctor and read back linear-source-route enabled",
+                "restart the source Gateway, then restart broker",
+                "verify PM Linear mutation with exact read-back",
+                "verify exact-session wake and literal replay with no duplicate",
+            ]
+            if source_routing_enabled
+            else []
+        ),
         "telegram": {
             "enabledAtBootstrap": False,
             "preparedForOwnerToken": telegram_prepared,
@@ -338,7 +415,7 @@ def main() -> int:
         },
         "requiredSharedEnv": required_shared_env,
         "requiredProfileEnv": required_profile_env,
-        "optionalProfileEnv": OPTIONAL_PROFILE_ENV_VARS,
+        "optionalProfileEnv": optional_profile_env,
         "gatewaySafeWriteRoots": [str(workspace), str(profile_dir)],
         "ownerStepsBeforeActivation": owner_steps,
     }
@@ -376,10 +453,13 @@ def main() -> int:
     try:
         profile_dir.mkdir(parents=True)
         created = True
-        for subdir in ("skills", "memories", "logs", "cron"):
+        for subdir in ("skills", "plugins", "memories", "logs", "cron"):
             (profile_dir / subdir).mkdir()
         (profile_dir / "config.yaml").write_text(rendered)
         (profile_dir / "config.yaml").chmod(0o600)
+        if source_routing_enabled:
+            shutil.copytree(SOURCE_PLUGIN, profile_dir / "plugins" / SOURCE_PLUGIN.name)
+            shutil.copytree(SOURCE_SKILL, profile_dir / "skills" / SOURCE_SKILL.name)
     except OSError as exc:
         if created:
             shutil.rmtree(profile_dir, ignore_errors=True)

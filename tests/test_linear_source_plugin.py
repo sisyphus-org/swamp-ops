@@ -10,11 +10,11 @@ ROOT = Path(__file__).parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from plugins.swe_linear_route import (  # noqa: E402
-    SWE_LINEAR_REQUEST_SCHEMA,
+from plugins.linear_source_route import (  # noqa: E402
+    LINEAR_SOURCE_REQUEST_SCHEMA,
     HermesKanbanBoard,
     _default_runtime_profile_getter,
-    handle_swe_linear_request,
+    handle_linear_source_request,
 )
 
 
@@ -108,7 +108,7 @@ class AdapterTests(unittest.TestCase):
         )
         self.assertEqual(created["session_id"], "20260828_120000_abcdef12")
 
-        from plugins.swe_linear_route.route import SourceContext
+        from plugins.linear_source_route.route import SourceContext
 
         source = SourceContext(
             session_id="20260828_120000_abcdef12",
@@ -131,6 +131,45 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(report["result"], "pass")
         self.assertEqual(audits[0][1]["source_session_id"], source.session_id)
         self.assertEqual(audits[0][1]["source_thread_id"], source.thread_id)
+
+    def test_adapter_uses_exact_source_profile_for_creator_and_notifier(self):
+        kb = FakeKanban()
+        board = HermesKanbanBoard(
+            board="default",
+            source_profile="books",
+            kb=kb,
+            audit_func=lambda *_args, **_kwargs: {
+                "result": "pass",
+                "pending_terminal_events": [],
+                "mismatches": {},
+            },
+        )
+        created = board.create_task(
+            title="Linear add_comment SIS-61",
+            body="{}",
+            assignee="project-manager",
+            triage=True,
+            idempotency_key="linear:v1:" + "a" * 32,
+            session_id="20260828_120000_abcdef12",
+            max_runtime_seconds=300,
+        )
+        create = next(call[1] for call in kb.calls if call[0] == "create")
+        self.assertEqual(create["created_by"], "books")
+
+        from plugins.linear_source_route.route import SourceContext
+
+        source = SourceContext(
+            session_id="20260828_120000_abcdef12",
+            profile="books",
+            platform="telegram",
+            chat_id="442308262",
+            user_id="442308262",
+            chat_type="dm",
+            thread_id="448864",
+        )
+        board.set_wake_route(created["id"], source)
+        notify = next(call[1] for call in kb.calls if call[0] == "notify")
+        self.assertEqual(notify["notifier_profile"], "books")
 
     def test_adapter_refuses_failed_promotion(self):
         kb = FakeKanban()
@@ -159,7 +198,7 @@ class PluginTests(unittest.TestCase):
             self.assertEqual(_default_runtime_profile_getter(), "swe")
 
     def test_swe_plugin_has_no_linear_client_or_mutable_runtime_dependency(self):
-        plugin_root = ROOT / "plugins" / "swe_linear_route"
+        plugin_root = ROOT / "plugins" / "linear_source_route"
         source = "\n".join(
             path.read_text()
             for path in sorted(plugin_root.glob("*.py"))
@@ -168,11 +207,23 @@ class PluginTests(unittest.TestCase):
         self.assertNotIn("LinearClient", source)
         self.assertNotIn("swamp-ops-runtime", source)
 
-    def test_tool_schema_accepts_only_original_request_text(self):
-        parameters = SWE_LINEAR_REQUEST_SCHEMA["parameters"]
-        self.assertEqual(set(parameters["properties"]), {"request"})
-        self.assertEqual(parameters["required"], ["request"])
+    def test_tool_schema_accepts_comment_text_or_structured_safe_state(self):
+        parameters = LINEAR_SOURCE_REQUEST_SCHEMA["parameters"]
+        self.assertEqual(
+            set(parameters["properties"]),
+            {
+                "request",
+                "operation",
+                "identifier",
+                "state",
+                "title",
+                "description",
+                "parent_identifier",
+                "priority",
+            },
+        )
         self.assertFalse(parameters["additionalProperties"])
+        self.assertEqual(len(parameters["oneOf"]), 3)
 
     def test_handler_uses_request_scoped_gateway_identity(self):
         fake_board = mock.Mock()
@@ -203,10 +254,10 @@ class PluginTests(unittest.TestCase):
         }
 
         result = json.loads(
-            handle_swe_linear_request(
+            handle_linear_source_request(
                 {"request": "Добавь к SIS-61 комментарий: SIS-61 E2E proof A."},
                 session_id="20260828_120000_abcdef12",
-                board_factory=lambda: fake_board,
+                board_factory=lambda **_kwargs: fake_board,
                 session_getter=lambda name, default="": session_values.get(name, default),
                 runtime_profile_getter=lambda: "swe",
             )
@@ -214,6 +265,106 @@ class PluginTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "verified_no_op")
         fake_board.find_task.assert_called_once()
+
+    def test_handler_accepts_any_allowlisted_runtime_profile(self):
+        fake_board = mock.Mock()
+        fake_board.find_task.return_value = {
+            "id": "t_1234abcd",
+            "status": "done",
+            "session_id": "20260828_120000_abcdef12",
+            "result": json.dumps(
+                {
+                    "schema_version": "linear-result.v1",
+                    "verified": True,
+                    "result": "applied",
+                    "target": {
+                        "identifier": "SIS-61",
+                        "url": "https://linear.app/example/SIS-61",
+                    },
+                }
+            ),
+        }
+        session_values = {
+            "HERMES_SESSION_PROFILE": "books",
+            "HERMES_SESSION_PLATFORM": "telegram",
+            "HERMES_SESSION_CHAT_ID": "442308262",
+            "HERMES_SESSION_USER_ID": "442308262",
+            "HERMES_SESSION_CHAT_TYPE": "dm",
+            "HERMES_SESSION_THREAD_ID": "448864",
+            "HERMES_SESSION_ID": "20260828_120000_abcdef12",
+        }
+        captured = {}
+
+        def board_factory(**kwargs):
+            captured.update(kwargs)
+            return fake_board
+
+        result = json.loads(
+            handle_linear_source_request(
+                {"request": "Добавь к SIS-61 комментарий: Books proof."},
+                session_id="20260828_120000_abcdef12",
+                board_factory=board_factory,
+                session_getter=lambda name, default="": session_values.get(name, default),
+                runtime_profile_getter=lambda: "books",
+            )
+        )
+        self.assertEqual(result["status"], "verified_no_op")
+        self.assertEqual(captured, {"source_profile": "books"})
+
+    def test_handler_accepts_structured_safe_state_request(self):
+        fake_board = mock.Mock()
+        fake_board.find_task.return_value = {
+            "id": "t_1234abcd",
+            "status": "done",
+            "session_id": "20260828_120000_abcdef12",
+            "result": json.dumps(
+                {
+                    "schema_version": "linear-result.v1",
+                    "verified": True,
+                    "result": "applied",
+                    "target": {
+                        "identifier": "SIS-68",
+                        "url": "https://linear.app/example/SIS-68",
+                    },
+                }
+            ),
+        }
+        session_values = {
+            "HERMES_SESSION_PROFILE": "default",
+            "HERMES_SESSION_PLATFORM": "telegram",
+            "HERMES_SESSION_CHAT_ID": "442308262",
+            "HERMES_SESSION_USER_ID": "442308262",
+            "HERMES_SESSION_CHAT_TYPE": "dm",
+            "HERMES_SESSION_THREAD_ID": "449233",
+            "HERMES_SESSION_ID": "20260828_120000_abcdef12",
+        }
+        requests = [
+            {
+                "operation": "change_state",
+                "identifier": "SIS-68",
+                "state": "In Review",
+            },
+            {
+                "operation": "create_issue",
+                "title": "Universal routing tracer bullet",
+                "description": "Bounded verification issue.",
+                "parent_identifier": "SIS-56",
+                "state": "Todo",
+                "priority": "High",
+            },
+        ]
+        for request in requests:
+            with self.subTest(operation=request["operation"]):
+                result = json.loads(
+                    handle_linear_source_request(
+                        request,
+                        session_id="20260828_120000_abcdef12",
+                        board_factory=lambda **_kwargs: fake_board,
+                        session_getter=lambda name, default="": session_values.get(name, default),
+                        runtime_profile_getter=lambda: "default",
+                    )
+                )
+                self.assertEqual(result["status"], "verified_no_op")
 
     def test_handler_rejects_session_id_mismatch_before_board_access(self):
         fake_board = mock.Mock()
@@ -227,10 +378,10 @@ class PluginTests(unittest.TestCase):
             "HERMES_SESSION_ID": "20260828_120000_abcdef12",
         }
         result = json.loads(
-            handle_swe_linear_request(
+            handle_linear_source_request(
                 {"request": "Добавь к SIS-61 комментарий: proof"},
                 session_id="20260828_120001_deadbeef",
-                board_factory=lambda: fake_board,
+                board_factory=lambda **_kwargs: fake_board,
                 session_getter=lambda name, default="": session_values.get(name, default),
                 runtime_profile_getter=lambda: "swe",
             )
@@ -251,10 +402,10 @@ class PluginTests(unittest.TestCase):
             "HERMES_SESSION_ID": "20260828_120000_abcdef12",
         }
         result = json.loads(
-            handle_swe_linear_request(
+            handle_linear_source_request(
                 {"request": "Добавь к SIS-61 комментарий: proof"},
                 session_id="20260828_120000_abcdef12",
-                board_factory=lambda: fake_board,
+                board_factory=lambda **_kwargs: fake_board,
                 session_getter=lambda name, default="": session_values.get(name, default),
                 runtime_profile_getter=lambda: "swe",
             )
@@ -275,10 +426,10 @@ class PluginTests(unittest.TestCase):
             "HERMES_SESSION_ID": "20260828_120000_abcdef12",
         }
         result = json.loads(
-            handle_swe_linear_request(
+            handle_linear_source_request(
                 {"request": "Добавь к SIS-61 комментарий: proof"},
                 session_id="20260828_120000_abcdef12",
-                board_factory=lambda: fake_board,
+                board_factory=lambda **_kwargs: fake_board,
                 session_getter=lambda name, default="": session_values.get(name, default),
                 runtime_profile_getter=lambda: "",
             )

@@ -5,8 +5,8 @@ import unittest
 from pathlib import Path
 
 
-MODULE = Path(__file__).parents[1] / "plugins" / "swe_linear_route" / "route.py"
-SPEC = importlib.util.spec_from_file_location("swe_linear_route", MODULE)
+MODULE = Path(__file__).parents[1] / "plugins" / "linear_source_route" / "route.py"
+SPEC = importlib.util.spec_from_file_location("linear_source_route", MODULE)
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError(f"cannot import SWE Linear route: {MODULE}")
 route = importlib.util.module_from_spec(SPEC)
@@ -108,6 +108,48 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(first.command["idempotency_key"], second.command["idempotency_key"])
         self.assertNotEqual(first.command["command_id"], second.command["command_id"])
 
+    def test_source_profile_is_runtime_bound_not_swe_constant(self):
+        parsed = route.parse_linear_request(
+            "Добавь к SIS-61 комментарий: Ideas proof.",
+            source_profile="ideas",
+            uuid_factory=uuid_factory(),
+        )
+        self.assertEqual(parsed.command["source_profile"], "ideas")
+
+    def test_structured_state_request_becomes_bounded_command(self):
+        parsed = route.parse_linear_request(
+            {
+                "operation": "change_state",
+                "identifier": "SIS-68",
+                "state": "In Review",
+            },
+            source_profile="default",
+            uuid_factory=uuid_factory(),
+        )
+        self.assertEqual(parsed.command["source_profile"], "default")
+        self.assertEqual(parsed.command["operation"], "change_state")
+        self.assertEqual(parsed.command["target"]["identifier"], "SIS-68")
+        self.assertEqual(parsed.command["change"], {"state": "In Review"})
+
+    def test_structured_create_request_becomes_bounded_team_command(self):
+        parsed = route.parse_linear_request(
+            {
+                "operation": "create_issue",
+                "title": "Universal routing tracer bullet",
+                "description": "Bounded verification issue.",
+                "parent_identifier": "SIS-56",
+                "state": "Todo",
+                "priority": "High",
+            },
+            source_profile="ideas",
+            uuid_factory=uuid_factory(),
+        )
+        self.assertEqual(parsed.command["source_profile"], "ideas")
+        self.assertEqual(parsed.command["operation"], "create_issue")
+        self.assertEqual(parsed.command["target"], {"type": "team", "identifier": "SIS"})
+        self.assertEqual(parsed.command["change"]["parent_identifier"], "SIS-56")
+        self.assertEqual(parsed.command["change"]["priority"], "High")
+
     def test_malformed_missing_or_credential_shaped_input_fails_before_dispatch(self):
         cases = (
             "Добавь комментарий: no target",
@@ -126,10 +168,25 @@ class ParseTests(unittest.TestCase):
 
 
 class SourceContextTests(unittest.TestCase):
-    def test_requires_exact_swe_telegram_session_thread(self):
+    def test_accepts_every_user_facing_profile_and_rejects_special_roles(self):
+        for profile in (
+            "default",
+            "ideas",
+            "swe",
+            "books",
+            "crypto-analyst",
+            "future-profile",
+        ):
+            with self.subTest(profile=profile):
+                route.validate_source_context(source_context(profile=profile))
+        for profile in ("broker", "project-manager", "UNKNOWN"):
+            with self.subTest(profile=profile):
+                with self.assertRaises(route.RouteError):
+                    route.validate_source_context(source_context(profile=profile))
+
+    def test_requires_exact_telegram_session_thread(self):
         route.validate_source_context(source_context())
         cases = (
-            source_context(profile="default"),
             source_context(platform="discord"),
             source_context(chat_type="group"),
             source_context(thread_id=""),
@@ -167,6 +224,18 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(body["schema_version"], "linear-kanban-task.v1")
         self.assertEqual(body["command"]["target"]["identifier"], "SIS-61")
         self.assertEqual(body["worker_contract"]["tool"], "pm_linear_execute")
+
+    def test_new_request_carries_exact_source_profile(self):
+        board = FakeBoard()
+        source = source_context(profile="books")
+        route.route_request(
+            "Добавь к SIS-61 комментарий: Books proof.",
+            source=source,
+            board=board,
+            uuid_factory=uuid_factory(),
+        )
+        body = json.loads(board.calls[1][1]["body"])
+        self.assertEqual(body["command"]["source_profile"], "books")
 
     def test_route_drift_leaves_task_in_triage(self):
         board = FakeBoard(audit_result="drift")
