@@ -1,7 +1,7 @@
 ---
 name: project-manager-linear-worker
 description: Execute typed Linear tasks through the PM lane.
-version: 0.1.0
+version: 0.1.1
 author: Alexey Petrov, Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -24,8 +24,8 @@ Do not use this skill for ordinary chat, fuzzy targets, arbitrary Linear operati
 
 ## Procedure
 
-1. Read the current Kanban task body and require exactly one object under `command`.
-2. Call `pm_linear_execute` once with that exact command object. Do not rewrite, normalize, expand, or repair any field.
+1. Call `pm_linear_execute` once with no arguments. Do not copy, reconstruct, normalize, expand, or repair the task command.
+2. The tool reads the persisted command from its own current Kanban task, proves the task/assignee/status/run binding, and CAS-extends the exact dispatcher claim before Linear access.
 3. Stop after the tool returns. The tool performs plan, apply, exact read-back, idempotency handling, and the terminal Kanban complete/block transition itself.
 
 ## Pitfalls

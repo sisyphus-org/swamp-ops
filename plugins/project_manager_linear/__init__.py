@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
 from pathlib import Path
 from typing import Any, Callable
 
@@ -26,61 +27,16 @@ PM_LINEAR_EXECUTE_SCHEMA = {
     "parameters": {
         "type": "object",
         "additionalProperties": False,
-        "properties": {
-            "command": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "schema_version": {"type": "string", "const": "linear-command.v1"},
-                    "command_id": {"type": "string", "format": "uuid"},
-                    "correlation_id": {"type": "string", "format": "uuid"},
-                    "idempotency_key": {
-                        "type": "string",
-                        "pattern": "^[A-Za-z0-9][A-Za-z0-9:._/-]{7,199}$",
-                    },
-                    "source_profile": {"type": "string", "const": "swe"},
-                    "operation": {
-                        "type": "string",
-                        "enum": ["read_issue", "change_state", "add_comment"],
-                    },
-                    "target": {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "properties": {
-                            "type": {"type": "string", "const": "issue"},
-                            "identifier": {
-                                "type": "string",
-                                "pattern": "^SIS-[1-9][0-9]*$",
-                            },
-                        },
-                        "required": ["type", "identifier"],
-                    },
-                    "change": {"type": "object", "maxProperties": 1},
-                    "policy": {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "properties": {
-                            "mode": {"type": "string", "const": "standard"}
-                        },
-                        "required": ["mode"],
-                    },
-                },
-                "required": [
-                    "schema_version",
-                    "command_id",
-                    "correlation_id",
-                    "idempotency_key",
-                    "source_profile",
-                    "operation",
-                    "target",
-                    "change",
-                    "policy",
-                ],
-                "description": "The exact linear-command.v1 object from the task body.",
-            }
-        },
-        "required": ["command"],
+        "properties": {},
+        "required": [],
     },
+}
+
+EXPECTED_WORKER_CONTRACT = {
+    "profile": "project-manager",
+    "tool": "pm_linear_execute",
+    "mode": "plan_apply_read_back",
+    "completion": "tool_completes_current_kanban_task",
 }
 
 
@@ -88,6 +44,71 @@ def _load_lane() -> Any:
     from . import lane
 
     return lane
+
+
+def _task_value(task: Any, field: str) -> Any:
+    return task.get(field) if isinstance(task, dict) else getattr(task, field, None)
+
+
+def _load_current_task(task_id: str, db_path: Path) -> Any:
+    from hermes_cli import kanban_db as kb
+
+    if not db_path.is_file():
+        raise FileNotFoundError("pinned Kanban database does not exist")
+    conn = kb.connect(db_path=db_path)
+    try:
+        task = kb.get_task(conn, task_id)
+    finally:
+        conn.close()
+    if task is None:
+        raise RuntimeError("current Kanban task was not found")
+    return task
+
+
+def _reserve_current_run(
+    task_id: str,
+    run_id: int,
+    db_path: Path,
+    claim_lock: str,
+) -> bool:
+    """Extend the exact worker claim and prove its run still owns the task."""
+    from hermes_cli import kanban_db as kb
+
+    if not db_path.is_file():
+        raise FileNotFoundError("pinned Kanban database does not exist")
+    conn = kb.connect(db_path=db_path)
+    try:
+        if not kb.heartbeat_claim(conn, task_id, claimer=claim_lock):
+            return False
+        return bool(
+            kb.heartbeat_worker(
+                conn,
+                task_id,
+                note="project-manager Linear execution reserved",
+                expected_run_id=run_id,
+            )
+        )
+    finally:
+        conn.close()
+
+
+def _command_from_task(task: Any) -> dict[str, Any]:
+    body = _task_value(task, "body")
+    if not isinstance(body, str) or not body or len(body.encode("utf-8")) > 32768:
+        raise RuntimeError("current Kanban task body is invalid")
+    try:
+        envelope = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("current Kanban task body is invalid JSON") from exc
+    if (
+        not isinstance(envelope, dict)
+        or set(envelope) != {"schema_version", "command", "worker_contract"}
+        or envelope.get("schema_version") != "linear-kanban-task.v1"
+        or envelope.get("worker_contract") != EXPECTED_WORKER_CONTRACT
+        or not isinstance(envelope.get("command"), dict)
+    ):
+        raise RuntimeError("current Kanban task envelope is invalid")
+    return envelope["command"]
 
 
 def execute_pm_command(
@@ -197,9 +218,74 @@ def handle_pm_linear_execute(args: dict[str, Any], **kwargs: Any) -> str:
             {"status": "rejected", "error": "tool requires a current Kanban task"},
             sort_keys=True,
         )
-    if not isinstance(args, dict) or set(args) != {"command"}:
+    raw_run_id = str(environ.get("HERMES_KANBAN_RUN_ID") or "")
+    if not raw_run_id.isdigit() or int(raw_run_id) < 1:
         return json.dumps(
-            {"status": "rejected", "error": "tool input must contain exactly command"},
+            {"status": "rejected", "error": "tool requires a current Kanban run"},
+            sort_keys=True,
+        )
+    if args != {}:
+        return json.dumps(
+            {"status": "rejected", "error": "tool accepts no model-supplied command"},
+            sort_keys=True,
+        )
+
+    raw_db_path = str(environ.get("HERMES_KANBAN_DB") or "").strip()
+    db_path = Path(raw_db_path)
+    if not db_path.is_absolute() or db_path.name != "kanban.db":
+        return json.dumps(
+            {"status": "rejected", "error": "tool requires a pinned Kanban database"},
+            sort_keys=True,
+        )
+    claim_lock = str(environ.get("HERMES_KANBAN_CLAIM_LOCK") or "").strip()
+    if not claim_lock or len(claim_lock) > 256:
+        return json.dumps(
+            {"status": "rejected", "error": "tool requires the current claim lock"},
+            sort_keys=True,
+        )
+
+    task_loader: Callable[[str, Path], Any] = (
+        kwargs.get("task_loader") or _load_current_task
+    )
+    try:
+        task = task_loader(task_id, db_path)
+    except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+        return json.dumps(
+            {
+                "status": "rejected",
+                "error": "current Kanban task could not be loaded",
+                "error_class": type(exc).__name__,
+            },
+            sort_keys=True,
+        )
+    if (
+        _task_value(task, "id") != task_id
+        or _task_value(task, "assignee") != "project-manager"
+        or _task_value(task, "status") != "running"
+        or _task_value(task, "current_run_id") != int(raw_run_id)
+    ):
+        return json.dumps(
+            {"status": "rejected", "error": "current Kanban task/run binding is invalid"},
+            sort_keys=True,
+        )
+
+    run_reserver: Callable[[str, int, Path, str], bool] = (
+        kwargs.get("run_reserver") or _reserve_current_run
+    )
+    try:
+        reserved = run_reserver(task_id, int(raw_run_id), db_path, claim_lock)
+    except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+        return json.dumps(
+            {
+                "status": "rejected",
+                "error": "current Kanban run could not be reserved",
+                "error_class": type(exc).__name__,
+            },
+            sort_keys=True,
+        )
+    if not reserved:
+        return json.dumps(
+            {"status": "rejected", "error": "current Kanban run was superseded"},
             sort_keys=True,
         )
 
@@ -208,9 +294,7 @@ def handle_pm_linear_execute(args: dict[str, Any], **kwargs: Any) -> str:
     )
     lifecycle = lifecycle_factory(task_id)
     try:
-        command = args["command"]
-        if not isinstance(command, dict):
-            raise RuntimeError("command must be an object")
+        command = _command_from_task(task)
         lane_loader = kwargs.get("lane_loader") or _load_lane
         lane = lane_loader()
         client_factory = kwargs.get("client_factory") or lane.LinearClient
