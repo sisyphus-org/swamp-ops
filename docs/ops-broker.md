@@ -51,18 +51,75 @@ The repository template is versioned locally under `templates/github-cloudflare-
 
 ## Installation and activation
 
-The repository contains the plugin source, but this agent does not modify `~/.hermes/plugins/` or `.env`. The owner performs the activation after reviewing the PR.
+The broker must never execute from `/Users/hermes/workspaces/swamp-ops`, because that path is a development checkout and may be on a dirty feature branch. Before installation, materialize `/Users/hermes/workspaces/swamp-ops-runtime` as a detached worktree pinned to the exact reviewed `origin/main` commit. Update that runtime checkout only after the new main commit passes merged-source tests and review.
 
-### 1. Install the plugin into the default profile
+### 1. Pin the runtime checkout and install the plugin into default
 
 ```bash
+set -euo pipefail
+cd /Users/hermes/workspaces/swamp-ops
+: "${REVIEWED_SHA:?set the exact reviewed 40-character main SHA}"
+test "${#REVIEWED_SHA}" -eq 40
+git fetch origin main
+test "$(git rev-parse origin/main)" = "$REVIEWED_SHA"
+git -c core.hooksPath=/dev/null worktree add --detach \
+  /Users/hermes/workspaces/swamp-ops-runtime "$REVIEWED_SHA"
+test "$(git -C /Users/hermes/workspaces/swamp-ops-runtime rev-parse HEAD)" = "$REVIEWED_SHA"
+test -z "$(git -C /Users/hermes/workspaces/swamp-ops-runtime status --porcelain)"
+test ! -e /Users/hermes/workspaces/swamp-ops-runtime/.swamp-sources.yaml
+
+stage=$(mktemp -d /Users/hermes/workspaces/ops-broker-install.XXXXXX)
+trap 'rm -rf "$stage"' EXIT
+git -C /Users/hermes/workspaces/swamp-ops-runtime archive \
+  "$REVIEWED_SHA" plugins/ops_broker | tar -x -C "$stage"
 mkdir -p /Users/hermes/.hermes/plugins
 rm -rf /Users/hermes/.hermes/plugins/ops_broker
-cp -R /Users/hermes/workspaces/swamp-ops/plugins/ops_broker \
-  /Users/hermes/.hermes/plugins/ops_broker
+cp -R "$stage/plugins/ops_broker" /Users/hermes/.hermes/plugins/ops_broker
 hermes plugins doctor /Users/hermes/.hermes/plugins/ops_broker --ci
+for file in __init__.py broker.py plugin.yaml policy.json; do
+  cmp -s "$stage/plugins/ops_broker/$file" \
+    "/Users/hermes/.hermes/plugins/ops_broker/$file"
+done
+mkdir -p /Users/hermes/.hermes/plugin-data/ops-broker
+revision_tmp=/Users/hermes/.hermes/plugin-data/ops-broker/runtime-revision.tmp
+printf '%s\n' "$REVIEWED_SHA" > "$revision_tmp"
+mv "$revision_tmp" /Users/hermes/.hermes/plugin-data/ops-broker/runtime-revision
 hermes plugins enable ops-broker
 ```
+
+For an existing runtime worktree, update it without touching the development checkout:
+
+```bash
+set -euo pipefail
+test -z "$(git -C /Users/hermes/workspaces/swamp-ops-runtime status --porcelain)"
+test ! -e /Users/hermes/workspaces/swamp-ops-runtime/.swamp-sources.yaml
+: "${REVIEWED_SHA:?set the exact reviewed 40-character main SHA}"
+test "${#REVIEWED_SHA}" -eq 40
+git -C /Users/hermes/workspaces/swamp-ops-runtime fetch origin main
+test "$(git -C /Users/hermes/workspaces/swamp-ops-runtime rev-parse origin/main)" = "$REVIEWED_SHA"
+git -C /Users/hermes/workspaces/swamp-ops-runtime -c core.hooksPath=/dev/null \
+  switch --detach "$REVIEWED_SHA"
+test "$(git -C /Users/hermes/workspaces/swamp-ops-runtime rev-parse HEAD)" = "$REVIEWED_SHA"
+test -z "$(git -C /Users/hermes/workspaces/swamp-ops-runtime status --porcelain)"
+test ! -e /Users/hermes/workspaces/swamp-ops-runtime/.swamp-sources.yaml
+stage=$(mktemp -d /Users/hermes/workspaces/ops-broker-install.XXXXXX)
+trap 'rm -rf "$stage"' EXIT
+git -C /Users/hermes/workspaces/swamp-ops-runtime archive \
+  "$REVIEWED_SHA" plugins/ops_broker | tar -x -C "$stage"
+rm -rf /Users/hermes/.hermes/plugins/ops_broker
+cp -R "$stage/plugins/ops_broker" /Users/hermes/.hermes/plugins/ops_broker
+hermes plugins doctor /Users/hermes/.hermes/plugins/ops_broker --ci
+for file in __init__.py broker.py plugin.yaml policy.json; do
+  cmp -s "$stage/plugins/ops_broker/$file" \
+    "/Users/hermes/.hermes/plugins/ops_broker/$file"
+done
+mkdir -p /Users/hermes/.hermes/plugin-data/ops-broker
+revision_tmp=/Users/hermes/.hermes/plugin-data/ops-broker/runtime-revision.tmp
+printf '%s\n' "$REVIEWED_SHA" > "$revision_tmp"
+mv "$revision_tmp" /Users/hermes/.hermes/plugin-data/ops-broker/runtime-revision
+```
+
+The clean-tree precondition fails closed before moving the runtime revision. Checkout hooks are disabled for this operation, and the ignored `.swamp-sources.yaml` control-plane override is forbidden explicitly. Never merge, switch, or reset the development checkout as part of broker activation. Runtime policy and workspace are loaded only from the installed reviewed plugin; `OPS_BROKER_POLICY` and `OPS_BROKER_WORKSPACE` environment variables cannot override them. Plugin installation is extracted from the exact Git object named by `REVIEWED_SHA`, not copied from mutable worktree bytes; the four `cmp -s` checks enforce byte-for-byte equality before the block succeeds. The block then atomically records the attested revision. Every broker call rechecks exact HEAD and full worktree cleanliness against that attestation before executing an operation.
 
 Do not install the plugin into secondary profiles.
 
@@ -181,6 +238,22 @@ HERMES_HOME="$HOME_PATH" hermes config check
 ### 5. Restart — owner only
 
 ```bash
+set -euo pipefail
+: "${REVIEWED_SHA:?set the exact reviewed 40-character main SHA}"
+test "${#REVIEWED_SHA}" -eq 40
+test "$(< /Users/hermes/.hermes/plugin-data/ops-broker/runtime-revision)" = "$REVIEWED_SHA"
+test "$(git -C /Users/hermes/workspaces/swamp-ops-runtime rev-parse HEAD)" = "$REVIEWED_SHA"
+test -z "$(git -C /Users/hermes/workspaces/swamp-ops-runtime status --porcelain)"
+test ! -e /Users/hermes/workspaces/swamp-ops-runtime/.swamp-sources.yaml
+stage=$(mktemp -d /Users/hermes/workspaces/ops-broker-restart-check.XXXXXX)
+trap 'rm -rf "$stage"' EXIT
+git -C /Users/hermes/workspaces/swamp-ops-runtime archive \
+  "$REVIEWED_SHA" plugins/ops_broker | tar -x -C "$stage"
+for file in __init__.py broker.py plugin.yaml policy.json; do
+  cmp -s "$stage/plugins/ops_broker/$file" \
+    "/Users/hermes/.hermes/plugins/ops_broker/$file"
+done
+
 # default is currently supervised by user LaunchAgent ai.hermes.gateway
 sudo -u hermes -H /bin/sh -c 'cd /Users/hermes/.hermes && exec /Users/hermes/.local/bin/hermes gateway restart'
 

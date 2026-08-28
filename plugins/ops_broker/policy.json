@@ -1,6 +1,7 @@
 {
   "version": 1,
-  "workspace": "/Users/hermes/workspaces/swamp-ops",
+  "workspace": "/Users/hermes/workspaces/swamp-ops-runtime",
+  "workspaceRevisionFile": "/Users/hermes/.hermes/plugin-data/ops-broker/runtime-revision",
   "ownerIdentities": [
     {
       "source": "telegram",

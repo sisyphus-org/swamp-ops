@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -77,11 +78,36 @@ def _path_from_env(name: str, default: Path) -> Path:
     return Path(value).expanduser().resolve() if value else default
 
 
+def _verify_runtime_workspace(policy: dict[str, Any], workspace: Path) -> None:
+    revision_file_value = policy.get("workspaceRevisionFile")
+    if not isinstance(revision_file_value, str) or not revision_file_value:
+        raise BrokerError("runtime workspace revision attestation is not configured")
+    revision_file = Path(revision_file_value).expanduser().resolve()
+    expected_revision = revision_file.read_text(encoding="utf-8").strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", expected_revision):
+        raise BrokerError("runtime workspace revision attestation is invalid")
+
+    head = default_runner(
+        ["git", "rev-parse", "HEAD"], cwd=workspace, timeout=10
+    )
+    if head["returncode"] != 0 or head["stdout"].strip() != expected_revision:
+        raise BrokerError("runtime workspace HEAD does not match attestation")
+    status = default_runner(
+        ["git", "status", "--porcelain", "--untracked-files=all"],
+        cwd=workspace,
+        timeout=10,
+    )
+    if status["returncode"] != 0 or status["stdout"].strip():
+        raise BrokerError("runtime workspace is not clean")
+    if (workspace / ".swamp-sources.yaml").exists():
+        raise BrokerError("runtime workspace has a local Swamp source override")
+
+
 def handle_ops_broker(args: dict[str, Any], **kwargs: Any) -> str:
     try:
         request = validate_request(args)
         hermes_home = _path_from_env("HERMES_HOME", Path.home() / ".hermes")
-        policy_path = _path_from_env("OPS_BROKER_POLICY", PLUGIN_ROOT / "policy.json")
+        policy_path = PLUGIN_ROOT / "policy.json"
         policy = json.loads(policy_path.read_text(encoding="utf-8"))
         session_id = str(kwargs.get("session_id") or "")
         owner_identities = policy.get("ownerIdentities", [])
@@ -95,7 +121,8 @@ def handle_ops_broker(args: dict[str, Any], **kwargs: Any) -> str:
         configured_workspace = Path(
             str(policy.get("workspace") or DEFAULT_WORKSPACE)
         ).expanduser().resolve()
-        workspace = _path_from_env("OPS_BROKER_WORKSPACE", configured_workspace)
+        workspace = configured_workspace
+        _verify_runtime_workspace(policy, workspace)
         audit_path = _path_from_env(
             "OPS_BROKER_AUDIT",
             hermes_home / "plugin-data" / "ops-broker" / "audit.jsonl",
