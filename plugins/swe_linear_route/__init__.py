@@ -168,6 +168,8 @@ def _source_context(
     runtime_profile: str,
     session_getter: Callable[[str, str], str],
 ) -> SourceContext:
+    if runtime_profile != "swe":
+        raise RouteError("runtime profile must be swe")
     contextual_session_id = session_getter("HERMES_SESSION_ID", "")
     if (
         handler_session_id
@@ -177,11 +179,11 @@ def _source_context(
         raise RouteError("handler session id does not match gateway source session")
     session_id = handler_session_id or contextual_session_id
     contextual_profile = session_getter("HERMES_SESSION_PROFILE", "")
-    if contextual_profile and runtime_profile and contextual_profile != runtime_profile:
+    if contextual_profile and contextual_profile != runtime_profile:
         raise RouteError("gateway source profile conflicts with runtime profile")
     return SourceContext(
         session_id=session_id,
-        profile=contextual_profile or runtime_profile,
+        profile=runtime_profile,
         platform=session_getter("HERMES_SESSION_PLATFORM", ""),
         chat_id=session_getter("HERMES_SESSION_CHAT_ID", ""),
         user_id=session_getter("HERMES_SESSION_USER_ID", ""),

@@ -257,6 +257,30 @@ class PluginTests(unittest.TestCase):
         self.assertIn("profile", result["error"])
         fake_board.find_task.assert_not_called()
 
+    def test_handler_rejects_contextual_swe_without_runtime_binding(self):
+        fake_board = mock.Mock()
+        session_values = {
+            "HERMES_SESSION_PROFILE": "swe",
+            "HERMES_SESSION_PLATFORM": "telegram",
+            "HERMES_SESSION_CHAT_ID": "442308262",
+            "HERMES_SESSION_USER_ID": "442308262",
+            "HERMES_SESSION_CHAT_TYPE": "dm",
+            "HERMES_SESSION_THREAD_ID": "448864",
+            "HERMES_SESSION_ID": "20260828_120000_abcdef12",
+        }
+        result = json.loads(
+            handle_swe_linear_request(
+                {"request": "Добавь к SIS-61 комментарий: proof"},
+                session_id="20260828_120000_abcdef12",
+                board_factory=lambda: fake_board,
+                session_getter=lambda name, default="": session_values.get(name, default),
+                environ={"HERMES_PROFILE": ""},
+            )
+        )
+        self.assertEqual(result["status"], "rejected")
+        self.assertIn("runtime profile", result["error"])
+        fake_board.find_task.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
