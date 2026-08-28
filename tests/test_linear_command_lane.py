@@ -559,9 +559,9 @@ class ExecutionTests(unittest.TestCase):
         for field in ("description", "priority"):
             with self.subTest(field=field), tempfile.TemporaryDirectory() as tmp:
                 class TamperedClient(FakeClient):
-                    def create_issue(self, **kwargs):
+                    def create_issue(self, test_field=field, **kwargs):
                         super().create_issue(**kwargs)
-                        if field == "description":
+                        if test_field == "description":
                             marker = kwargs["description"].split("\n\n")[-1]
                             self.children[-1]["description"] = f"tampered\n\n{marker}"
                         else:
