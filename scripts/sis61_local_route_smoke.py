@@ -52,7 +52,7 @@ def main() -> int:
             chat_id="442308262",
             user_id="442308262",
             chat_type="dm",
-            thread_id="",
+            thread_id="448864",
         )
         request = "Добавь к SIS-61 комментарий: SIS-61 E2E proof A."
         first = route_request(request, source=source, board=board)
@@ -84,14 +84,14 @@ def main() -> int:
         if (
             sub["platform"] != "telegram"
             or sub["chat_id"] != source.chat_id
-            or (sub["thread_id"] or None) is not None
+            or sub["thread_id"] != source.thread_id
             or sub["user_id"] != source.user_id
             or sub["chat_type"] != "dm"
             or sub["notifier_profile"] != "swe"
             or sub["delivery_mode"] != "wake"
             or json.loads(sub["delivery_metadata"]) != {"chat_type": "dm"}
         ):
-            raise RuntimeError("subscription is not the exact source root-DM wake route")
+            raise RuntimeError("subscription is not the exact source session-thread wake route")
         if first["status"] != "queued" or replay["status"] != "already_in_flight":
             raise RuntimeError("new/replay statuses violated the route contract")
         print(

@@ -35,7 +35,7 @@ def source_context(**overrides):
         "chat_id": "442308262",
         "user_id": "442308262",
         "chat_type": "dm",
-        "thread_id": "",
+        "thread_id": "448864",
     }
     values.update(overrides)
     return route.SourceContext(**values)
@@ -126,13 +126,14 @@ class ParseTests(unittest.TestCase):
 
 
 class SourceContextTests(unittest.TestCase):
-    def test_requires_exact_swe_telegram_root_dm(self):
+    def test_requires_exact_swe_telegram_session_thread(self):
         route.validate_source_context(source_context())
         cases = (
             source_context(profile="default"),
             source_context(platform="discord"),
             source_context(chat_type="group"),
-            source_context(thread_id="448493"),
+            source_context(thread_id=""),
+            source_context(thread_id="not-numeric"),
             source_context(session_id=""),
             source_context(user_id="not-numeric"),
         )

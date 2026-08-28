@@ -58,7 +58,7 @@ The workflow performs no configuration or service writes. Cutover order, live ve
 
 ## `kanban-source-route-audit`
 
-Read-only SIS-60 audit for one exact source-profile Telegram root-DM session. It requires source-owned `wake`, `chat_type=dm`, exact chat/user identity, `thread_id=null`, no topic metadata and no pending terminal events. Broker ownership, topic/passive routes, duplicate subscriptions and unconsumed terminal events are reported as drift or failure.
+Read-only SIS-60 audit for one exact source-profile Telegram DM session thread. It requires source-owned `wake`, `chat_type=dm`, exact chat/user/thread identity, the matching persisted Hermes session, no per-task topic metadata and no pending terminal events. Broker ownership, wrong-thread/passive routes, duplicate subscriptions and unconsumed terminal events are reported as drift or failure.
 
 ```bash
 swamp model validate kanban-source-route-audit
@@ -69,6 +69,7 @@ swamp workflow run kanban-source-route-audit \
   --input source_profile=<profile> \
   --input chat_id=<chat-id> \
   --input user_id=<user-id> \
+  --input source_thread_id=<source-thread-id> \
   --input source_session_id=<source-session-id>
 ```
 
@@ -88,7 +89,7 @@ MVP operations are exact read, safe workflow-state change, and one bounded comme
 
 ## `swe-linear-route` + `project-manager-linear`
 
-SIS-61 connects an ordinary SWE Telegram root-DM comment request to the deterministic Project Manager lane without changing Hermes core. `swe-linear-route` validates the exact source session, creates one typed triage task, writes one root-DM `wake` subscription, requires the SIS-60 route audit and only then releases the task. `project-manager-linear` performs plan/apply/read-back inside the PM worker and owns the typed Kanban complete/block transition.
+SIS-61 connects an ordinary SWE Telegram session-thread comment request to the deterministic Project Manager lane without changing Hermes core. `swe-linear-route` validates the exact source thread plus persisted Hermes session, creates one typed triage task, updates the existing thread route to `wake`, requires the SIS-60 route audit and only then releases the task. It never creates a per-task Telegram topic. `project-manager-linear` performs plan/apply/read-back inside the PM worker and owns the typed Kanban complete/block transition.
 
 Both plugins are self-contained reviewed artifacts: the SIS-59 lane implementation and SIS-60 audit implementation live inside their respective plugin packages; the existing scripts are thin CLI/Swamp wrappers. Exact replay reuses one semantic idempotency key and task, and credential-shaped request text is rejected before durable writes. Local smoke, reviewed profile rollout, live proof, failure probes and rollback: [`docs/swe-project-manager-linear-e2e.md`](docs/swe-project-manager-linear-e2e.md).
 

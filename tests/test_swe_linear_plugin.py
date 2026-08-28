@@ -87,7 +87,7 @@ class FakeKanban:
 
 
 class AdapterTests(unittest.TestCase):
-    def test_adapter_persists_exact_session_and_root_dm_wake_route(self):
+    def test_adapter_persists_exact_session_thread_wake_route(self):
         kb = FakeKanban()
         audits = []
 
@@ -116,12 +116,12 @@ class AdapterTests(unittest.TestCase):
             chat_id="442308262",
             user_id="442308262",
             chat_type="dm",
-            thread_id="",
+            thread_id="448864",
         )
         board.set_wake_route(created["id"], source)
         notify = next(call[1] for call in kb.calls if call[0] == "notify")
         self.assertEqual(notify["platform"], "telegram")
-        self.assertEqual(notify["thread_id"], None)
+        self.assertEqual(notify["thread_id"], "448864")
         self.assertEqual(notify["notifier_profile"], "swe")
         self.assertEqual(notify["delivery_mode"], "wake")
         self.assertEqual(notify["delivery_metadata"], {"chat_type": "dm"})
@@ -129,6 +129,7 @@ class AdapterTests(unittest.TestCase):
         report = board.audit_route(created["id"], source)
         self.assertEqual(report["result"], "pass")
         self.assertEqual(audits[0][1]["source_session_id"], source.session_id)
+        self.assertEqual(audits[0][1]["source_thread_id"], source.thread_id)
 
     def test_adapter_refuses_failed_promotion(self):
         kb = FakeKanban()
@@ -186,12 +187,12 @@ class PluginTests(unittest.TestCase):
             ),
         }
         session_values = {
-            "HERMES_SESSION_PROFILE": "swe",
+            "HERMES_SESSION_PROFILE": "",
             "HERMES_SESSION_PLATFORM": "telegram",
             "HERMES_SESSION_CHAT_ID": "442308262",
             "HERMES_SESSION_USER_ID": "442308262",
             "HERMES_SESSION_CHAT_TYPE": "dm",
-            "HERMES_SESSION_THREAD_ID": "",
+            "HERMES_SESSION_THREAD_ID": "448864",
             "HERMES_SESSION_ID": "20260828_120000_abcdef12",
         }
 
@@ -201,6 +202,7 @@ class PluginTests(unittest.TestCase):
                 session_id="20260828_120000_abcdef12",
                 board_factory=lambda: fake_board,
                 session_getter=lambda name, default="": session_values.get(name, default),
+                environ={"HERMES_PROFILE": "swe"},
             )
         )
 
@@ -215,7 +217,7 @@ class PluginTests(unittest.TestCase):
             "HERMES_SESSION_CHAT_ID": "442308262",
             "HERMES_SESSION_USER_ID": "442308262",
             "HERMES_SESSION_CHAT_TYPE": "dm",
-            "HERMES_SESSION_THREAD_ID": "",
+            "HERMES_SESSION_THREAD_ID": "448864",
             "HERMES_SESSION_ID": "20260828_120000_abcdef12",
         }
         result = json.loads(
@@ -224,10 +226,59 @@ class PluginTests(unittest.TestCase):
                 session_id="20260828_120001_deadbeef",
                 board_factory=lambda: fake_board,
                 session_getter=lambda name, default="": session_values.get(name, default),
+                environ={"HERMES_PROFILE": "swe"},
             )
         )
         self.assertEqual(result["status"], "rejected")
         self.assertIn("session", result["error"])
+        fake_board.find_task.assert_not_called()
+
+    def test_handler_rejects_contextual_profile_conflicting_with_runtime(self):
+        fake_board = mock.Mock()
+        session_values = {
+            "HERMES_SESSION_PROFILE": "default",
+            "HERMES_SESSION_PLATFORM": "telegram",
+            "HERMES_SESSION_CHAT_ID": "442308262",
+            "HERMES_SESSION_USER_ID": "442308262",
+            "HERMES_SESSION_CHAT_TYPE": "dm",
+            "HERMES_SESSION_THREAD_ID": "448864",
+            "HERMES_SESSION_ID": "20260828_120000_abcdef12",
+        }
+        result = json.loads(
+            handle_swe_linear_request(
+                {"request": "Добавь к SIS-61 комментарий: proof"},
+                session_id="20260828_120000_abcdef12",
+                board_factory=lambda: fake_board,
+                session_getter=lambda name, default="": session_values.get(name, default),
+                environ={"HERMES_PROFILE": "swe"},
+            )
+        )
+        self.assertEqual(result["status"], "rejected")
+        self.assertIn("profile", result["error"])
+        fake_board.find_task.assert_not_called()
+
+    def test_handler_rejects_contextual_swe_without_runtime_binding(self):
+        fake_board = mock.Mock()
+        session_values = {
+            "HERMES_SESSION_PROFILE": "swe",
+            "HERMES_SESSION_PLATFORM": "telegram",
+            "HERMES_SESSION_CHAT_ID": "442308262",
+            "HERMES_SESSION_USER_ID": "442308262",
+            "HERMES_SESSION_CHAT_TYPE": "dm",
+            "HERMES_SESSION_THREAD_ID": "448864",
+            "HERMES_SESSION_ID": "20260828_120000_abcdef12",
+        }
+        result = json.loads(
+            handle_swe_linear_request(
+                {"request": "Добавь к SIS-61 комментарий: proof"},
+                session_id="20260828_120000_abcdef12",
+                board_factory=lambda: fake_board,
+                session_getter=lambda name, default="": session_values.get(name, default),
+                environ={"HERMES_PROFILE": ""},
+            )
+        )
+        self.assertEqual(result["status"], "rejected")
+        self.assertIn("runtime profile", result["error"])
         fake_board.find_task.assert_not_called()
 
 

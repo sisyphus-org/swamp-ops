@@ -33,7 +33,7 @@ class RouteError(RuntimeError):
 
 @dataclass(frozen=True)
 class SourceContext:
-    """Exact source identity required for a root-DM wake route."""
+    """Exact source identity required for a session-thread wake route."""
 
     session_id: str
     profile: str
@@ -109,15 +109,15 @@ def parse_linear_request(
 
 
 def validate_source_context(source: SourceContext) -> None:
-    """Require an exact SWE Telegram root-DM source session."""
+    """Require an exact SWE Telegram DM session thread."""
     if source.profile != "swe":
         raise RouteError("source profile must be swe")
     if source.platform != "telegram":
         raise RouteError("source platform must be telegram")
     if source.chat_type != "dm":
-        raise RouteError("source chat must be a root DM")
-    if source.thread_id:
-        raise RouteError("source root DM must not carry a thread/topic id")
+        raise RouteError("source chat must be a DM")
+    if not NUMERIC_ID.fullmatch(source.thread_id):
+        raise RouteError("source thread id must be a positive numeric id")
     if not SESSION_ID.fullmatch(source.session_id):
         raise RouteError("source session id is invalid")
     if not NUMERIC_ID.fullmatch(source.chat_id):
@@ -220,7 +220,7 @@ def route_request(
     audit = board.audit_route(task_id, source)
     if audit.get("result") != "pass":
         raise RouteError("route audit failed; task remains in triage")
-    board.release(task_id, "exact source root-DM wake route verified")
+    board.release(task_id, "exact source session-thread wake route verified")
     return {
         "status": "queued",
         "task_id": task_id,

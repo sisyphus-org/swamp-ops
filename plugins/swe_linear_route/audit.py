@@ -50,9 +50,10 @@ def audit_route(
     source_profile: str,
     chat_id: str,
     user_id: str,
+    source_thread_id: str,
     source_session_id: str,
 ) -> dict[str, Any]:
-    """Verify one exact source-owned Telegram root-DM wake subscription."""
+    """Verify one exact source-owned Telegram session-thread wake subscription."""
     if not TASK_ID.fullmatch(task_id):
         raise AuditError("task_id must be exact t_<8 hex>")
     if not PROFILE.fullmatch(source_profile):
@@ -61,6 +62,8 @@ def audit_route(
         raise AuditError("broker cannot own source-profile Telegram delivery")
     if not NUMERIC_ID.fullmatch(chat_id) or not NUMERIC_ID.fullmatch(user_id):
         raise AuditError("chat_id and user_id must be exact positive numeric IDs")
+    if not NUMERIC_ID.fullmatch(source_thread_id):
+        raise AuditError("source_thread_id must be an exact positive numeric ID")
     if not SESSION_ID.fullmatch(source_session_id):
         raise AuditError("source_session_id is invalid")
     if not db_path.is_file():
@@ -75,9 +78,6 @@ def audit_route(
         if len(rows) != 1:
             raise AuditError(f"expected exactly one subscription for {task_id}")
         route = dict(rows[0])
-        # Hermes persists an unthreaded CLI subscription as either SQL NULL or
-        # an empty string depending on the call path. Both represent root DM.
-        route["thread_id"] = route.get("thread_id") or None
         raw_metadata = route.get("delivery_metadata")
         try:
             metadata = json.loads(raw_metadata) if raw_metadata is not None else None
@@ -86,7 +86,7 @@ def audit_route(
         expected = {
             "platform": "telegram",
             "chat_id": chat_id,
-            "thread_id": None,
+            "thread_id": source_thread_id,
             "user_id": user_id,
             "chat_type": "dm",
             "notifier_profile": source_profile,
@@ -164,6 +164,7 @@ def main() -> int:
     parser.add_argument("--source-profile", required=True)
     parser.add_argument("--chat-id", required=True)
     parser.add_argument("--user-id", required=True)
+    parser.add_argument("--source-thread-id", required=True)
     parser.add_argument("--source-session-id", required=True)
     args = parser.parse_args()
     try:
@@ -173,6 +174,7 @@ def main() -> int:
             source_profile=args.source_profile,
             chat_id=args.chat_id,
             user_id=args.user_id,
+            source_thread_id=args.source_thread_id,
             source_session_id=args.source_session_id,
         )
         emit(report)
