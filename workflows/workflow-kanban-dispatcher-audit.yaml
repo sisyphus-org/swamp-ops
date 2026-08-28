@@ -1,0 +1,31 @@
+id: e19b8b88-e265-4008-9449-8056871b8e00
+name: kanban-dispatcher-audit
+description: >-
+  Read-only production audit: every profile has an explicit dispatcher flag,
+  broker is the only enabled profile, and exactly one broker process owns the
+  shared dispatcher lock.
+tags:
+  domain: hermes-platform
+  safety: read-only
+  owner: broker
+jobs:
+  - name: main
+    description: Run the fixed topology and lock-owner audit.
+    steps:
+      - name: audit
+        description: Emit a machine-readable read-only attestation.
+        task:
+          type: model_method
+          modelIdOrName: kanban-dispatcher-audit
+          methodName: execute
+          inputs:
+            run: /Users/hermes/.hermes/hermes-agent/venv/bin/python scripts/kanban_dispatcher_audit.py
+            workingDir: /Users/hermes/workspaces/swamp-ops
+            timeout: 60000
+            ignoreExitCode: false
+        dependsOn: []
+        weight: 1
+        allowFailure: false
+    dependsOn: []
+    weight: 1
+version: 1

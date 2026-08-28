@@ -29,6 +29,18 @@ The plan reports role-specific required variables and dedicated Gateway safe roo
 
 Script: `scripts/hermes_profile_bootstrap.py`. Verified 2026-08-27: role-specific plan runs, apply for `broker` and `project-manager`, config/model/STT checks, and refuse-on-existing behavior passed with real inputs.
 
+## `kanban-dispatcher-audit`
+
+Deterministic read-only production audit for the SIS-58 single-dispatcher topology. It checks the fixed seven-profile roster, requires every `kanban.dispatch_in_gateway` value to be explicit, requires only `broker=true`, and resolves the sole holder of `/Users/hermes/.hermes/kanban/.dispatcher.lock` back to its gateway profile.
+
+```bash
+swamp model validate kanban-dispatcher-audit
+swamp workflow validate kanban-dispatcher-audit
+swamp workflow run kanban-dispatcher-audit
+```
+
+The workflow performs no configuration or service writes. Cutover order, live verification, recovery proof and the explicit rollback to the previous `crypto-analyst` owner are documented in [`docs/kanban-dispatcher-cutover.md`](docs/kanban-dispatcher-cutover.md).
+
 ## `linear-project-standard`
 
 Organization-wide Linear hierarchy contract:
