@@ -1,4 +1,5 @@
 import importlib.util
+import plistlib
 import sys
 import tempfile
 import unittest
@@ -23,6 +24,21 @@ class InputContractTests(unittest.TestCase):
     def test_sample_slug_rejects_path_traversal(self):
         with self.assertRaisesRegex(ValueError, "sample"):
             ops.validate_sample_slug("../books-7m")
+
+    def test_numeric_aiff_sample_is_supported(self):
+        old_root = ops.SAMPLE_ROOT
+        with tempfile.TemporaryDirectory() as tmp:
+            samples = Path(tmp) / "samples"
+            samples.mkdir()
+            expected = samples / "sis69-numbers.aiff"
+            expected.write_bytes(b"fixture")
+            setattr(ops, "SAMPLE_ROOT", samples)
+            try:
+                self.assertEqual(
+                    ops.resolve_sample("sis69-numbers"), expected.resolve()
+                )
+            finally:
+                setattr(ops, "SAMPLE_ROOT", old_root)
 
     def test_sample_symlink_outside_runtime_root_is_rejected(self):
         old_root = ops.SAMPLE_ROOT
@@ -68,6 +84,54 @@ class InputContractTests(unittest.TestCase):
 
 
 class AuditTests(unittest.TestCase):
+    def test_numeric_prompt_is_versioned_and_covers_required_formats(self):
+        prompt = ops.read_desired_prompt()
+        for example in (
+            "25",
+            "-7",
+            "3,5",
+            "12%",
+            "28 августа 2026",
+            "14:30",
+            "3.2",
+            "1200 рублей",
+        ):
+            with self.subTest(example=example):
+                self.assertIn(example, prompt)
+
+    def test_launchdaemon_prompt_reader_returns_exact_environment_value(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plist_path = Path(tmp) / "local.qwen-stt.plist"
+            plist_path.write_bytes(
+                plistlib.dumps(
+                    {"EnvironmentVariables": {"HERMES_STT_VOCAB": "numeric prompt"}}
+                )
+            )
+            self.assertEqual(ops.read_launchdaemon_prompt(plist_path), "numeric prompt")
+
+    def test_plan_requires_owner_rollout_when_qwen_prompt_differs(self):
+        desired = ops.desired_command(Path("/runtime/chunked_qwen_stt.py"))
+        payload = ops.build_plan(
+            profile_commands={"default": desired, "books": desired},
+            deployed_script=Path("/runtime/chunked_qwen_stt.py"),
+            source_script=Path("/source/chunked_qwen_stt.py"),
+            deployed_hash="same",
+            source_hash="same",
+            desired_prompt="write numbers as digits",
+            live_prompt=None,
+        )
+        self.assertEqual(payload["result"], "changes_required")
+        self.assertFalse(payload["qwenPromptCompliant"])
+        self.assertIn(
+            {
+                "type": "set-qwen-prompt",
+                "launchDaemon": str(ops.QWEN_LAUNCHDAEMON),
+                "environmentVariable": "HERMES_STT_VOCAB",
+                "ownerRequired": True,
+            },
+            payload["plannedActions"],
+        )
+
     def test_plan_reports_exact_noncompliant_profiles_without_writing(self):
         desired = ops.desired_command(Path("/runtime/chunked_qwen_stt.py"))
         commands = {
@@ -128,17 +192,39 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(metrics["chunkCount"], 3)
 
 
+class NumericTranscriptTests(unittest.TestCase):
+    def test_numeric_smoke_accepts_digit_formatted_transcript(self):
+        transcript = (
+            "В заказе 25 деталей. Температура -7 градусов. Скидка 12%. "
+            "Встреча 28 августа 2026 года в 14:30. Версия 3.2. "
+            "Сумма 1200 рублей."
+        )
+        self.assertEqual(ops.validate_numeric_transcript(transcript), [])
+
+    def test_numeric_smoke_reports_missing_formats_and_number_words(self):
+        issues = ops.validate_numeric_transcript(
+            "В заказе двадцать пять деталей. Скидка двенадцать процентов."
+        )
+        self.assertIn("missing:quantity-25", issues)
+        self.assertIn("missing:percent-12", issues)
+        self.assertIn("number-words-remain", issues)
+
+
 class WorkflowContractTests(unittest.TestCase):
     def test_workflow_has_bounded_mode_and_fixed_sample_slug(self):
         workflow_path = (
             SCRIPT.parents[1] / "workflows" / "workflow-chunked-qwen-stt.yaml"
         )
         parsed = yaml.safe_load(workflow_path.read_text())
-        self.assertEqual(parsed["inputs"]["mode"]["enum"], ["plan", "smoke"])
+        self.assertEqual(
+            parsed["inputs"]["mode"]["enum"],
+            ["plan", "smoke", "numeric-smoke"],
+        )
         self.assertNotIn("sample", parsed["inputs"])
         command = parsed["jobs"][0]["steps"][0]["task"]["inputs"]["run"]
         self.assertIn("--mode '${{ inputs.mode }}'", command)
         self.assertIn("--sample books-7m", command)
+        self.assertIn("--numeric-sample sis69-numbers", command)
         self.assertNotIn("inputs.sample", command)
         self.assertEqual(
             parsed["jobs"][0]["steps"][0]["task"]["inputs"]["workingDir"],

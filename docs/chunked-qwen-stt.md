@@ -29,24 +29,32 @@ The runtime fails closed unless the Qwen endpoint is explicit HTTP loopback (`12
 
 The source and deployed SHA-256 must match. New profile baselines use the stable runtime artifact through `scripts/hermes_profile_bootstrap.py`.
 
+## Numeric formatting prompt
+
+Qwen3-ASR receives free-form context from `HERMES_STT_VOCAB`; the local server passes it to `processor.apply_transcription_request(prompt=...)`. The canonical value is versioned in `config/qwen-stt-numeric-prompt.txt`. It biases quantities, negative and decimal numbers, dates, time, percentages, versions, and monetary amounts toward Arabic digits. This is model prompting, not heuristic transcript rewriting.
+
+The system LaunchDaemon must contain the exact prompt under `EnvironmentVariables.HERMES_STT_VOCAB`. Because `/Library/LaunchDaemons` and `launchctl` are owner-controlled, rollout uses a reviewed plist draft and an owner-approved restart. The plan reports only prompt hashes, not the full prompt, and emits `set-qwen-prompt` with `ownerRequired=true` when live state differs.
+
 ## Swamp workflow
 
-`chunked-qwen-stt` has two bounded modes:
+`chunked-qwen-stt` has three bounded modes:
 
 ```bash
 swamp model validate chunked-qwen-stt
 swamp workflow validate chunked-qwen-stt
 
-# Read-only live config/hash audit
+# Read-only live config/hash/prompt audit
 swamp workflow run chunked-qwen-stt --input mode=plan
 
-# Stage a local sample in ignored runtime data, then run real Qwen smoke
+# Stage local samples in ignored runtime data, then run real Qwen smokes
 mkdir -p .swamp/stt-samples
-cp /path/to/sample.ogg .swamp/stt-samples/books-7m.ogg
+cp /path/to/long-sample.ogg .swamp/stt-samples/books-7m.ogg
+cp /path/to/numeric-sample.aiff .swamp/stt-samples/sis69-numbers.aiff
 swamp workflow run chunked-qwen-stt --input mode=smoke
+swamp workflow run chunked-qwen-stt --input mode=numeric-smoke
 ```
 
-The committed workflow always uses the fixed `books-7m` sample slug, so no user-controlled sample value reaches the shell command. The operations script still validates slugs for direct operator use. Symlinked samples, symlinked runtime parents/output roots, and paths resolving outside the fixed runtime root are rejected. Smoke output and source audio stay under ignored `.swamp/` runtime data. The versioned result contains only hashes and metrics, not transcript content.
+The committed workflow always uses fixed `books-7m` and `sis69-numbers` sample slugs, so no user-controlled sample value reaches the shell command. The operations script still validates slugs for direct operator use. Symlinked samples, symlinked runtime parents/output roots, and paths resolving outside the fixed runtime root are rejected. Smoke output and source audio stay under ignored `.swamp/` runtime data. The versioned result contains only hashes, metrics, and the numeric assertion result—not transcript content.
 
 ## Deployment and config
 
@@ -57,6 +65,14 @@ Deploy the reviewed source to the stable runtime path and verify identical hashe
 ```
 
 The STT provider reads this config for each transcription; a Gateway restart was not required in the SIS-64 live readback. Always verify with a direct `tools.transcription_tools.transcribe_audio` call and rerun the Swamp plan until `result=compliant` with no planned actions.
+
+For the shared Qwen service prompt, generate and review a plist draft that differs from the live plist only by `EnvironmentVariables.HERMES_STT_VOCAB`. The owner then installs the reviewed draft and restarts the system LaunchDaemon:
+
+```bash
+sudo cp /Users/hermes/workspaces/drafts/local.qwen-stt.sis69.plist /Library/LaunchDaemons/local.qwen-stt.plist && sudo chown root:wheel /Library/LaunchDaemons/local.qwen-stt.plist && sudo chmod 644 /Library/LaunchDaemons/local.qwen-stt.plist && sudo plutil -lint /Library/LaunchDaemons/local.qwen-stt.plist && sudo launchctl kickstart -k system/local.qwen-stt
+```
+
+After restart, verify `/health`, rerun plan until `qwenPromptCompliant=true`, then run `numeric-smoke`. A passing numeric smoke must report `numericAssertionsPassed=true` without including transcript content.
 
 ## Tuning
 
