@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
 from pathlib import Path
 from typing import Any, Callable
 
@@ -49,10 +50,12 @@ def _task_value(task: Any, field: str) -> Any:
     return task.get(field) if isinstance(task, dict) else getattr(task, field, None)
 
 
-def _load_current_task(task_id: str) -> Any:
+def _load_current_task(task_id: str, db_path: Path) -> Any:
     from hermes_cli import kanban_db as kb
 
-    conn = kb.connect()
+    if not db_path.is_file():
+        raise FileNotFoundError("pinned Kanban database does not exist")
+    conn = kb.connect(db_path=db_path)
     try:
         task = kb.get_task(conn, task_id)
     finally:
@@ -200,12 +203,26 @@ def handle_pm_linear_execute(args: dict[str, Any], **kwargs: Any) -> str:
             sort_keys=True,
         )
 
-    task_loader: Callable[[str], Any] = kwargs.get("task_loader") or _load_current_task
-    try:
-        task = task_loader(task_id)
-    except Exception:
+    raw_db_path = str(environ.get("HERMES_KANBAN_DB") or "").strip()
+    db_path = Path(raw_db_path)
+    if not db_path.is_absolute() or db_path.name != "kanban.db":
         return json.dumps(
-            {"status": "rejected", "error": "current Kanban task could not be loaded"},
+            {"status": "rejected", "error": "tool requires a pinned Kanban database"},
+            sort_keys=True,
+        )
+
+    task_loader: Callable[[str, Path], Any] = (
+        kwargs.get("task_loader") or _load_current_task
+    )
+    try:
+        task = task_loader(task_id, db_path)
+    except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+        return json.dumps(
+            {
+                "status": "rejected",
+                "error": "current Kanban task could not be loaded",
+                "error_class": type(exc).__name__,
+            },
             sort_keys=True,
         )
     if (

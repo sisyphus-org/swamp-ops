@@ -1,5 +1,6 @@
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -207,11 +208,12 @@ class PluginTests(unittest.TestCase):
                 lane_loader=lambda: lane,
                 client_factory=lambda _token: object(),
                 lifecycle_factory=lambda _task_id: lifecycle,
-                task_loader=lambda _task_id: task_record(),
+                task_loader=lambda _task_id, _db_path: task_record(),
                 environ={
                     "HERMES_PROFILE": "project-manager",
                     "HERMES_KANBAN_TASK": "t_1234abcd",
                     "HERMES_KANBAN_RUN_ID": "7",
+                    "HERMES_KANBAN_DB": "/tmp/kanban.db",
                     "HERMES_HOME": "/tmp/project-manager",
                     "LINEAR_TOKEN": "fixture-token",
                 },
@@ -257,21 +259,27 @@ class PluginTests(unittest.TestCase):
                     self.assertIsNotNone(run_id)
                 finally:
                     conn.close()
-                result = json.loads(
-                    handle_pm_linear_execute(
-                        {},
-                        lane_loader=lambda: lane,
-                        client_factory=lambda _token: object(),
-                        lifecycle_factory=lambda _task_id: lifecycle,
-                        environ={
-                            "HERMES_PROFILE": "project-manager",
-                            "HERMES_KANBAN_TASK": task_id,
-                            "HERMES_KANBAN_RUN_ID": str(run_id),
-                            "HERMES_HOME": tmp,
-                            "LINEAR_TOKEN": "fixture-token",
-                        },
+                wrong_db = Path(tmp) / "wrong-board" / "kanban.db"
+                kb.connect(db_path=wrong_db).close()
+                with mock.patch.dict(
+                    os.environ, {"HERMES_KANBAN_DB": str(wrong_db)}
+                ):
+                    result = json.loads(
+                        handle_pm_linear_execute(
+                            {},
+                            lane_loader=lambda: lane,
+                            client_factory=lambda _token: object(),
+                            lifecycle_factory=lambda _task_id: lifecycle,
+                            environ={
+                                "HERMES_PROFILE": "project-manager",
+                                "HERMES_KANBAN_TASK": task_id,
+                                "HERMES_KANBAN_RUN_ID": str(run_id),
+                                "HERMES_KANBAN_DB": str(db_path),
+                                "HERMES_HOME": tmp,
+                                "LINEAR_TOKEN": "fixture-token",
+                            },
+                        )
                     )
-                )
         self.assertEqual(result["status"], "completed")
         self.assertEqual(lane.calls[0], ("validate", command()))
 
@@ -288,11 +296,12 @@ class PluginTests(unittest.TestCase):
                 lane_loader=lambda: lane,
                 client_factory=BrokenClient,
                 lifecycle_factory=lambda _task_id: lifecycle,
-                task_loader=lambda _task_id: task_record(),
+                task_loader=lambda _task_id, _db_path: task_record(),
                 environ={
                     "HERMES_PROFILE": "project-manager",
                     "HERMES_KANBAN_TASK": "t_1234abcd",
                     "HERMES_KANBAN_RUN_ID": "7",
+                    "HERMES_KANBAN_DB": "/tmp/kanban.db",
                     "HERMES_HOME": "/tmp/project-manager",
                     "LINEAR_TOKEN": "fixture-token",
                 },
@@ -330,7 +339,7 @@ class PluginTests(unittest.TestCase):
                         lane_loader=lambda: FakeLane(),
                         client_factory=client_factory,
                         lifecycle_factory=lambda _task_id: FakeLifecycle(),
-                        task_loader=lambda _task_id: task_record(),
+                        task_loader=lambda _task_id, _db_path: task_record(),
                         environ=environ,
                     )
                 )
@@ -349,16 +358,57 @@ class PluginTests(unittest.TestCase):
                 result = json.loads(
                     handle_pm_linear_execute(
                         {},
-                        task_loader=lambda _task_id, value=task: value,
+                        task_loader=lambda _task_id, _db_path, value=task: value,
                         client_factory=client_factory,
                         environ={
                             "HERMES_PROFILE": "project-manager",
                             "HERMES_KANBAN_TASK": "t_1234abcd",
                             "HERMES_KANBAN_RUN_ID": "7",
+                            "HERMES_KANBAN_DB": "/tmp/kanban.db",
                         },
                     )
                 )
                 self.assertEqual(result["status"], "rejected")
+        client_factory.assert_not_called()
+
+    def test_missing_worker_db_path_rejects_before_task_load(self):
+        task_loader = mock.Mock()
+        result = json.loads(
+            handle_pm_linear_execute(
+                {},
+                task_loader=task_loader,
+                environ={
+                    "HERMES_PROFILE": "project-manager",
+                    "HERMES_KANBAN_TASK": "t_1234abcd",
+                    "HERMES_KANBAN_RUN_ID": "7",
+                },
+            )
+        )
+        self.assertEqual(result["status"], "rejected")
+        task_loader.assert_not_called()
+
+    def test_task_load_failure_returns_only_observable_error_class(self):
+        client_factory = mock.Mock()
+
+        def broken_loader(_task_id, _db_path):
+            raise sqlite3.OperationalError("database path with secret-shaped-value")
+
+        result = json.loads(
+            handle_pm_linear_execute(
+                {},
+                task_loader=broken_loader,
+                client_factory=client_factory,
+                environ={
+                    "HERMES_PROFILE": "project-manager",
+                    "HERMES_KANBAN_TASK": "t_1234abcd",
+                    "HERMES_KANBAN_RUN_ID": "7",
+                    "HERMES_KANBAN_DB": "/tmp/kanban.db",
+                },
+            )
+        )
+        self.assertEqual(result["status"], "rejected")
+        self.assertEqual(result["error_class"], "OperationalError")
+        self.assertNotIn("secret-shaped-value", json.dumps(result))
         client_factory.assert_not_called()
 
     def test_malformed_persisted_envelope_blocks_without_linear_call(self):
@@ -367,7 +417,7 @@ class PluginTests(unittest.TestCase):
         result = json.loads(
             handle_pm_linear_execute(
                 {},
-                task_loader=lambda _task_id: task_record(
+                task_loader=lambda _task_id, _db_path: task_record(
                     body='{"schema_version":"wrong"}'
                 ),
                 client_factory=client_factory,
@@ -376,6 +426,7 @@ class PluginTests(unittest.TestCase):
                     "HERMES_PROFILE": "project-manager",
                     "HERMES_KANBAN_TASK": "t_1234abcd",
                     "HERMES_KANBAN_RUN_ID": "7",
+                    "HERMES_KANBAN_DB": "/tmp/kanban.db",
                 },
             )
         )

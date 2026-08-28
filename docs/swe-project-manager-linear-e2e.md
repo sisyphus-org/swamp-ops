@@ -44,7 +44,7 @@ The source plugin imports no Linear client and reads no Linear token.
 
 `plugins/project_manager_linear` exposes only no-argument `pm_linear_execute()` and bundles the SIS-59 lane implementation.
 
-1. Runs only when `HERMES_PROFILE=project-manager`, a real `HERMES_KANBAN_TASK` is present, and `HERMES_KANBAN_RUN_ID` matches that task's current running worker run.
+1. Runs only when `HERMES_PROFILE=project-manager`, a real `HERMES_KANBAN_TASK` is present, `HERMES_KANBAN_RUN_ID` matches that task's current running worker run, and the dispatcher-provided absolute `HERMES_KANBAN_DB` explicitly resolves the task's board database.
 2. Reads `linear-command.v1` only from the exact persisted `linear-kanban-task.v1` body; model-supplied command fields are rejected.
 3. Re-validates exact `linear-command.v1`.
 4. Reads the Linear token only inside the PM process.
