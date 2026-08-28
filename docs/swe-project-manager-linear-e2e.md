@@ -42,14 +42,15 @@ The source plugin imports no Linear client and reads no Linear token.
 
 ### Project Manager worker edge
 
-`plugins/project_manager_linear` exposes only `pm_linear_execute(command)` and bundles the SIS-59 lane implementation.
+`plugins/project_manager_linear` exposes only no-argument `pm_linear_execute()` and bundles the SIS-59 lane implementation.
 
-1. Runs only when `HERMES_PROFILE=project-manager` and a real `HERMES_KANBAN_TASK` is present.
-2. Re-validates exact `linear-command.v1`.
-3. Reads the Linear token only inside the PM process.
-4. Performs deterministic plan, apply and exact read-back with the existing hash-only journal/comment-marker idempotency contract.
-5. Requires `linear-result.v1.verified=true`.
-6. Completes the current task itself with the typed result stored in `task.result` and a concise human summary; on failure it records one redacted typed blocker.
+1. Runs only when `HERMES_PROFILE=project-manager`, a real `HERMES_KANBAN_TASK` is present, and `HERMES_KANBAN_RUN_ID` matches that task's current running worker run.
+2. Reads `linear-command.v1` only from the exact persisted `linear-kanban-task.v1` body; model-supplied command fields are rejected.
+3. Re-validates exact `linear-command.v1`.
+4. Reads the Linear token only inside the PM process.
+5. Performs deterministic plan, apply and exact read-back with the existing hash-only journal/comment-marker idempotency contract.
+6. Requires `linear-result.v1.verified=true`.
+7. Completes the current task itself with the typed result stored in `task.result` and a concise human summary; on failure it records one redacted typed blocker.
 
 The force-loaded `project-manager-linear-worker` skill tells the PM model to call the typed tool once and make no direct Linear, terminal or second lifecycle call.
 

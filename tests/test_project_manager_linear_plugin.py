@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -30,6 +31,26 @@ def command():
         "target": {"type": "issue", "identifier": "SIS-61"},
         "change": {"body": "SIS-61 E2E proof A."},
         "policy": {"mode": "standard"},
+    }
+
+
+def task_record(*, body=None, assignee="project-manager", status="running", run_id=7):
+    envelope = {
+        "schema_version": "linear-kanban-task.v1",
+        "command": command(),
+        "worker_contract": {
+            "profile": "project-manager",
+            "tool": "pm_linear_execute",
+            "mode": "plan_apply_read_back",
+            "completion": "tool_completes_current_kanban_task",
+        },
+    }
+    return {
+        "id": "t_1234abcd",
+        "assignee": assignee,
+        "status": status,
+        "current_run_id": run_id,
+        "body": body if body is not None else json.dumps(envelope),
     }
 
 
@@ -146,41 +167,51 @@ class PluginTests(unittest.TestCase):
         )
         self.assertNotIn("swamp-ops-runtime", source)
 
-    def test_schema_accepts_only_typed_command(self):
+    def test_worker_skill_calls_no_arg_tool_and_does_not_reconstruct_command(self):
+        skill = (ROOT / "skills" / "project-manager-linear-worker" / "SKILL.md").read_text()
+        self.assertIn("Call `pm_linear_execute` once with no arguments", skill)
+        self.assertIn("reads the persisted command", skill)
+        self.assertNotIn("with that exact command object", skill)
+
+    def test_schema_accepts_no_model_supplied_command(self):
         parameters = PM_LINEAR_EXECUTE_SCHEMA["parameters"]
-        self.assertEqual(set(parameters["properties"]), {"command"})
-        self.assertEqual(parameters["required"], ["command"])
+        self.assertEqual(parameters["properties"], {})
+        self.assertEqual(parameters["required"], [])
         self.assertFalse(parameters["additionalProperties"])
-        command_schema = parameters["properties"]["command"]
-        self.assertFalse(command_schema["additionalProperties"])
-        self.assertEqual(
-            set(command_schema["required"]),
-            {
-                "schema_version",
-                "command_id",
-                "correlation_id",
-                "idempotency_key",
-                "source_profile",
-                "operation",
-                "target",
-                "change",
-                "policy",
-            },
+
+    def test_model_supplied_command_is_rejected_before_task_or_linear_access(self):
+        task_loader = mock.Mock()
+        client_factory = mock.Mock()
+        result = json.loads(
+            handle_pm_linear_execute(
+                {"command": command()},
+                task_loader=task_loader,
+                client_factory=client_factory,
+                environ={
+                    "HERMES_PROFILE": "project-manager",
+                    "HERMES_KANBAN_TASK": "t_1234abcd",
+                    "HERMES_KANBAN_RUN_ID": "7",
+                },
+            )
         )
-        self.assertEqual(command_schema["properties"]["schema_version"]["const"], "linear-command.v1")
+        self.assertEqual(result["status"], "rejected")
+        task_loader.assert_not_called()
+        client_factory.assert_not_called()
 
     def test_handler_completes_current_task_with_linear_result(self):
         lane = FakeLane()
         lifecycle = FakeLifecycle()
         result = json.loads(
             handle_pm_linear_execute(
-                {"command": command()},
+                {},
                 lane_loader=lambda: lane,
                 client_factory=lambda _token: object(),
                 lifecycle_factory=lambda _task_id: lifecycle,
+                task_loader=lambda _task_id: task_record(),
                 environ={
                     "HERMES_PROFILE": "project-manager",
                     "HERMES_KANBAN_TASK": "t_1234abcd",
+                    "HERMES_KANBAN_RUN_ID": "7",
                     "HERMES_HOME": "/tmp/project-manager",
                     "LINEAR_TOKEN": "fixture-token",
                 },
@@ -194,6 +225,55 @@ class PluginTests(unittest.TestCase):
         self.assertEqual(stored["schema_version"], "linear-result.v1")
         self.assertTrue(stored["verified"])
         self.assertEqual(lifecycle.blocked, [])
+        self.assertEqual(lane.calls[0], ("validate", command()))
+
+    def test_default_loader_reads_claimed_task_from_pinned_real_db(self):
+        from hermes_cli import kanban_db as kb
+
+        lane = FakeLane()
+        lifecycle = FakeLifecycle()
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "kanban.db"
+            with mock.patch.dict(os.environ, {"HERMES_KANBAN_DB": str(db_path)}):
+                conn = kb.connect()
+                try:
+                    task_id = kb.create_task(
+                        conn,
+                        title="Linear add_comment SIS-61",
+                        body=task_record()["body"],
+                        assignee="project-manager",
+                        initial_status="blocked",
+                    )
+                    promoted, refusal = kb.promote_task(
+                        conn,
+                        task_id,
+                        actor="test",
+                        reason="fixture route verified",
+                    )
+                    self.assertTrue(promoted, refusal)
+                    claimed = kb.claim_task(conn, task_id, claimer="test-claim")
+                    self.assertIsNotNone(claimed)
+                    run_id = claimed.current_run_id
+                    self.assertIsNotNone(run_id)
+                finally:
+                    conn.close()
+                result = json.loads(
+                    handle_pm_linear_execute(
+                        {},
+                        lane_loader=lambda: lane,
+                        client_factory=lambda _token: object(),
+                        lifecycle_factory=lambda _task_id: lifecycle,
+                        environ={
+                            "HERMES_PROFILE": "project-manager",
+                            "HERMES_KANBAN_TASK": task_id,
+                            "HERMES_KANBAN_RUN_ID": str(run_id),
+                            "HERMES_HOME": tmp,
+                            "LINEAR_TOKEN": "fixture-token",
+                        },
+                    )
+                )
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(lane.calls[0], ("validate", command()))
 
     def test_auth_failure_blocks_once_with_redacted_reason(self):
         class BrokenClient:
@@ -204,13 +284,15 @@ class PluginTests(unittest.TestCase):
         lifecycle = FakeLifecycle()
         result = json.loads(
             handle_pm_linear_execute(
-                {"command": command()},
+                {},
                 lane_loader=lambda: lane,
                 client_factory=BrokenClient,
                 lifecycle_factory=lambda _task_id: lifecycle,
+                task_loader=lambda _task_id: task_record(),
                 environ={
                     "HERMES_PROFILE": "project-manager",
                     "HERMES_KANBAN_TASK": "t_1234abcd",
+                    "HERMES_KANBAN_RUN_ID": "7",
                     "HERMES_HOME": "/tmp/project-manager",
                     "LINEAR_TOKEN": "fixture-token",
                 },
@@ -225,20 +307,80 @@ class PluginTests(unittest.TestCase):
     def test_non_pm_or_non_worker_context_rejected_without_linear_call(self):
         client_factory = mock.Mock()
         for environ in (
-            {"HERMES_PROFILE": "swe", "HERMES_KANBAN_TASK": "t_1234abcd"},
-            {"HERMES_PROFILE": "project-manager", "HERMES_KANBAN_TASK": ""},
+            {
+                "HERMES_PROFILE": "swe",
+                "HERMES_KANBAN_TASK": "t_1234abcd",
+                "HERMES_KANBAN_RUN_ID": "7",
+            },
+            {
+                "HERMES_PROFILE": "project-manager",
+                "HERMES_KANBAN_TASK": "",
+                "HERMES_KANBAN_RUN_ID": "7",
+            },
+            {
+                "HERMES_PROFILE": "project-manager",
+                "HERMES_KANBAN_TASK": "t_1234abcd",
+                "HERMES_KANBAN_RUN_ID": "",
+            },
         ):
             with self.subTest(environ=environ):
                 result = json.loads(
                     handle_pm_linear_execute(
-                        {"command": command()},
+                        {},
                         lane_loader=lambda: FakeLane(),
                         client_factory=client_factory,
                         lifecycle_factory=lambda _task_id: FakeLifecycle(),
+                        task_loader=lambda _task_id: task_record(),
                         environ=environ,
                     )
                 )
                 self.assertEqual(result["status"], "rejected")
+        client_factory.assert_not_called()
+
+    def test_task_identity_mismatch_is_rejected_without_linear_call(self):
+        client_factory = mock.Mock()
+        cases = (
+            task_record(assignee="swe"),
+            task_record(status="ready"),
+            task_record(run_id=8),
+        )
+        for task in cases:
+            with self.subTest(task=task):
+                result = json.loads(
+                    handle_pm_linear_execute(
+                        {},
+                        task_loader=lambda _task_id, value=task: value,
+                        client_factory=client_factory,
+                        environ={
+                            "HERMES_PROFILE": "project-manager",
+                            "HERMES_KANBAN_TASK": "t_1234abcd",
+                            "HERMES_KANBAN_RUN_ID": "7",
+                        },
+                    )
+                )
+                self.assertEqual(result["status"], "rejected")
+        client_factory.assert_not_called()
+
+    def test_malformed_persisted_envelope_blocks_without_linear_call(self):
+        lifecycle = FakeLifecycle()
+        client_factory = mock.Mock()
+        result = json.loads(
+            handle_pm_linear_execute(
+                {},
+                task_loader=lambda _task_id: task_record(
+                    body='{"schema_version":"wrong"}'
+                ),
+                client_factory=client_factory,
+                lifecycle_factory=lambda _task_id: lifecycle,
+                environ={
+                    "HERMES_PROFILE": "project-manager",
+                    "HERMES_KANBAN_TASK": "t_1234abcd",
+                    "HERMES_KANBAN_RUN_ID": "7",
+                },
+            )
+        )
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(len(lifecycle.blocked), 1)
         client_factory.assert_not_called()
 
 
