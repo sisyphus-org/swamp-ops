@@ -141,8 +141,6 @@ def normalize_russian_numbers(text: str) -> str:
         )
         return f"{whole},{fraction:0{digits}d}"
 
-    text = decimal_re.sub(replace_decimal, text)
-
     date_re = re.compile(
         rf"(?P<day>{ordinal_pattern})\s+"
         rf"(?P<month>{'|'.join(RUSSIAN_MONTHS)})\s+"
@@ -157,34 +155,38 @@ def normalize_russian_numbers(text: str) -> str:
             return match.group(0)
         return f"{day} {match.group('month')} {year} года"
 
-    text = date_re.sub(replace_date, text)
-    text = "\n\n".join(
-        parse(paragraph, language="ru") for paragraph in text.split("\n\n")
-    )
-    text = re.sub(r"\bминус\s+(\d+)\b", r"-\1", text, flags=re.IGNORECASE)
-    text = re.sub(
-        r"(?<!\d)(\d+)\s+процент(?:а|ов)?\b",
-        r"\1%",
-        text,
-        flags=re.IGNORECASE,
-    )
-
     def replace_time(match: re.Match[str]) -> str:
         return f"{int(match.group(1))}:{int(match.group(2)):02d}"
 
-    text = re.sub(
-        r"(?<!\d)(\d{1,2})\s+час(?:а|ов)?\s+(\d{1,2})\s+минут(?:а|ы)?\b",
-        replace_time,
-        text,
-        flags=re.IGNORECASE,
+    def normalize_paragraph(paragraph: str) -> str:
+        paragraph = decimal_re.sub(replace_decimal, paragraph)
+        paragraph = date_re.sub(replace_date, paragraph)
+        paragraph = parse(paragraph, language="ru")
+        paragraph = re.sub(
+            r"\bминус\s+(\d+)\b", r"-\1", paragraph, flags=re.IGNORECASE
+        )
+        paragraph = re.sub(
+            r"(?<!\d)(\d+)\s+процент(?:а|ов)?\b",
+            r"\1%",
+            paragraph,
+            flags=re.IGNORECASE,
+        )
+        paragraph = re.sub(
+            r"(?<!\d)(\d{1,2})\s+час(?:а|ов)?\s+(\d{1,2})\s+минут(?:а|ы)?\b",
+            replace_time,
+            paragraph,
+            flags=re.IGNORECASE,
+        )
+        return re.sub(
+            r"\b(версия)\s+(\d+)\s+точка\s+(\d+)\b",
+            r"\1 \2.\3",
+            paragraph,
+            flags=re.IGNORECASE,
+        )
+
+    return "\n\n".join(
+        normalize_paragraph(paragraph) for paragraph in text.split("\n\n")
     )
-    text = re.sub(
-        r"\b(версия)\s+(\d+)\s+точка\s+(\d+)\b",
-        r"\1 \2.\3",
-        text,
-        flags=re.IGNORECASE,
-    )
-    return text
 
 
 def plan_chunks(

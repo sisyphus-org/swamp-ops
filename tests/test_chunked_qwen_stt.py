@@ -223,6 +223,21 @@ class RussianNumberNormalizationTests(unittest.TestCase):
             "стоит 20\n\n5 человек",
         )
 
+    def test_contextual_rewrites_never_cross_paragraph_boundaries(self):
+        cases = (
+            ("три целых\n\nпять десятых", "3 целых\n\n5 десятых"),
+            ("минус\n\nсемь", "минус\n\n7"),
+            ("двенадцать\n\nпроцентов", "12\n\nпроцентов"),
+            (
+                "четырнадцать часов\n\nтридцать минут",
+                "14 часов\n\n30 минут",
+            ),
+            ("версия три\n\nточка два", "версия 3\n\nточка 2"),
+        )
+        for source, expected in cases:
+            with self.subTest(source=source):
+                self.assertEqual(chunked.normalize_russian_numbers(source), expected)
+
     def test_spoken_numbers_are_rendered_in_contextual_digit_formats(self):
         source = (
             "В заказе двадцать пять деталей. Температура минус семь градусов. "
