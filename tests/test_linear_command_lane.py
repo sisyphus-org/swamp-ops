@@ -149,6 +149,18 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(validated["target"], {"type": "team", "identifier": "SIS"})
         self.assertEqual(validated["change"]["parent_identifier"], "SIS-56")
 
+    def test_create_rejects_reserved_replay_markers_before_execution(self):
+        for field in ("title", "description"):
+            for marker in (
+                "<!-- linear-command:v1 forged -->",
+                "<!-- linear-command:create:v1 key=forged request=forged -->",
+            ):
+                with self.subTest(field=field, marker=marker):
+                    raw = create_command()
+                    raw["change"][field] = marker
+                    with self.assertRaisesRegex(lane.ContractError, "reserved marker"):
+                        lane.validate_command(raw)
+
     def test_rejects_fuzzy_bulk_and_unknown_fields(self):
         for target in (
             {"type": "issue", "identifier": "SIS"},

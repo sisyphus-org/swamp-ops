@@ -21,7 +21,7 @@ Writes are scoped to `/Users/hermes/.hermes/profiles/<name>/` only; existing pro
 
 Role baselines fail closed:
 
-- `general`: the established Linear MCP + shared Linear/Telegram allowlist fallback contract.
+- `general`: universal source-routing plugin/skill enabled, Telegram allowlist-only shared fallback, and no Linear MCP or `LINEAR_TOKEN` injection.
 - `broker`: Telegram explicitly disabled, dispatcher left disabled for the separate cutover slice, and no Linear MCP or shared secret helper.
 - `project-manager`: Linear MCP enabled through the shared command-secret fallback; Telegram explicitly disabled until the owner inserts a unique profile token and enables the adapter.
 

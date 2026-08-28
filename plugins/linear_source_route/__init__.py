@@ -10,10 +10,11 @@ from .route import RouteError, SourceContext, is_source_profile, route_request
 LINEAR_SOURCE_REQUEST_SCHEMA = {
     "name": "linear_source_request",
     "description": (
-        "Route one bounded owner request about an exact SIS-N Linear issue through "
-        "the project-manager Kanban lane. Use this for an exact request such as "
-        "'Добавь к SIS-61 комментарий: ...'. The tool never mutates Linear from SWE; "
-        "it creates or replays one audited wake-only task and returns its state."
+        "Route one bounded Linear request from an allowed user-facing profile "
+        "through the project-manager Kanban lane. Accepts an exact comment text, "
+        "a structured change_state request, or a structured create_issue request. "
+        "The calling profile never mutates Linear directly; the tool creates or "
+        "replays one audited wake-only task and returns its state."
     ),
     "parameters": {
         "type": "object",
@@ -232,7 +233,7 @@ def _source_context(
 
 
 def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
-    """Validate the live SWE route and create/replay one PM Kanban task."""
+    """Validate one live user-facing source route and create or replay its PM task."""
     try:
         if not isinstance(args, dict):
             raise RouteError("tool input must be an object")

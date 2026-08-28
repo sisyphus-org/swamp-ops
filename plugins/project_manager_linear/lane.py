@@ -25,6 +25,7 @@ SAFE_STATES = {"Backlog", "Todo", "Research", "In Progress", "In Review"}
 OWNER_CONTROLLED_STATES = {"Done", "Canceled", "Duplicate"}
 PRIORITIES = {"High": 2, "Medium": 3, "Low": 4}
 RESERVED_COMMENT_MARKER = "<!-- linear-command:v1"
+RESERVED_CREATE_MARKER = "<!-- linear-command:create:v1"
 MAX_COMMENT_LENGTH = 4000
 MAX_TITLE_LENGTH = 200
 MAX_DESCRIPTION_LENGTH = 10000
@@ -295,6 +296,12 @@ def validate_command(raw: Any) -> dict[str, Any]:
         if priority not in PRIORITIES:
             raise ContractError("create_issue priority is not in the bounded allowlist")
         if any(
+            marker in value
+            for marker in (RESERVED_COMMENT_MARKER, RESERVED_CREATE_MARKER)
+            for value in (title, description)
+        ):
+            raise ContractError("create_issue fields contain the reserved marker")
+        if any(
             pattern.search(title + "\n" + description)
             for pattern in CREDENTIAL_SHAPES
         ):
@@ -457,9 +464,9 @@ def execute_command(
             raise ContractError(f"exact workflow state not found: {change['state']}")
         key_hash, request_hash, _ = command_fingerprint(command)
         marker = (
-            f"<!-- linear-command:create:v1 key={key_hash} request={request_hash} -->"
+            f"{RESERVED_CREATE_MARKER} key={key_hash} request={request_hash} -->"
         )
-        key_marker = f"<!-- linear-command:create:v1 key={key_hash} "
+        key_marker = f"{RESERVED_CREATE_MARKER} key={key_hash} "
         children = client.list_child_issues(parent_identifier)
         same_key = [
             item for item in children if key_marker in str(item.get("description") or "")
