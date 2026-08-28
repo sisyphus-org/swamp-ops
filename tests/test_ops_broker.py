@@ -126,6 +126,12 @@ class RequestValidationTests(unittest.TestCase):
 
 
 class CommandConstructionTests(unittest.TestCase):
+    def test_canonical_plan_checksum_is_utf8_sorted_and_compact(self):
+        self.assertEqual(
+            _canonical_plan_checksum({"b": [2, 1], "a": "Привет"}),
+            "f5fed935f7e86bc457004bc3780183ef93581c2188663342fe41ee1285ae96a8",
+        )
+
     def test_allowlisted_operations_build_fixed_argv(self):
         policy = {
             "github": {"repositories": ["sisyphus-org/swamp-ops"]},
