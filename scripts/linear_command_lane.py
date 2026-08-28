@@ -105,6 +105,10 @@ class LinearClient:
             raise ContractError(f"Linear API HTTP {exc.code}: {detail}") from exc
         except (urllib.error.URLError, TimeoutError) as exc:
             raise ContractError(f"Linear API request failed: {exc}") from exc
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise ContractError("Linear API response was not valid JSON") from exc
+        if not isinstance(payload, dict):
+            raise ContractError("Linear API response root was not an object")
         if payload.get("errors"):
             messages = [item.get("message", "unknown GraphQL error") for item in payload["errors"]]
             raise ContractError("Linear GraphQL error: " + "; ".join(messages))
@@ -202,13 +206,20 @@ def validate_command(raw: Any) -> dict[str, Any]:
 
 
 def issue_snapshot(issue: dict[str, Any]) -> dict[str, Any]:
-    """Return the bounded issue fields allowed in a typed result."""
-    return {
-        "identifier": issue["identifier"],
-        "title": issue["title"],
-        "url": issue["url"],
-        "state": issue["state"]["name"],
+    """Return validated bounded issue fields allowed in a typed result."""
+    state = issue.get("state")
+    required_strings = {
+        "identifier": issue.get("identifier"),
+        "title": issue.get("title"),
+        "url": issue.get("url"),
+        "state": state.get("name") if isinstance(state, dict) else None,
     }
+    if not all(
+        isinstance(value, str) and bool(value.strip())
+        for value in required_strings.values()
+    ):
+        raise ContractError("Linear issue payload is missing required bounded fields")
+    return required_strings
 
 
 def result_base(command: dict[str, Any], issue: dict[str, Any], mode: str) -> dict[str, Any]:
@@ -482,6 +493,17 @@ def main() -> int:
                 "result": "error",
                 "verified": False,
                 "issues": [str(exc)],
+            }
+        )
+        return 1
+    except Exception as exc:
+        emit(
+            {
+                "schema_version": "linear-result.v1",
+                "mode": args.mode,
+                "result": "error",
+                "verified": False,
+                "issues": [f"unexpected execution error: {type(exc).__name__}"],
             }
         )
         return 1

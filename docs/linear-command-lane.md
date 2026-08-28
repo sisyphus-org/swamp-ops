@@ -11,7 +11,7 @@ Required envelope:
   "schema_version": "linear-command.v1",
   "command_id": "UUIDv4",
   "correlation_id": "UUIDv4",
-  "idempotency_key": "stable printable key",
+  "idempotency_key": "linear:SIS-59:read:2026-08-28",
   "source_profile": "swe",
   "operation": "read_issue | change_state | add_comment",
   "target": {"type": "issue", "identifier": "SIS-N"},
@@ -20,7 +20,7 @@ Required envelope:
 }
 ```
 
-The validator rejects unknown fields, arbitrary GraphQL or MCP method names, URLs, fuzzy identifiers, arrays/bulk targets, non-SIS teams, unsupported operations and unbounded payloads.
+The validator rejects unknown fields, arbitrary GraphQL or MCP method names, URLs, fuzzy identifiers, arrays/bulk targets, non-SIS teams, unsupported operations and unbounded payloads. `idempotency_key` is 8–200 characters, starts with an alphanumeric character, and thereafter uses only `A-Za-z0-9:._/-`.
 
 ### Allowed operations
 

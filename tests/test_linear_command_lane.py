@@ -1,9 +1,11 @@
+import contextlib
 import importlib.util
 import io
 import json
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -112,6 +114,22 @@ class ContractTests(unittest.TestCase):
             )
 
 
+class CliTests(unittest.TestCase):
+    def test_unexpected_execution_error_emits_typed_result(self):
+        output = io.StringIO()
+        argv = ["linear_command_lane.py", "--command", "commands/linear/x.json"]
+        with mock.patch.object(sys, "argv", argv), mock.patch.object(
+            lane, "load_command", side_effect=KeyError("unexpected payload")
+        ), contextlib.redirect_stdout(output):
+            code = lane.main()
+        self.assertEqual(code, 1)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["schema_version"], "linear-result.v1")
+        self.assertEqual(payload["result"], "error")
+        self.assertFalse(payload["verified"])
+        self.assertNotIn("unexpected payload", output.getvalue())
+
+
 class WorkflowContractTests(unittest.TestCase):
     def test_workflow_is_bounded_and_plan_only(self):
         workflow = (
@@ -177,6 +195,16 @@ class ClientTests(unittest.TestCase):
             {"input": {"issueId": "issue-uuid", "body": "body"}},
         )
 
+    def test_non_json_linear_response_becomes_contract_error(self):
+        client = lane.LinearClient("fixture")
+        with mock.patch.object(
+            lane.urllib.request,
+            "urlopen",
+            return_value=io.BytesIO(b"not-json"),
+        ):
+            with self.assertRaisesRegex(lane.ContractError, "valid JSON"):
+                client.execute(lane.ISSUE_QUERY, {"id": "SIS-59"})
+
 
 class ExecutionTests(unittest.TestCase):
     def test_read_returns_linear_result_v1_with_exact_verified_target(self):
@@ -191,6 +219,12 @@ class ExecutionTests(unittest.TestCase):
         client = FakeClient()
         client.current["team"]["key"] = "OTHER"
         with self.assertRaisesRegex(lane.ContractError, "SIS team"):
+            lane.execute_command(client, command(), mode="plan")
+
+    def test_malformed_issue_payload_becomes_contract_error(self):
+        client = FakeClient()
+        del client.current["state"]["name"]
+        with self.assertRaisesRegex(lane.ContractError, "issue payload"):
             lane.execute_command(client, command(), mode="plan")
 
     def test_state_plan_records_before_after_without_write(self):
