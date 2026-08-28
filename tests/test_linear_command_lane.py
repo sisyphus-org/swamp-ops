@@ -133,6 +133,7 @@ class FakeClient:
                 "title": title,
                 "url": "https://linear.app/example/issue/SIS-99",
                 "description": description,
+                "priority": priority,
             }
         )
         self.children.append(created)
@@ -553,6 +554,48 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(replay["result"], "no_op")
             self.assertEqual(replay["target"]["identifier"], "SIS-99")
             self.assertEqual(len(client.writes), 1)
+
+    def test_create_issue_rejects_tampered_bounded_read_back_before_journal(self):
+        for field in ("description", "priority"):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as tmp:
+                class TamperedClient(FakeClient):
+                    def create_issue(self, **kwargs):
+                        super().create_issue(**kwargs)
+                        if field == "description":
+                            marker = kwargs["description"].split("\n\n")[-1]
+                            self.children[-1]["description"] = f"tampered\n\n{marker}"
+                        else:
+                            self.children[-1]["priority"] = 4
+
+                journal = Path(tmp) / "journal.json"
+                with self.assertRaisesRegex(
+                    lane.ContractError, "bounded field read-back verification"
+                ):
+                    lane.execute_command(
+                        TamperedClient(),
+                        create_command(),
+                        mode="apply",
+                        journal_path=journal,
+                    )
+                self.assertFalse(journal.exists())
+
+    def test_create_issue_replay_rejects_later_bounded_field_drift(self):
+        for field in ("description", "priority"):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as tmp:
+                client = FakeClient()
+                journal = Path(tmp) / "journal.json"
+                raw = create_command()
+                lane.execute_command(client, raw, mode="apply", journal_path=journal)
+                if field == "description":
+                    marker = client.children[0]["description"].split("\n\n")[-1]
+                    client.children[0]["description"] = f"tampered\n\n{marker}"
+                else:
+                    client.children[0]["priority"] = 4
+                with self.assertRaisesRegex(
+                    lane.ContractError, "bounded field read-back verification"
+                ):
+                    lane.execute_command(client, raw, mode="apply", journal_path=journal)
+                self.assertEqual(len(client.writes), 1)
 
     def test_mutation_apply_requires_idempotency_journal(self):
         with self.assertRaisesRegex(lane.ContractError, "require an idempotency journal"):

@@ -42,7 +42,7 @@ CREDENTIAL_SHAPES = (
 ISSUE_QUERY = """
 query LaneIssue($id: String!) {
   issue(id: $id) {
-    id identifier title url
+    id identifier title url description priority
     state { id name type }
     team { id key }
   }
@@ -76,7 +76,7 @@ PARENT_CHILDREN_QUERY = """
 query LaneChildren($id: String!) {
   issue(id: $id) {
     children(first: 100) {
-      nodes { id identifier title url description state { id name type } team { id key } }
+      nodes { id identifier title url description priority state { id name type } team { id key } }
       pageInfo { hasNextPage }
     }
   }
@@ -467,6 +467,30 @@ def execute_command(
             f"{RESERVED_CREATE_MARKER} key={key_hash} request={request_hash} -->"
         )
         key_marker = f"{RESERVED_CREATE_MARKER} key={key_hash} "
+        description = change["description"].strip()
+        marked_description = f"{description}\n\n{marker}" if description else marker
+
+        def verified_create_snapshot(issue: dict[str, Any]) -> dict[str, Any]:
+            """Validate every bounded create field and return a marker-free result."""
+            snapshot = issue_snapshot(issue)
+            if (
+                snapshot["title"] != change["title"]
+                or snapshot["state"] != change["state"]
+                or issue.get("description") != marked_description
+                or issue.get("priority") != PRIORITIES[change["priority"]]
+            ):
+                raise ContractError(
+                    "create_issue bounded field read-back verification failed"
+                )
+            snapshot.update(
+                {
+                    "description": description,
+                    "priority": change["priority"],
+                    "parent_identifier": parent_identifier,
+                }
+            )
+            return snapshot
+
         children = client.list_child_issues(parent_identifier)
         same_key = [
             item for item in children if key_marker in str(item.get("description") or "")
@@ -480,7 +504,7 @@ def execute_command(
             raise ContractError("create_issue replay marker resolved more than one issue")
         if exact:
             created = exact[0]
-            snapshot = issue_snapshot(created)
+            snapshot = verified_create_snapshot(created)
             replay_base = result_base(command, created, mode)
             return finish(
                 {
@@ -520,8 +544,6 @@ def execute_command(
                 "no_op": False,
                 "verified": False,
             }
-        description = change["description"].strip()
-        marked_description = f"{description}\n\n{marker}" if description else marker
         client.create_issue(
             team_id=team["id"],
             state_id=states[0]["id"],
@@ -539,12 +561,7 @@ def execute_command(
         if len(verified_exact) != 1:
             raise ContractError("create_issue read-back verification failed")
         created = verified_exact[0]
-        created_snapshot = issue_snapshot(created)
-        if (
-            created_snapshot["title"] != change["title"]
-            or created_snapshot["state"] != change["state"]
-        ):
-            raise ContractError("create_issue bounded field read-back verification failed")
+        created_snapshot = verified_create_snapshot(created)
         created_base = result_base(command, created, mode)
         return finish(
             {
