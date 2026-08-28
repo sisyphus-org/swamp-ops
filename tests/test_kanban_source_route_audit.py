@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -12,7 +13,12 @@ from pathlib import Path
 from unittest import mock
 
 
-SCRIPT = Path(__file__).parents[1] / "scripts" / "kanban_source_route_audit.py"
+SCRIPT = (
+    Path(__file__).parents[1]
+    / "plugins"
+    / "swe_linear_route"
+    / "audit.py"
+)
 SOURCE_SESSION = "20260828_120000_1234abcd"
 SPEC = importlib.util.spec_from_file_location("kanban_source_route_audit", SCRIPT)
 if SPEC is None or SPEC.loader is None:
@@ -87,6 +93,18 @@ def run_audit(path: Path, **overrides: str):
 
 class RouteAuditTests(unittest.TestCase):
     """Verify the supported root-DM wake-only source route."""
+
+    def test_cli_wrapper_imports_bundled_audit_from_scripts_directory(self):
+        wrapper = Path(__file__).parents[1] / "scripts" / "kanban_source_route_audit.py"
+        completed = subprocess.run(
+            [sys.executable, str(wrapper), "--help"],
+            cwd=wrapper.parent,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("--source-session-id", completed.stdout)
 
     def test_exact_source_owned_root_dm_wake_route_passes(self):
         """A source-profile DM with exact session and wake-only delivery is healthy."""

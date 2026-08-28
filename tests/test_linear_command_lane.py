@@ -3,6 +3,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import subprocess
 import sys
 import tempfile
 import time
@@ -11,7 +12,12 @@ from unittest import mock
 from pathlib import Path
 
 
-SCRIPT = Path(__file__).parents[1] / "scripts" / "linear_command_lane.py"
+SCRIPT = (
+    Path(__file__).parents[1]
+    / "plugins"
+    / "project_manager_linear"
+    / "lane.py"
+)
 SPEC = importlib.util.spec_from_file_location("linear_command_lane", SCRIPT)
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError(f"cannot import Linear command lane: {SCRIPT}")
@@ -115,6 +121,17 @@ class ContractTests(unittest.TestCase):
                 command("add_comment", {"body": "<!-- linear-command:v1 forged -->"})
             )
 
+    def test_comment_contract_rejects_credential_shaped_bodies(self):
+        bodies = (
+            "Authorization: Bearer secret-shaped-value",
+            "Authorization: Basic secret-shaped-value",
+            "lin_api_" + "A" * 32,
+        )
+        for body in bodies:
+            with self.subTest(body=body[:24]):
+                with self.assertRaisesRegex(lane.ContractError, "credential-shaped"):
+                    lane.validate_command(command("add_comment", {"body": body}))
+
 
 class CliTests(unittest.TestCase):
     def test_unexpected_execution_error_emits_typed_result(self):
@@ -133,6 +150,18 @@ class CliTests(unittest.TestCase):
 
 
 class WorkflowContractTests(unittest.TestCase):
+    def test_cli_wrapper_imports_bundled_lane_from_scripts_directory(self):
+        wrapper = Path(__file__).parents[1] / "scripts" / "linear_command_lane.py"
+        completed = subprocess.run(
+            [sys.executable, str(wrapper), "--help"],
+            cwd=wrapper.parent,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("--command", completed.stdout)
+
     def test_workflow_is_bounded_and_plan_only(self):
         workflow = (
             Path(__file__).parents[1]
@@ -229,6 +258,12 @@ class ExecutionTests(unittest.TestCase):
         with self.assertRaisesRegex(lane.ContractError, "issue payload"):
             lane.execute_command(client, command(), mode="plan")
 
+    def test_null_team_payload_becomes_contract_error(self):
+        client = FakeClient()
+        client.current["team"] = None
+        with self.assertRaisesRegex(lane.ContractError, "SIS team"):
+            lane.execute_command(client, command(), mode="plan")
+
     def test_state_plan_records_before_after_without_write(self):
         client = FakeClient()
         result = lane.execute_command(
@@ -275,6 +310,21 @@ class ExecutionTests(unittest.TestCase):
             with self.assertRaisesRegex(lane.ContractError, "read-back verification"):
                 lane.execute_command(
                     StaleClient(),
+                    command("change_state", {"state": "In Review"}),
+                    mode="apply",
+                    journal_path=Path(tmp) / "journal.json",
+                )
+
+    def test_state_apply_null_read_back_state_becomes_contract_error(self):
+        class NullStateClient(FakeClient):
+            def update_issue_state(self, issue_id, state_id):
+                self.writes.append(("state", issue_id, state_id))
+                self.current["state"] = None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(lane.ContractError, "read-back verification"):
+                lane.execute_command(
+                    NullStateClient(),
                     command("change_state", {"state": "In Review"}),
                     mode="apply",
                     journal_path=Path(tmp) / "journal.json",
