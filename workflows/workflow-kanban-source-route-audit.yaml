@@ -1,0 +1,45 @@
+id: 8b2cd15a-7fff-4c97-b426-11bf11f8522b
+name: kanban-source-route-audit
+description: >-
+  Read-only audit of one source-profile Telegram thread subscription. Requires
+  exact notifier ownership, chat/thread routing, chat_type=thread and
+  delivery_mode=notify+wake; broker ownership fails closed.
+tags:
+  domain: hermes-platform
+  safety: read-only
+  integration: telegram
+inputs:
+  board:
+    type: string
+    pattern: "^[a-z0-9][a-z0-9_-]{0,63}$"
+  task_id:
+    type: string
+    pattern: "^t_[a-f0-9]{8}$"
+  source_profile:
+    type: string
+    pattern: "^[a-z][a-z0-9-]{1,30}$"
+  chat_id:
+    type: string
+    pattern: "^[1-9][0-9]*$"
+  thread_id:
+    type: string
+    pattern: "^[1-9][0-9]*$"
+jobs:
+  - name: main
+    steps:
+      - name: audit
+        task:
+          type: model_method
+          modelIdOrName: kanban-source-route-audit
+          methodName: execute
+          inputs:
+            run: /Users/hermes/.hermes/hermes-agent/venv/bin/python scripts/kanban_source_route_audit.py --board '${{ inputs.board }}' --task-id '${{ inputs.task_id }}' --source-profile '${{ inputs.source_profile }}' --chat-id '${{ inputs.chat_id }}' --thread-id '${{ inputs.thread_id }}'
+            workingDir: .
+            timeout: 60000
+            ignoreExitCode: false
+        dependsOn: []
+        weight: 1
+        allowFailure: false
+    dependsOn: []
+    weight: 1
+version: 1
