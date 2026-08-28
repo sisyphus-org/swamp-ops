@@ -1,9 +1,11 @@
+import concurrent.futures
 import contextlib
 import importlib.util
 import io
 import json
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -241,70 +243,84 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(client.writes, [])
 
     def test_state_apply_reads_back_exact_target_and_replay_is_noop(self):
-        client = FakeClient()
-        result = lane.execute_command(
-            client,
-            command("change_state", {"state": "In Review"}),
-            mode="apply",
-        )
-        self.assertEqual(result["result"], "applied")
-        self.assertEqual(result["before"]["state"], "In Progress")
-        self.assertEqual(result["after"]["state"], "In Review")
-        self.assertTrue(result["verified"])
-        self.assertEqual(client.writes, [("state", "issue-uuid", "state-In Review")])
-        replay = lane.execute_command(
-            client,
-            command("change_state", {"state": "In Review"}),
-            mode="apply",
-        )
-        self.assertEqual(replay["result"], "no_op")
-        self.assertEqual(len(client.writes), 1)
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Path(tmp) / "journal.json"
+            client = FakeClient()
+            result = lane.execute_command(
+                client,
+                command("change_state", {"state": "In Review"}),
+                mode="apply",
+                journal_path=journal,
+            )
+            self.assertEqual(result["result"], "applied")
+            self.assertEqual(result["before"]["state"], "In Progress")
+            self.assertEqual(result["after"]["state"], "In Review")
+            self.assertTrue(result["verified"])
+            self.assertEqual(client.writes, [("state", "issue-uuid", "state-In Review")])
+            replay = lane.execute_command(
+                client,
+                command("change_state", {"state": "In Review"}),
+                mode="apply",
+                journal_path=journal,
+            )
+            self.assertEqual(replay["result"], "no_op")
+            self.assertEqual(len(client.writes), 1)
 
     def test_state_apply_fails_when_read_back_does_not_match(self):
         class StaleClient(FakeClient):
             def update_issue_state(self, issue_id, state_id):
                 self.writes.append(("state", issue_id, state_id))
 
-        with self.assertRaisesRegex(lane.ContractError, "read-back verification"):
-            lane.execute_command(
-                StaleClient(),
-                command("change_state", {"state": "In Review"}),
-                mode="apply",
-            )
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(lane.ContractError, "read-back verification"):
+                lane.execute_command(
+                    StaleClient(),
+                    command("change_state", {"state": "In Review"}),
+                    mode="apply",
+                    journal_path=Path(tmp) / "journal.json",
+                )
 
     def test_comment_plan_apply_and_marker_replay_are_idempotent(self):
-        client = FakeClient()
-        raw = command(
-            "add_comment",
-            {"body": "SIS-59 command lane live verification."},
-            key="linear:SIS-59:comment:fixture",
-        )
-        planned = lane.execute_command(client, raw, mode="plan")
-        self.assertEqual(planned["result"], "planned")
-        self.assertEqual(planned["before"]["comment_count"], 0)
-        self.assertEqual(planned["after"]["comment_count"], 1)
-        self.assertNotIn("body", planned["plan"][0])
-        self.assertEqual(client.writes, [])
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Path(tmp) / "journal.json"
+            client = FakeClient()
+            raw = command(
+                "add_comment",
+                {"body": "SIS-59 command lane live verification."},
+                key="linear:SIS-59:comment:fixture",
+            )
+            planned = lane.execute_command(client, raw, mode="plan")
+            self.assertEqual(planned["result"], "planned")
+            self.assertEqual(planned["before"]["comment_count"], 0)
+            self.assertEqual(planned["after"]["comment_count"], 1)
+            self.assertNotIn("body", planned["plan"][0])
+            self.assertEqual(client.writes, [])
 
-        applied = lane.execute_command(client, raw, mode="apply")
-        self.assertEqual(applied["result"], "applied")
-        self.assertTrue(applied["verified"])
-        self.assertIn("<!-- linear-command:v1", client.writes[0][2])
-        replay = lane.execute_command(client, raw, mode="apply")
-        self.assertEqual(replay["result"], "no_op")
-        self.assertEqual(len(client.writes), 1)
+            applied = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+            self.assertEqual(applied["result"], "applied")
+            self.assertTrue(applied["verified"])
+            self.assertIn("<!-- linear-command:v1", client.writes[0][2])
+            replay = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+            self.assertEqual(replay["result"], "no_op")
+            self.assertEqual(len(client.writes), 1)
 
     def test_comment_apply_fails_when_marker_is_not_read_back(self):
         class MissingCommentClient(FakeClient):
             def create_comment(self, issue_id, body):
                 self.writes.append(("comment", issue_id, body))
 
-        with self.assertRaisesRegex(lane.ContractError, "comment read-back verification"):
-            lane.execute_command(
-                MissingCommentClient(),
-                command("add_comment", {"body": "verify me"}),
-                mode="apply",
-            )
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(lane.ContractError, "comment read-back verification"):
+                lane.execute_command(
+                    MissingCommentClient(),
+                    command("add_comment", {"body": "verify me"}),
+                    mode="apply",
+                    journal_path=Path(tmp) / "journal.json",
+                )
 
     def test_comment_marker_rejects_same_key_for_different_request(self):
         client = FakeClient()
@@ -320,8 +336,56 @@ class ExecutionTests(unittest.TestCase):
             {"body": "different"},
             key="linear:SIS-59:comment:conflict",
         )
-        with self.assertRaisesRegex(lane.ContractError, "conflicts"):
-            lane.execute_command(client, second, mode="apply")
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(lane.ContractError, "conflicts"):
+                lane.execute_command(
+                    client,
+                    second,
+                    mode="apply",
+                    journal_path=Path(tmp) / "journal.json",
+                )
+
+    def test_concurrent_comment_apply_creates_one_marked_comment(self):
+        class SlowClient(FakeClient):
+            def list_comments(self, issue_id):
+                snapshot = super().list_comments(issue_id)
+                if not snapshot:
+                    time.sleep(0.05)
+                return snapshot
+
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Path(tmp) / "journal.json"
+            client = SlowClient()
+            raw = command(
+                "add_comment",
+                {"body": "concurrent"},
+                key="linear:SIS-59:comment:concurrent",
+            )
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(
+                    pool.map(
+                        lambda _: lane.execute_command(
+                            client,
+                            raw,
+                            mode="apply",
+                            journal_path=journal,
+                        ),
+                        range(2),
+                    )
+                )
+            self.assertEqual(
+                sorted(item["result"] for item in results),
+                ["applied", "no_op"],
+            )
+            self.assertEqual(len(client.comments), 1)
+
+    def test_mutation_apply_requires_idempotency_journal(self):
+        with self.assertRaisesRegex(lane.ContractError, "require an idempotency journal"):
+            lane.execute_command(
+                FakeClient(),
+                command("add_comment", {"body": "bounded"}),
+                mode="apply",
+            )
 
     def test_journal_rejects_same_key_for_different_state_request(self):
         with tempfile.TemporaryDirectory() as tmp:

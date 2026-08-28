@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -11,6 +12,7 @@ import re
 import urllib.error
 import urllib.request
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -277,20 +279,47 @@ def write_journal(path: Path, entries: dict[str, str]) -> None:
     temporary.replace(path)
 
 
+@contextmanager
+def command_lock(journal_path: Path):
+    """Serialize all local mutation applies sharing one journal."""
+    journal_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = journal_path.with_suffix(journal_path.suffix + ".lock")
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        os.chmod(lock_path, 0o600)
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def execute_command(
     client: Any,
     raw: Any,
     *,
     mode: str,
     journal_path: Path | None = None,
+    _lock_held: bool = False,
 ) -> dict[str, Any]:
     """Plan or execute one validated exact-target command."""
     if mode not in {"plan", "apply"}:
         raise ContractError("mode must be plan or apply")
     command = validate_command(raw)
     key_hash, request_hash, _ = command_fingerprint(command)
+    mutation_apply = mode == "apply" and command["operation"] != "read_issue"
+    if mutation_apply and not _lock_held:
+        if journal_path is None:
+            raise ContractError("apply mutations require an idempotency journal")
+        with command_lock(journal_path):
+            return execute_command(
+                client,
+                command,
+                mode=mode,
+                journal_path=journal_path,
+                _lock_held=True,
+            )
     journal: dict[str, str] = {}
-    if mode == "apply" and command["operation"] != "read_issue" and journal_path:
+    if mutation_apply and journal_path:
         journal = load_journal(journal_path)
         existing_hash = journal.get(key_hash)
         if existing_hash is not None and existing_hash != request_hash:

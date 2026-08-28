@@ -62,6 +62,7 @@ The normal journal is `$HERMES_HOME/linear-command-lane/journal.json`. It stores
 
 ## Idempotency and recovery
 
+- A mutation apply requires the hash-only journal. A journal-wide advisory file lock serializes the complete local read/check/mutate/read-back/journal sequence across processes, preventing concurrent same-key comments and lost journal updates.
 - State changes read current state first. Already-converged state is a verified no-op, so replay after a crash cannot duplicate the mutation.
 - Comments receive an internal marker containing hashes of the idempotency key and semantic request. Exact replay is a verified no-op; the same key with a different request fails closed.
 - A local hash-only journal detects cross-operation or changed-request reuse after a successful verified apply.
