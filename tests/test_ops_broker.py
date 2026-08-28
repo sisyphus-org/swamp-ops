@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from plugins.ops_broker import handle_ops_broker
+from plugins.ops_broker import _verify_runtime_workspace, handle_ops_broker
 from plugins.ops_broker.broker import (
     _canonical_plan_checksum,
     build_command,
@@ -305,6 +305,14 @@ class PolicyTests(unittest.TestCase):
             self.assertNotIn(plan_operation, policy["peers"][peer]["operations"])
             self.assertNotIn(start_operation, policy["peers"][peer]["operations"])
             self.assertNotIn(approve_operation, policy["peers"][peer]["operations"])
+        self.assertEqual(
+            policy["workspace"], "/Users/hermes/workspaces/swamp-ops-runtime"
+        )
+        self.assertNotEqual(policy["workspace"], "/Users/hermes/workspaces/swamp-ops")
+        self.assertEqual(
+            policy["workspaceRevisionFile"],
+            "/Users/hermes/.hermes/plugin-data/ops-broker/runtime-revision",
+        )
         self.assertEqual(
             policy["swamp"]["repositoryBootstrapWorkflow"],
             "github-cloudflare-repo-bootstrap",
@@ -1207,6 +1215,68 @@ class ApplyBrokerTests(unittest.TestCase):
         self.assertEqual(response["result"]["status"], "succeeded")
 
 
+class RuntimeWorkspaceTests(unittest.TestCase):
+    def test_runtime_workspace_requires_attested_head_and_clean_tree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            revision = "a" * 40
+            revision_file = root / "runtime-revision"
+            revision_file.write_text(revision + "\n")
+            policy = {"workspaceRevisionFile": str(revision_file)}
+            with mock.patch(
+                "plugins.ops_broker.default_runner",
+                side_effect=[
+                    {"returncode": 0, "stdout": revision + "\n", "stderr": ""},
+                    {"returncode": 0, "stdout": "", "stderr": ""},
+                ],
+            ) as runner:
+                _verify_runtime_workspace(policy, root)
+
+        self.assertEqual(
+            runner.call_args_list,
+            [
+                mock.call(["git", "rev-parse", "HEAD"], cwd=root, timeout=10),
+                mock.call(
+                    ["git", "status", "--porcelain", "--untracked-files=all"],
+                    cwd=root,
+                    timeout=10,
+                ),
+            ],
+        )
+
+    def test_runtime_workspace_rejects_mismatch_and_dirty_tree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            revision_file = root / "runtime-revision"
+            revision_file.write_text("a" * 40 + "\n")
+            policy = {"workspaceRevisionFile": str(revision_file)}
+            with mock.patch(
+                "plugins.ops_broker.default_runner",
+                return_value={"returncode": 0, "stdout": "b" * 40, "stderr": ""},
+            ):
+                with self.assertRaisesRegex(ValueError, "HEAD does not match"):
+                    _verify_runtime_workspace(policy, root)
+            with mock.patch(
+                "plugins.ops_broker.default_runner",
+                side_effect=[
+                    {"returncode": 0, "stdout": "a" * 40, "stderr": ""},
+                    {"returncode": 0, "stdout": "untracked.txt\n", "stderr": ""},
+                ],
+            ):
+                with self.assertRaisesRegex(ValueError, "not clean"):
+                    _verify_runtime_workspace(policy, root)
+            (root / ".swamp-sources.yaml").write_text("sources: []\n")
+            with mock.patch(
+                "plugins.ops_broker.default_runner",
+                side_effect=[
+                    {"returncode": 0, "stdout": "a" * 40, "stderr": ""},
+                    {"returncode": 0, "stdout": "", "stderr": ""},
+                ],
+            ):
+                with self.assertRaisesRegex(ValueError, "source override"):
+                    _verify_runtime_workspace(policy, root)
+
+
 class PluginHandlerTests(unittest.TestCase):
     def test_handler_derives_caller_from_session_and_returns_typed_result(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1222,35 +1292,55 @@ class PluginHandlerTests(unittest.TestCase):
             )
             connection.commit()
             connection.close()
+            revision = "a" * 40
+            revision_file = root / "runtime-revision"
+            revision_file.write_text(revision + "\n")
+            policy = {
+                "peers": {
+                    "swe": {"operations": ["github.repository_access"]}
+                },
+                "github": {"repositories": ["sisyphus-org/swamp-ops"]},
+                "workspace": str(root),
+                "workspaceRevisionFile": str(revision_file),
+            }
             policy_path = root / "policy.json"
-            policy_path.write_text(
+            policy_path.write_text(json.dumps(policy))
+            untrusted_policy_path = root / "untrusted-policy.json"
+            untrusted_policy_path.write_text(
                 json.dumps(
                     {
-                        "peers": {
-                            "swe": {"operations": ["github.repository_access"]}
-                        },
-                        "github": {"repositories": ["sisyphus-org/swamp-ops"]},
-                        "workspace": str(root),
+                        **policy,
+                        "workspace": "/Users/hermes/workspaces/swamp-ops",
                     }
                 )
             )
             audit_path = root / "audit.jsonl"
 
+            def runner(argv, **_kwargs):
+                if argv == ["git", "rev-parse", "HEAD"]:
+                    return {"returncode": 0, "stdout": revision + "\n", "stderr": ""}
+                if argv == ["git", "status", "--porcelain", "--untracked-files=all"]:
+                    return {"returncode": 0, "stdout": "", "stderr": ""}
+                return {
+                    "returncode": 0,
+                    "stdout": '{"full_name":"sisyphus-org/swamp-ops"}',
+                    "stderr": "",
+                }
+
             with mock.patch.dict(
                 "os.environ",
                 {
                     "HERMES_HOME": str(root),
-                    "OPS_BROKER_POLICY": str(policy_path),
+                    "OPS_BROKER_POLICY": str(untrusted_policy_path),
+                    "OPS_BROKER_WORKSPACE": "/Users/hermes/workspaces/swamp-ops",
                     "OPS_BROKER_AUDIT": str(audit_path),
                 },
                 clear=False,
             ), mock.patch(
+                "plugins.ops_broker.PLUGIN_ROOT", root
+            ), mock.patch(
                 "plugins.ops_broker.default_runner",
-                return_value={
-                    "returncode": 0,
-                    "stdout": '{"full_name":"sisyphus-org/swamp-ops"}',
-                    "stderr": "",
-                },
+                side_effect=runner,
             ) as runner_mock:
                 result = json.loads(
                     handle_ops_broker(
@@ -1290,6 +1380,8 @@ class PluginHandlerTests(unittest.TestCase):
                 clear=False,
             ), mock.patch(
                 "plugins.ops_broker.resolve_caller", return_value="swe"
+            ), mock.patch(
+                "plugins.ops_broker._verify_runtime_workspace"
             ), mock.patch(
                 "plugins.ops_broker.execute_request",
                 side_effect=subprocess.TimeoutExpired(["gh", "api"], 60),
