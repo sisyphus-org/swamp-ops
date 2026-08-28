@@ -80,7 +80,7 @@ def audit_route(
         route["thread_id"] = route.get("thread_id") or None
         raw_metadata = route.get("delivery_metadata")
         try:
-            metadata = json.loads(raw_metadata) if raw_metadata else None
+            metadata = json.loads(raw_metadata) if raw_metadata is not None else None
         except (TypeError, json.JSONDecodeError):
             metadata = "<invalid-json>"
         expected = {

@@ -112,6 +112,19 @@ class RouteAuditTests(unittest.TestCase):
         self.assertEqual(report["result"], "pass")
         self.assertEqual(report["route"]["delivery_metadata"], {"chat_type": "dm"})
 
+    def test_empty_delivery_metadata_reports_drift(self):
+        """An empty string is malformed metadata, not equivalent to SQL NULL."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "kanban.db"
+            create_db(path)
+            conn = sqlite3.connect(path)
+            conn.execute("UPDATE kanban_notify_subs SET delivery_metadata = ''")
+            conn.commit()
+            conn.close()
+            report = run_audit(path)
+        self.assertEqual(report["result"], "drift")
+        self.assertEqual(set(report["mismatches"]), {"delivery_metadata"})
+
     def test_broker_cannot_own_source_delivery(self):
         """The headless broker can never be the Telegram notifier."""
         with tempfile.TemporaryDirectory() as tmp:
