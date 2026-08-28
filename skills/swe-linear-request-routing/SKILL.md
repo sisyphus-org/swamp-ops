@@ -1,7 +1,7 @@
 ---
 name: swe-linear-request-routing
 description: Route exact SIS-N requests through Project Manager.
-version: 0.1.1
+version: 0.1.2
 author: Alexey Petrov, Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]

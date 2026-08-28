@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
 from plugins.swe_linear_route import (  # noqa: E402
     SWE_LINEAR_REQUEST_SCHEMA,
     HermesKanbanBoard,
+    _default_runtime_profile_getter,
     handle_swe_linear_request,
 )
 
@@ -152,6 +153,11 @@ class AdapterTests(unittest.TestCase):
 
 
 class PluginTests(unittest.TestCase):
+    def test_default_runtime_profile_comes_from_resolved_profile_home(self):
+        profile_home = "/Users/hermes/.hermes/profiles/swe"
+        with mock.patch.dict("os.environ", {"HERMES_HOME": profile_home}, clear=False):
+            self.assertEqual(_default_runtime_profile_getter(), "swe")
+
     def test_swe_plugin_has_no_linear_client_or_mutable_runtime_dependency(self):
         plugin_root = ROOT / "plugins" / "swe_linear_route"
         source = "\n".join(
@@ -202,7 +208,7 @@ class PluginTests(unittest.TestCase):
                 session_id="20260828_120000_abcdef12",
                 board_factory=lambda: fake_board,
                 session_getter=lambda name, default="": session_values.get(name, default),
-                environ={"HERMES_PROFILE": "swe"},
+                runtime_profile_getter=lambda: "swe",
             )
         )
 
@@ -226,7 +232,7 @@ class PluginTests(unittest.TestCase):
                 session_id="20260828_120001_deadbeef",
                 board_factory=lambda: fake_board,
                 session_getter=lambda name, default="": session_values.get(name, default),
-                environ={"HERMES_PROFILE": "swe"},
+                runtime_profile_getter=lambda: "swe",
             )
         )
         self.assertEqual(result["status"], "rejected")
@@ -250,7 +256,7 @@ class PluginTests(unittest.TestCase):
                 session_id="20260828_120000_abcdef12",
                 board_factory=lambda: fake_board,
                 session_getter=lambda name, default="": session_values.get(name, default),
-                environ={"HERMES_PROFILE": "swe"},
+                runtime_profile_getter=lambda: "swe",
             )
         )
         self.assertEqual(result["status"], "rejected")
@@ -274,7 +280,7 @@ class PluginTests(unittest.TestCase):
                 session_id="20260828_120000_abcdef12",
                 board_factory=lambda: fake_board,
                 session_getter=lambda name, default="": session_values.get(name, default),
-                environ={"HERMES_PROFILE": ""},
+                runtime_profile_getter=lambda: "",
             )
         )
         self.assertEqual(result["status"], "rejected")

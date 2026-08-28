@@ -30,7 +30,7 @@ Internal task IDs and raw `done` lifecycle text stay hidden on success. New per-
 1. Accepts the exact bounded Russian comment form with one uppercase `SIS-N` target.
 2. Rejects missing/fuzzy/lowercase targets, unsupported operations, oversized bodies, unknown fields and credential-shaped text before durable writes.
 3. Produces exact `linear-command.v1`; command/correlation IDs are UUIDv4, while the task idempotency key is a stable SHA-256-derived semantic key.
-4. Requires the live source context to be `profile=swe`, `platform=telegram`, `chat_type=dm`, exact numeric chat/user/thread IDs and a valid exact Hermes session ID. A missing persisted contextual profile may fall back only to the process-bound `HERMES_PROFILE=swe`; a conflict fails closed.
+4. Requires the live source context to be `profile=swe`, `platform=telegram`, `chat_type=dm`, exact numeric chat/user/thread IDs and a valid exact Hermes session ID. Runtime profile identity comes from Hermes' resolved profile home via `get_active_profile_name()` (the same authority established by `--profile swe`); a missing persisted contextual profile may inherit it, while a conflict fails closed. `HERMES_PROFILE` is not required for Gateway processes.
 5. Creates one `project-manager` Kanban task in `triage` with that exact source session and force-loads `project-manager-linear-worker`.
 6. Writes exactly one source-owned existing-thread subscription with `delivery_mode=wake`, the exact source `thread_id`, `chat_type=dm` and metadata exactly `{"chat_type":"dm"}`.
 7. Runs the bundled SIS-60 read-only route audit and fails closed in `triage` on drift.

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Any, Callable
 
@@ -162,6 +161,13 @@ def _default_session_getter(name: str, default: str = "") -> str:
     return get_session_env(name, default)
 
 
+def _default_runtime_profile_getter() -> str:
+    """Return the profile selected by Hermes' resolved runtime home."""
+    from hermes_cli.profiles import get_active_profile_name
+
+    return get_active_profile_name()
+
+
 def _source_context(
     *,
     handler_session_id: str,
@@ -201,10 +207,12 @@ def handle_swe_linear_request(args: dict[str, Any], **kwargs: Any) -> str:
         if not isinstance(request, str):
             raise RouteError("request must be text")
         session_getter = kwargs.get("session_getter") or _default_session_getter
-        environ = kwargs.get("environ") or os.environ
+        runtime_profile_getter = (
+            kwargs.get("runtime_profile_getter") or _default_runtime_profile_getter
+        )
         source = _source_context(
             handler_session_id=str(kwargs.get("session_id") or ""),
-            runtime_profile=str(environ.get("HERMES_PROFILE") or ""),
+            runtime_profile=str(runtime_profile_getter() or ""),
             session_getter=session_getter,
         )
         board_factory = kwargs.get("board_factory") or HermesKanbanBoard
