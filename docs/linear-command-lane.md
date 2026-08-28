@@ -13,7 +13,7 @@ Required envelope:
   "correlation_id": "UUIDv4",
   "idempotency_key": "linear:SIS-59:read:2026-08-28",
   "source_profile": "swe",
-  "operation": "read_issue | change_state | add_comment",
+  "operation": "read_issue | change_state | add_comment | create_issue",
   "target": {"type": "issue", "identifier": "SIS-N"},
   "change": {},
   "policy": {"mode": "standard"}
@@ -27,8 +27,9 @@ The validator rejects unknown fields, arbitrary GraphQL or MCP method names, URL
 - `read_issue`: `change` must be empty.
 - `change_state`: `change` must contain only `state`; exact allowlist is `Backlog`, `Todo`, `Research`, `In Progress`, `In Review`.
 - `add_comment`: `change` must contain only `body`, 1–4000 characters. The internal idempotency marker is reserved and cannot be supplied by the caller.
+- `create_issue`: `target` is exactly `{"type":"team","identifier":"SIS"}` and `change` contains bounded `title`, `description`, exact `parent_identifier`, safe `state`, and `High|Medium|Low` priority. A create marker is stored in the description and resolved only among the exact parent's first 100 children for replay/read-back.
 
-`Done`, `Canceled`, `Duplicate`, archive, delete, bulk and structure changes are unavailable in the MVP and fail closed. They remain owner-controlled instead of being enabled by an untrusted command field.
+`Done`, `Canceled`, `Duplicate`, archive, delete, bulk and unrestricted structure changes are unavailable and fail closed. They remain owner-controlled instead of being enabled by an untrusted command field.
 
 ## Plan and apply
 
@@ -65,6 +66,7 @@ The normal journal is `$HERMES_HOME/linear-command-lane/journal.json`. It stores
 - A mutation apply requires the hash-only journal. A journal-wide advisory file lock serializes the complete local read/check/mutate/read-back/journal sequence across processes, preventing concurrent same-key comments and lost journal updates.
 - State changes read current state first. Already-converged state is a verified no-op, so replay after a crash cannot duplicate the mutation.
 - Comments receive an internal marker containing hashes of the idempotency key and semantic request. Exact replay is a verified no-op; the same key with a different request fails closed.
+- Issue creation writes the same hash pair as a reserved description marker, checks only the exact parent's bounded child set before writing, and requires exactly one marked child on read-back. Replay after a post-create crash converges without a duplicate issue.
 - A local hash-only journal detects cross-operation or changed-request reuse after a successful verified apply.
 - Apply always reads back the exact `SIS-N` target or marker. Missing/mismatched read-back is an error, never success.
 

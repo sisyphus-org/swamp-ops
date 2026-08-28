@@ -20,11 +20,14 @@ from typing import Any
 ISSUE_IDENTIFIER = re.compile(r"^SIS-[1-9][0-9]*$")
 PROFILE_NAME = re.compile(r"^[a-z][a-z0-9-]{1,30}$")
 IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:._/-]{7,199}$")
-OPERATIONS = {"read_issue", "change_state", "add_comment"}
+OPERATIONS = {"read_issue", "change_state", "add_comment", "create_issue"}
 SAFE_STATES = {"Backlog", "Todo", "Research", "In Progress", "In Review"}
 OWNER_CONTROLLED_STATES = {"Done", "Canceled", "Duplicate"}
+PRIORITIES = {"High": 2, "Medium": 3, "Low": 4}
 RESERVED_COMMENT_MARKER = "<!-- linear-command:v1"
 MAX_COMMENT_LENGTH = 4000
+MAX_TITLE_LENGTH = 200
+MAX_DESCRIPTION_LENGTH = 10000
 API_URL = "https://api.linear.app/graphql"
 COMMAND_ROOT = Path(__file__).parents[2] / "commands" / "linear"
 CREDENTIAL_SHAPES = (
@@ -66,6 +69,21 @@ mutation LaneState($id: String!, $input: IssueUpdateInput!) {
 COMMENT_CREATE = """
 mutation LaneComment($input: CommentCreateInput!) {
   commentCreate(input: $input) { success }
+}
+"""
+PARENT_CHILDREN_QUERY = """
+query LaneChildren($id: String!) {
+  issue(id: $id) {
+    children(first: 100) {
+      nodes { id identifier title url description state { id name type } team { id key } }
+      pageInfo { hasNextPage }
+    }
+  }
+}
+"""
+ISSUE_CREATE = """
+mutation LaneCreateIssue($input: IssueCreateInput!) {
+  issueCreate(input: $input) { success issue { id identifier } }
 }
 """
 ROOT_FIELDS = {
@@ -157,6 +175,42 @@ class LinearClient:
         if result.get("success") is not True:
             raise ContractError("Linear comment mutation did not succeed")
 
+    def list_child_issues(self, parent_identifier: str) -> list[dict[str, Any]]:
+        """Return bounded children of one exact parent for create replay detection."""
+        parent = self.execute(PARENT_CHILDREN_QUERY, {"id": parent_identifier}).get("issue")
+        if not isinstance(parent, dict):
+            raise ContractError(f"exact Linear parent not found: {parent_identifier}")
+        connection = parent.get("children")
+        if not isinstance(connection, dict) or connection.get("pageInfo", {}).get("hasNextPage"):
+            raise ContractError("parent exceeds the supported 100-child idempotency limit")
+        nodes = connection.get("nodes")
+        if not isinstance(nodes, list):
+            raise ContractError("Linear children payload is invalid")
+        return nodes
+
+    def create_issue(
+        self,
+        *,
+        team_id: str,
+        state_id: str,
+        parent_id: str,
+        title: str,
+        description: str,
+        priority: int,
+    ) -> None:
+        """Create one bounded SIS issue under an exact parent."""
+        payload = {
+            "teamId": team_id,
+            "stateId": state_id,
+            "parentId": parent_id,
+            "title": title,
+            "description": description,
+            "priority": priority,
+        }
+        result = self.execute(ISSUE_CREATE, {"input": payload})["issueCreate"]
+        if result.get("success") is not True:
+            raise ContractError("Linear issue creation did not succeed")
+
 
 def validate_command(raw: Any) -> dict[str, Any]:
     """Validate the exact linear-command.v1 envelope and return it unchanged."""
@@ -178,19 +232,22 @@ def validate_command(raw: Any) -> dict[str, Any]:
         )
     if not PROFILE_NAME.fullmatch(str(raw["source_profile"])):
         raise ContractError("source_profile is invalid")
-    if raw["operation"] not in OPERATIONS:
+    operation = raw["operation"]
+    if operation not in OPERATIONS:
         raise ContractError("operation is not allowed")
     target = raw["target"]
     if not isinstance(target, dict) or set(target) != {"type", "identifier"}:
         raise ContractError("target must contain exactly type and identifier")
-    if target["type"] != "issue" or not ISSUE_IDENTIFIER.fullmatch(
+    if operation == "create_issue":
+        if target != {"type": "team", "identifier": "SIS"}:
+            raise ContractError("create_issue target must be the exact SIS team")
+    elif target["type"] != "issue" or not ISSUE_IDENTIFIER.fullmatch(
         str(target["identifier"])
     ):
         raise ContractError("target must be an exact SIS-N issue identifier")
     change = raw["change"]
     if not isinstance(change, dict):
         raise ContractError("change must be an object")
-    operation = raw["operation"]
     if operation == "read_issue":
         if change:
             raise ContractError("read_issue change must be empty")
@@ -212,6 +269,36 @@ def validate_command(raw: Any) -> dict[str, Any]:
             raise ContractError("comment body contains the reserved marker")
         if any(pattern.search(body) for pattern in CREDENTIAL_SHAPES):
             raise ContractError("comment body contains credential-shaped data")
+    elif operation == "create_issue":
+        expected = {
+            "title",
+            "description",
+            "parent_identifier",
+            "state",
+            "priority",
+        }
+        if set(change) != expected:
+            raise ContractError("create_issue change has invalid fields")
+        title = change.get("title")
+        description = change.get("description")
+        parent = change.get("parent_identifier")
+        state = change.get("state")
+        priority = change.get("priority")
+        if not isinstance(title, str) or not title.strip() or len(title) > MAX_TITLE_LENGTH:
+            raise ContractError("create_issue title must be 1-200 characters")
+        if not isinstance(description, str) or len(description) > MAX_DESCRIPTION_LENGTH:
+            raise ContractError("create_issue description must be 0-10000 characters")
+        if not isinstance(parent, str) or not ISSUE_IDENTIFIER.fullmatch(parent):
+            raise ContractError("create_issue parent must be an exact SIS-N identifier")
+        if state not in SAFE_STATES:
+            raise ContractError("create_issue state is not in the safe-state allowlist")
+        if priority not in PRIORITIES:
+            raise ContractError("create_issue priority is not in the bounded allowlist")
+        if any(
+            pattern.search(title + "\n" + description)
+            for pattern in CREDENTIAL_SHAPES
+        ):
+            raise ContractError("create_issue fields contain credential-shaped data")
     if raw["policy"] != {"mode": "standard"}:
         raise ContractError("policy must be the standard fail-closed lane")
     return raw
@@ -346,6 +433,123 @@ def execute_command(
             journal[key_hash] = request_hash
             write_journal(journal_path, journal)
         return result
+
+    if command["operation"] == "create_issue":
+        change = command["change"]
+        parent_identifier = change["parent_identifier"]
+        parent = client.get_issue(parent_identifier)
+        if not isinstance(parent, dict) or parent.get("identifier") != parent_identifier:
+            raise ContractError(f"exact Linear parent not found: {parent_identifier}")
+        team = parent.get("team")
+        if (
+            not isinstance(team, dict)
+            or team.get("key") != "SIS"
+            or not isinstance(team.get("id"), str)
+            or not team["id"].strip()
+        ):
+            raise ContractError("create_issue parent is not in the SIS team")
+        states = [
+            item
+            for item in client.list_states(team["id"])
+            if item.get("name") == change["state"]
+        ]
+        if len(states) != 1:
+            raise ContractError(f"exact workflow state not found: {change['state']}")
+        key_hash, request_hash, _ = command_fingerprint(command)
+        marker = (
+            f"<!-- linear-command:create:v1 key={key_hash} request={request_hash} -->"
+        )
+        key_marker = f"<!-- linear-command:create:v1 key={key_hash} "
+        children = client.list_child_issues(parent_identifier)
+        same_key = [
+            item for item in children if key_marker in str(item.get("description") or "")
+        ]
+        exact = [
+            item for item in same_key if marker in str(item.get("description") or "")
+        ]
+        if same_key and not exact:
+            raise ContractError("create_issue idempotency key conflicts with another request")
+        if len(exact) > 1:
+            raise ContractError("create_issue replay marker resolved more than one issue")
+        if exact:
+            created = exact[0]
+            snapshot = issue_snapshot(created)
+            replay_base = result_base(command, created, mode)
+            return finish(
+                {
+                    **replay_base,
+                    "result": "no_op",
+                    "before": snapshot,
+                    "after": snapshot,
+                    "plan": [],
+                    "no_op": True,
+                    "verified": True,
+                }
+            )
+        desired = {
+            "title": change["title"],
+            "state": change["state"],
+            "priority": change["priority"],
+            "parent_identifier": parent_identifier,
+        }
+        plan = [{"action": "create_issue", **desired}]
+        team_base = {
+            "schema_version": "linear-result.v1",
+            "command_id": command["command_id"],
+            "correlation_id": command["correlation_id"],
+            "idempotency_key": command["idempotency_key"],
+            "source_profile": command["source_profile"],
+            "operation": "create_issue",
+            "mode": mode,
+            "target": {"type": "team", "identifier": "SIS"},
+        }
+        if mode == "plan":
+            return {
+                **team_base,
+                "result": "planned",
+                "before": None,
+                "after": desired,
+                "plan": plan,
+                "no_op": False,
+                "verified": False,
+            }
+        description = change["description"].strip()
+        marked_description = f"{description}\n\n{marker}" if description else marker
+        client.create_issue(
+            team_id=team["id"],
+            state_id=states[0]["id"],
+            parent_id=parent["id"],
+            title=change["title"],
+            description=marked_description,
+            priority=PRIORITIES[change["priority"]],
+        )
+        verified_children = client.list_child_issues(parent_identifier)
+        verified_exact = [
+            item
+            for item in verified_children
+            if marker in str(item.get("description") or "")
+        ]
+        if len(verified_exact) != 1:
+            raise ContractError("create_issue read-back verification failed")
+        created = verified_exact[0]
+        created_snapshot = issue_snapshot(created)
+        if (
+            created_snapshot["title"] != change["title"]
+            or created_snapshot["state"] != change["state"]
+        ):
+            raise ContractError("create_issue bounded field read-back verification failed")
+        created_base = result_base(command, created, mode)
+        return finish(
+            {
+                **created_base,
+                "result": "applied",
+                "before": None,
+                "after": created_snapshot,
+                "plan": plan,
+                "no_op": False,
+                "verified": True,
+            }
+        )
 
     identifier = command["target"]["identifier"]
     issue = client.get_issue(identifier)

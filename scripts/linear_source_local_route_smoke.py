@@ -17,8 +17,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hermes_cli import kanban_db as kb  # noqa: E402
-from plugins.swe_linear_route import HermesKanbanBoard  # noqa: E402
-from plugins.swe_linear_route.route import SourceContext, route_request  # noqa: E402
+from plugins.linear_source_route import HermesKanbanBoard  # noqa: E402
+from plugins.linear_source_route.route import SourceContext, route_request  # noqa: E402
 
 
 def load_local_audit():

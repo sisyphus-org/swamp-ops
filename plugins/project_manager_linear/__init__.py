@@ -150,6 +150,8 @@ def human_summary(result: dict[str, Any]) -> str:
         lead = "Задача Linear прочитана. Результат verified."
     elif result.get("result") == "no_op" or result.get("no_op") is True:
         lead = "Запрос уже выполнен; повторная мутация не потребовалась. Изменение verified."
+    elif operation == "create_issue":
+        lead = "Задача Linear создана и прочитана обратно. Изменение verified."
     elif operation == "change_state":
         lead = "Статус Linear изменён и прочитан обратно. Изменение verified."
     else:

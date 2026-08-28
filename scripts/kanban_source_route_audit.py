@@ -8,7 +8,7 @@ ROOT = Path(__file__).parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from plugins.swe_linear_route.audit import *  # noqa: F401,F403
+from plugins.linear_source_route.audit import *  # noqa: F401,F403
 
 
 if __name__ == "__main__":

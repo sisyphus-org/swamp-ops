@@ -16,7 +16,7 @@ from unittest import mock
 SCRIPT = (
     Path(__file__).parents[1]
     / "plugins"
-    / "swe_linear_route"
+    / "linear_source_route"
     / "audit.py"
 )
 SOURCE_SESSION = "20260828_120000_1234abcd"

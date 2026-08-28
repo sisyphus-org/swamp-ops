@@ -85,13 +85,13 @@ LINEAR_TOKEN=... swamp workflow validate linear-command-lane-plan
 LINEAR_TOKEN=... swamp workflow run linear-command-lane-plan --input command=<slug>
 ```
 
-MVP operations are exact read, safe workflow-state change, and one bounded comment. Bulk/fuzzy targeting, `Done`, `Canceled`, `Duplicate`, archive/delete and structural writes fail closed. Apply uses marker-based replay protection, a hash-only idempotency journal and exact read-back verification. Contract, examples and SIS-59 live evidence: [`docs/linear-command-lane.md`](docs/linear-command-lane.md).
+MVP operations are exact read, safe workflow-state change, one bounded comment, and bounded issue creation in the `SIS` team under an exact parent. Bulk/fuzzy targeting, `Done`, `Canceled`, `Duplicate`, archive/delete and unrestricted structural writes fail closed. Apply uses external marker-based replay protection, a hash-only idempotency journal and exact read-back verification. Contract and evidence: [`docs/linear-command-lane.md`](docs/linear-command-lane.md).
 
-## `swe-linear-route` + `project-manager-linear`
+## `linear-source-route` + `project-manager-linear`
 
-SIS-61 connects an ordinary SWE Telegram session-thread comment request to the deterministic Project Manager lane without changing Hermes core. `swe-linear-route` validates the exact source thread plus persisted Hermes session, creates one typed triage task, updates the existing thread route to `wake`, requires the SIS-60 route audit and only then releases the task. It never creates a per-task Telegram topic. `project-manager-linear` performs plan/apply/read-back inside the PM worker and owns the typed Kanban complete/block transition.
+SIS-68 generalizes the proven SWE tracer bullet for every current and future user-facing profile. `linear-source-route` derives the source profile from Hermes runtime identity, rejects broker/PM use, validates the exact Telegram thread and persisted session, creates one typed triage task, writes one source-owned `wake` route, requires the route audit, and only then releases the task. It has no Linear client or credential. `project-manager-linear` alone performs deterministic plan/apply/read-back and the typed Kanban lifecycle transition.
 
-Both plugins are self-contained reviewed artifacts: the SIS-59 lane implementation and SIS-60 audit implementation live inside their respective plugin packages; the existing scripts are thin CLI/Swamp wrappers. Exact replay reuses one semantic idempotency key and task, and credential-shaped request text is rejected before durable writes. Local smoke, reviewed profile rollout, live proof, failure probes and rollback: [`docs/swe-project-manager-linear-e2e.md`](docs/swe-project-manager-linear-e2e.md).
+The default `hermes-profile-bootstrap` role installs/enables the universal plugin and routing skill, configures no Linear MCP/token for the source profile, and reports mandatory source-Gateway/broker restart plus PM read-back/wake/replay gates. Full local verification, reviewed per-profile rollout, future-profile proof and rollback: [`docs/universal-linear-routing-e2e.md`](docs/universal-linear-routing-e2e.md).
 
 ## `linear-project-standard`
 

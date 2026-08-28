@@ -45,7 +45,9 @@ class BootstrapContractTests(unittest.TestCase):
         self.assertIn('cwd: "/Users/hermes/workspaces"', rendered)
         self.assertIn("laguna-s-2.1-free", rendered)
         self.assertIn("nemotron-3.5-lightning-free", rendered)
-        self.assertIn("https://mcp.linear.app/mcp", rendered)
+        self.assertNotIn("https://mcp.linear.app/mcp", rendered)
+        self.assertIn("linear-source-route", rendered)
+        self.assertIn("dispatch_in_gateway: false", rendered)
         self.assertEqual(yaml.safe_load(rendered)["_config_version"], 38)
 
     def test_broker_role_is_headless_and_has_no_linear_mcp(self):
@@ -61,55 +63,36 @@ class BootstrapContractTests(unittest.TestCase):
         self.assertNotIn("mcp_servers", parsed)
         self.assertNotIn("secrets", parsed)
 
-    def test_shared_secrets_and_profile_overrides_contract(self):
-        rendered = bootstrap.render_config(
+    def test_source_profile_has_no_linear_secret_or_mcp_and_pm_keeps_them(self):
+        source = bootstrap.render_config(
             "openai-codex",
             "gpt-5.6-sol-900k",
             Path("/Users/hermes/workspaces"),
         )
-        self.assertIn(
-            "if ! grep -q '^LINEAR_TOKEN=.*[^[:space:]]' \"${HERMES_HOME}/.env\"",
-            rendered,
+        parsed_source = yaml.safe_load(source)
+        self.assertNotIn("mcp_servers", parsed_source)
+        source_command = parsed_source["secrets"]["command"]["command"]
+        self.assertNotIn("LINEAR_TOKEN", source_command)
+        self.assertIn("TELEGRAM_ALLOWED_USERS", source_command)
+        self.assertIn("linear-source-route", parsed_source["plugins"]["enabled"])
+
+        pm = bootstrap.render_config(
+            "openai-codex",
+            "gpt-5.6-sol-900k",
+            Path("/Users/hermes/workspaces"),
+            role="project-manager",
         )
-        self.assertIn(
-            "then grep '^LINEAR_TOKEN=' /Users/hermes/.hermes/.env",
-            rendered,
-        )
-        self.assertIn(
-            "if ! grep -q '^TELEGRAM_ALLOWED_USERS=.*[^[:space:]]' \"${HERMES_HOME}/.env\"",
-            rendered,
-        )
-        self.assertIn(
-            "grep '^TELEGRAM_ALLOWED_USERS=' /Users/hermes/.hermes/.env",
-            rendered,
-        )
-        self.assertIn('Authorization: "Bearer ${LINEAR_TOKEN}"', rendered)
-        self.assertEqual(
-            [item["name"] for item in bootstrap.SHARED_ENV_VARS],
-            ["LINEAR_TOKEN", "TELEGRAM_ALLOWED_USERS"],
-        )
-        self.assertNotIn(
-            "LINEAR_TOKEN",
-            [item["name"] for item in bootstrap.PROFILE_ENV_VARS],
-        )
-        self.assertNotIn(
-            "TELEGRAM_ALLOWED_USERS",
-            [item["name"] for item in bootstrap.PROFILE_ENV_VARS],
-        )
-        self.assertIn(
-            "TELEGRAM_ALLOWED_USERS",
-            [item["name"] for item in bootstrap.OPTIONAL_PROFILE_ENV_VARS],
-        )
-        self.assertIn(
-            "LINEAR_TOKEN",
-            [item["name"] for item in bootstrap.OPTIONAL_PROFILE_ENV_VARS],
-        )
+        parsed_pm = yaml.safe_load(pm)
+        self.assertIn("linear", parsed_pm["mcp_servers"])
+        self.assertIn("LINEAR_TOKEN", parsed_pm["secrets"]["command"]["command"])
+        self.assertIn('Authorization: "Bearer ${LINEAR_TOKEN}"', pm)
 
     def test_secret_helper_prefers_profile_values_and_falls_back_per_key(self):
         rendered = bootstrap.render_config(
             "openai-codex",
             "gpt-5.6-sol-900k",
             Path("/Users/hermes/workspaces"),
+            role="project-manager",
         )
         command = yaml.safe_load(rendered)["secrets"]["command"]["command"]
         with tempfile.TemporaryDirectory() as tmp:
@@ -148,6 +131,7 @@ class BootstrapContractTests(unittest.TestCase):
             "openai-codex",
             "gpt-5.6-sol-900k",
             Path("/Users/hermes/workspaces"),
+            role="project-manager",
         )
         command = yaml.safe_load(rendered)["secrets"]["command"]["command"]
         with tempfile.TemporaryDirectory() as tmp:
@@ -197,8 +181,11 @@ class BootstrapContractTests(unittest.TestCase):
             payload["primaryModel"],
             "gpt-5.6-sol-900k (via openai-codex)",
         )
-        self.assertFalse(payload["linear"]["profileTokenRequired"])
-        self.assertTrue(payload["linear"]["profileOverrideSupported"])
+        self.assertFalse(payload["linear"]["enabled"])
+        self.assertFalse(payload["linear"]["profileOverrideSupported"])
+        self.assertTrue(payload["sourceRouting"]["enabled"])
+        self.assertEqual(payload["sourceRouting"]["plugin"], "linear-source-route")
+        self.assertIn("restart broker", " ".join(payload["verificationGates"]).lower())
         self.assertFalse(payload["telegramAllowlist"]["profileValueRequired"])
         self.assertTrue(payload["telegramAllowlist"]["profileOverrideSupported"])
         self.assertEqual(
@@ -398,6 +385,8 @@ class BootstrapContractTests(unittest.TestCase):
                 self.assertEqual(first_code, 0)
                 profile = root / "fixture-profile"
                 self.assertTrue((profile / "config.yaml").is_file())
+                self.assertTrue((profile / "plugins" / "linear_source_route" / "plugin.yaml").is_file())
+                self.assertTrue((profile / "skills" / "linear-source-request-routing" / "SKILL.md").is_file())
                 self.assertFalse((profile / ".env").exists())
                 self.assertEqual((profile / "config.yaml").stat().st_mode & 0o777, 0o600)
 
