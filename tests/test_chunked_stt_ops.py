@@ -141,6 +141,11 @@ class AuditTests(unittest.TestCase):
             )
             self.assertEqual(ops.read_launchdaemon_prompt(plist_path), "numeric prompt")
 
+    def test_missing_launchdaemon_is_treated_as_absent_prompt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "missing.plist"
+            self.assertIsNone(ops.read_launchdaemon_prompt(missing))
+
     def test_plan_requires_owner_rollout_when_qwen_prompt_differs(self):
         desired = ops.desired_command(Path("/runtime/chunked_qwen_stt.py"))
         payload = ops.build_plan(

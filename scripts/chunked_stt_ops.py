@@ -78,6 +78,8 @@ def read_desired_prompt(path: Path = NUMERIC_PROMPT_FILE) -> str:
 
 
 def read_launchdaemon_prompt(path: Path = QWEN_LAUNCHDAEMON) -> str | None:
+    if not path.is_file():
+        return None
     with path.open("rb") as handle:
         payload = plistlib.load(handle)
     environment = payload.get("EnvironmentVariables", {})
