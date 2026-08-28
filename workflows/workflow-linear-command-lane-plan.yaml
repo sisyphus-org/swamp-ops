@@ -1,0 +1,37 @@
+id: a8a4a21f-bcd7-4a7a-891f-b5f793b92cea
+name: linear-command-lane-plan
+description: >-
+  Read and validate one exact linear-command.v1 envelope, resolve its exact SIS-N
+  target, record current state and produce a before/after plan. This workflow is
+  deliberately plan-only; reviewed apply runs use the same deterministic script.
+tags:
+  domain: project-management
+  integration: linear
+  safety: read-only-plan
+  owner: project-manager
+inputs:
+  command:
+    type: string
+    pattern: "^[a-z0-9][a-z0-9-]{0,62}$"
+    description: Command slug under commands/linear/<slug>.json.
+jobs:
+  - name: main
+    description: Validate and plan one bounded Linear command.
+    steps:
+      - name: plan
+        description: Read exact current state and emit linear-result.v1 without writes.
+        task:
+          type: model_method
+          modelIdOrName: linear-command-lane-plan
+          methodName: execute
+          inputs:
+            run: /Users/hermes/.hermes/hermes-agent/venv/bin/python scripts/linear_command_lane.py --command 'commands/linear/${{ inputs.command }}.json' --mode plan
+            workingDir: .
+            timeout: 120000
+            ignoreExitCode: false
+        dependsOn: []
+        weight: 1
+        allowFailure: false
+    dependsOn: []
+    weight: 1
+version: 1

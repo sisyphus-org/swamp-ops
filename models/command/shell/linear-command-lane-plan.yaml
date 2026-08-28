@@ -1,0 +1,12 @@
+type: command/shell
+typeVersion: 2026.02.09.1
+id: 4597fa02-d000-47da-b988-0d99151aaceb
+name: linear-command-lane-plan
+version: 1
+tags:
+  domain: project-management
+  integration: linear
+  safety: read-only-plan
+  owner: project-manager
+globalArguments: {}
+methods: {}

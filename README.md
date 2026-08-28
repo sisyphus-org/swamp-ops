@@ -41,6 +41,18 @@ swamp workflow run kanban-dispatcher-audit
 
 The workflow performs no configuration or service writes. Cutover order, live verification, recovery proof and the explicit rollback to the previous `crypto-analyst` owner are documented in [`docs/kanban-dispatcher-cutover.md`](docs/kanban-dispatcher-cutover.md).
 
+## `linear-command-lane-plan`
+
+Read-only Swamp entry point for the Project Manager `linear-command.v1` lane. It accepts only a bounded command slug under `commands/linear/`, resolves one exact `SIS-N` issue, records current state and emits a typed before/after `linear-result.v1` plan. Apply is deliberately absent from the workflow and uses the same deterministic script only after review.
+
+```bash
+LINEAR_TOKEN=... swamp model validate linear-command-lane-plan
+LINEAR_TOKEN=... swamp workflow validate linear-command-lane-plan
+LINEAR_TOKEN=... swamp workflow run linear-command-lane-plan --input command=<slug>
+```
+
+MVP operations are exact read, safe workflow-state change, and one bounded comment. Bulk/fuzzy targeting, `Done`, `Canceled`, `Duplicate`, archive/delete and structural writes fail closed. Apply uses marker-based replay protection, a hash-only idempotency journal and exact read-back verification. Contract, examples and SIS-59 live evidence: [`docs/linear-command-lane.md`](docs/linear-command-lane.md).
+
 ## `linear-project-standard`
 
 Organization-wide Linear hierarchy contract:
