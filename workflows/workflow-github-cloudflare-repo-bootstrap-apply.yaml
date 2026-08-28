@@ -1,0 +1,85 @@
+id: 2d9941bd-400c-4cf5-9502-178767e48474
+name: github-cloudflare-repo-bootstrap-apply
+description: >-
+  After one manual approval, create the exact checksum-bound GitHub repository,
+  configure branch-preview, reference fixed organization-secret names without
+  reading or managing their values, metadata, visibility or grants, then verify
+  the main tree, production deployment and runtime. Existing repositories are rejected.
+tags:
+  domain: infrastructure
+  integration: github-cloudflare
+  safety: approval-gated-write
+  owner: default-broker
+inputs:
+  type: object
+  properties:
+    repository:
+      type: string
+      pattern: "^[a-z][a-z0-9-]{1,54}$"
+    planRunId:
+      type: string
+      pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    planChecksum:
+      type: string
+      pattern: "^[0-9a-f]{64}$"
+    artifactVersion:
+      type: integer
+      minimum: 1
+  required: [repository, planRunId, planChecksum, artifactVersion]
+  additionalProperties: false
+jobs:
+  - name: apply
+    steps:
+      - name: approve-create
+        description: Approve only after reviewing the exact repository plan and checksum.
+        task:
+          type: manual_approval
+          prompt: Approve creation of the exact checksum-bound GitHub + Cloudflare application repository.
+        dependsOn: []
+        weight: 0
+        allowFailure: false
+      - name: apply-create
+        task:
+          type: model_method
+          modelIdOrName: github-cloudflare-repo-bootstrap
+          methodName: execute
+          inputs:
+            run: >-
+              python3 scripts/github_cloudflare_repo_bootstrap.py
+              --repository '${{ inputs.repository }}'
+              --mode apply
+              --plan-run-id '${{ inputs.planRunId }}'
+              --plan-checksum '${{ inputs.planChecksum }}'
+              --artifact-version '${{ inputs.artifactVersion }}'
+            timeout: 300000
+            ignoreExitCode: false
+        dependsOn:
+          - step: approve-create
+            condition:
+              type: succeeded
+        weight: 1
+        allowFailure: false
+      - name: verify-created
+        task:
+          type: model_method
+          modelIdOrName: github-cloudflare-repo-bootstrap
+          methodName: execute
+          inputs:
+            run: >-
+              python3 scripts/github_cloudflare_repo_bootstrap.py
+              --repository '${{ inputs.repository }}'
+              --mode verify
+              --plan-run-id '${{ inputs.planRunId }}'
+              --plan-checksum '${{ inputs.planChecksum }}'
+              --artifact-version '${{ inputs.artifactVersion }}'
+            timeout: 300000
+            ignoreExitCode: false
+        dependsOn:
+          - step: apply-create
+            condition:
+              type: succeeded
+        weight: 1
+        allowFailure: false
+    dependsOn: []
+    weight: 1
+version: 1

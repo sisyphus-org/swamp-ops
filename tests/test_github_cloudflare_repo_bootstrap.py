@@ -1,339 +1,454 @@
 import importlib.util
+import io
 import json
 import sys
 import unittest
 from pathlib import Path
-
+from unittest import mock
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "github_cloudflare_repo_bootstrap.py"
 SPEC = importlib.util.spec_from_file_location("github_cloudflare_repo_bootstrap", SCRIPT)
 if SPEC is None or SPEC.loader is None:
-    raise RuntimeError(f"cannot import planner: {SCRIPT}")
-planner = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = planner
-SPEC.loader.exec_module(planner)
+    raise RuntimeError(f"cannot import bootstrap: {SCRIPT}")
+bootstrap = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = bootstrap
+SPEC.loader.exec_module(bootstrap)
 
 
 class FakeClient:
-    def __init__(self, responses):
-        self.responses = responses
+    def __init__(self, responses=None):
+        self.responses = responses or {}
         self.calls = []
+        self.blob_index = 0
+
+    def _response(self, method, path, payload=None):
+        self.calls.append((method, path, payload))
+        configured = self.responses.get((method, path))
+        if configured is not None:
+            return configured
+        if method == "POST" and path.endswith("/git/blobs"):
+            self.blob_index += 1
+            return bootstrap.ApiResult(201, {"sha": f"{self.blob_index:040x}"})
+        raise AssertionError(f"unexpected GitHub call: {method} {path}")
 
     def get(self, path):
-        self.calls.append(path)
-        response = self.responses.get(path)
-        if response is None:
-            raise AssertionError(f"unexpected GitHub GET: {path}")
-        return response
+        return self._response("GET", path)
+
+    def post(self, path, payload):
+        return self._response("POST", path, payload)
+
+    def put(self, path, payload=None):
+        return self._response("PUT", path, payload)
+
+    def patch(self, path, payload):
+        return self._response("PATCH", path, payload)
 
 
 def result(status, payload=None):
-    return planner.ApiResult(status, payload if payload is not None else {})
+    return bootstrap.ApiResult(status, payload if payload is not None else {})
 
 
 def ready_responses(repository="example-site"):
-    org = planner.STANDARD["organization"]
-    template = planner.STANDARD["templateRepository"]
-    responses = {
-        "/user": result(200, {"login": "alexxpetrov"}),
-        f"/repos/{org}/{repository}": result(404, {"message": "Not Found"}),
-        f"/repos/{template}": result(
-            200,
-            {"full_name": template, "is_template": True, "default_branch": "main"},
-        ),
-        f"/repos/{template}/commits/main": result(200, {"sha": "a" * 40}),
-        f"/user/memberships/orgs/{org}": result(
+    org = bootstrap.STANDARD["organization"]
+    reviewer = bootstrap.STANDARD["requiredReviewer"]
+    return {
+        ("GET", "/user"): result(200, {"login": reviewer}),
+        ("GET", f"/repos/{org}/{repository}"): result(404, {"message": "Not Found"}),
+        ("GET", f"/user/memberships/orgs/{org}"): result(
             200, {"state": "active", "role": "admin"}
         ),
-        f"/orgs/{org}/actions/secrets/CLOUDFLARE_API_TOKEN": result(
+        ("GET", f"/users/{reviewer}"): result(200, {"login": reviewer, "id": 42}),
+        ("GET", f"/orgs/{org}/actions/secrets/CLOUDFLARE_API_TOKEN"): result(
             200, {"name": "CLOUDFLARE_API_TOKEN", "visibility": "selected"}
         ),
-        f"/orgs/{org}/actions/secrets/CLOUDFLARE_ACCOUNT_ID": result(
+        ("GET", f"/orgs/{org}/actions/secrets/CLOUDFLARE_ACCOUNT_ID"): result(
             200, {"name": "CLOUDFLARE_ACCOUNT_ID", "visibility": "selected"}
         ),
     }
-    for path in planner.STANDARD["requiredTemplateFiles"]:
-        responses[planner.content_path(template, path, ref="a" * 40)] = result(
-            200, {"type": "file", "path": path}
-        )
-    return responses
 
 
-class InputTests(unittest.TestCase):
-    def test_repository_name_is_the_only_owner_input(self):
-        args = planner.parse_args(["--repository", "new-site"])
+class InputAndTemplateTests(unittest.TestCase):
+    def test_repository_is_the_only_unbound_project_value(self):
+        args = bootstrap.parse_args(["--repository", "new-site"])
         self.assertEqual(args.repository, "new-site")
+        self.assertEqual(args.mode, "plan")
         with self.assertRaises(SystemExit):
-            planner.parse_args(["--repository", "new-site", "--mode", "apply"])
+            bootstrap.parse_args(["--repository", "new-site", "--mode", "apply"])
 
-    def test_rejects_names_outside_standard_without_normalizing(self):
+    def test_rejects_invalid_names_without_normalizing(self):
         for value in ("My-Site", "my_site", "a", "1site", "x" * 56):
             with self.subTest(value=value):
-                with self.assertRaises(planner.ContractError):
-                    planner.validate_repository(value)
+                with self.assertRaises(bootstrap.ContractError):
+                    bootstrap.validate_repository(value)
 
-    def test_derived_worker_names_fit_workers_dev(self):
-        value = "a" + "b" * 53
-        self.assertEqual(planner.validate_repository(value), value)
-        self.assertLessEqual(len(f"{value}-preview"), 63)
-
-
-class WorkflowContractTests(unittest.TestCase):
-    def test_workflow_uses_the_broker_configured_workspace(self):
-        workflow = (
-            Path(__file__).parents[1]
-            / "workflows"
-            / "workflow-github-cloudflare-repo-bootstrap.yaml"
-        ).read_text()
-
-        self.assertNotIn("workingDir:", workflow)
-        self.assertIn(
-            "run: python3 scripts/github_cloudflare_repo_bootstrap.py --repository",
-            workflow,
+    def test_production_worker_is_nonce_bound_unique_and_dns_safe(self):
+        worker = bootstrap.derive_production_worker(
+            "example-site", "0123456789abcdef01234567"
         )
+        self.assertEqual(worker, "example-site-0123456789abcdef01234567")
+        self.assertRegex(worker, r"^[a-z][a-z0-9-]{0,53}$")
+        self.assertLessEqual(len(worker), 54)
+        long_worker = bootstrap.derive_production_worker(
+            "a" + "b" * 53, "0123456789abcdef01234567"
+        )
+        self.assertLessEqual(len(long_worker), 54)
+        self.assertTrue(long_worker.endswith("-0123456789abcdef01234567"))
+        self.assertNotEqual(
+            worker,
+            bootstrap.derive_production_worker(
+                "example-site", "1123456789abcdef01234567"
+            ),
+        )
+
+    def test_preview_worker_is_deterministic_short_and_dns_safe(self):
+        value = bootstrap.derive_preview_worker("a" + "b" * 53)
+        self.assertEqual(value, bootstrap.derive_preview_worker("a" + "b" * 53))
+        self.assertLessEqual(len(value), 27)
+        self.assertRegex(value, r"^[a-z][a-z0-9-]+$")
+
+    def test_environment_reviewer_parser_matches_github_shape(self):
+        payload = {
+            "protection_rules": [
+                {
+                    "type": "required_reviewers",
+                    "reviewers": [
+                        {
+                            "type": "User",
+                            "reviewer": {"login": "alexxpetrov", "id": 56254806},
+                        }
+                    ],
+                }
+            ]
+        }
+        self.assertTrue(bootstrap._environment_has_reviewer(payload, 56254806))
+        self.assertFalse(bootstrap._environment_has_reviewer(payload, 1))
+
+    def test_rendered_template_has_no_placeholders_and_stable_manifest(self):
+        template = bootstrap.load_template_files()
+        production_worker = bootstrap.derive_production_worker(
+            "example-site", "0123456789abcdef01234567"
+        )
+        rendered = bootstrap.render_template_files(
+            "example-site", template, production_worker
+        )
+        joined = b"\n".join(rendered.values())
+        self.assertNotIn(b"__REPOSITORY__", joined)
+        self.assertNotIn(b"__PREVIEW_WORKER__", joined)
+        self.assertNotIn(b"SIS-54", joined)
+        self.assertNotIn(b"CI fixture", joined)
+        self.assertIn(b"example-site", joined)
+        self.assertIn(bootstrap.derive_preview_worker("example-site").encode(), joined)
+        self.assertIn(production_worker.encode(), rendered["wrangler.jsonc"])
+        self.assertEqual(
+            bootstrap.files_checksum(rendered),
+            bootstrap.files_checksum(
+                bootstrap.render_template_files(
+                    "example-site", template, production_worker
+                )
+            ),
+        )
+        preview_workflow = rendered[".github/workflows/pr-preview.yml"].decode()
+        token_name = "CLOUDFLARE_" + "API_TOKEN"
+        self.assertIn(f"Authorization: Bearer ${{{token_name}}}", preview_workflow)
+        self.assertNotIn("Authorization: Bearer ***", preview_workflow)
+        self.assertNotIn("CLOU...KEN", preview_workflow)
+        self.assertIn("package-lock.json", rendered)
+        self.assertIn(".github/workflows/ci.yml", rendered)
+        self.assertIn(".github/workflows/deploy.yml", rendered)
+        self.assertIn(".github/workflows/pr-preview.yml", rendered)
 
 
 class PlanTests(unittest.TestCase):
-    def setUp(self):
-        self.previous_approved_revision = planner.STANDARD.get(
-            "approvedTemplateRevision"
-        )
-        planner.STANDARD["approvedTemplateRevision"] = "a" * 40
-
-    def tearDown(self):
-        if self.previous_approved_revision is None:
-            planner.STANDARD.pop("approvedTemplateRevision", None)
-        else:
-            planner.STANDARD["approvedTemplateRevision"] = (
-                self.previous_approved_revision
-            )
-
-    def test_ready_plan_uses_versioned_defaults_and_is_read_only(self):
+    def test_ready_plan_is_read_only_checksum_bound_and_complete(self):
         client = FakeClient(ready_responses())
-        plan = planner.build_plan("example-site", client)
+        plan = bootstrap.build_plan("example-site", client)
 
         self.assertTrue(plan["ready"])
         self.assertTrue(plan["readOnly"])
         self.assertEqual(plan["mode"], "plan")
+        self.assertTrue(bootstrap.verify_plan_checksum(plan))
         self.assertEqual(plan["target"]["repository"], "sisyphus-org/example-site")
-        self.assertEqual(plan["target"]["productionWorker"], "example-site")
-        self.assertEqual(plan["target"]["previewWorker"], "example-site-preview")
-        self.assertEqual(plan["standard"]["environment"], "branch-preview")
-        self.assertEqual(plan["standard"]["requiredReviewer"], "alexxpetrov")
-        self.assertEqual(plan["blockers"], [])
-        self.assertNotIn("secretValues", plan["standard"])
-        grant = next(
-            item
-            for item in plan["plannedActions"]
-            if item["action"] == "ensure_repository_access_to_org_secrets"
+        self.assertRegex(
+            plan["target"]["productionWorker"],
+            r"^example-site-[0-9a-f]{24}$",
         )
-        self.assertEqual(grant["repository"], "sisyphus-org/example-site")
-        self.assertEqual(grant["selectedSecretNames"], planner.STANDARD["requiredOrgSecrets"])
-        self.assertEqual(plan["source"]["templateRevision"], "a" * 40)
-        settings = next(
-            item["settings"]
-            for item in plan["plannedActions"]
-            if item["action"] == "configure_repository_settings"
-        )
-        self.assertNotIn("cloudflareGitBuilds", settings)
-        self.assertTrue(all("delete" not in item["action"] for item in plan["plannedActions"]))
-        self.assertTrue(all("webhook" not in item["action"] for item in plan["plannedActions"]))
-
-    def test_future_repository_write_uses_the_pinned_template_tree(self):
-        plan = planner.build_plan("example-site", FakeClient(ready_responses()))
-
-        actions = plan["plannedActions"]
-        self.assertEqual(actions[0]["action"], "create_empty_repository")
         self.assertEqual(
-            actions[1],
-            {
-                "order": 2,
-                "action": "materialize_approved_template_revision",
-                "template": planner.STANDARD["templateRepository"],
-                "templateRevision": "a" * 40,
-                "destinationRepository": "sisyphus-org/example-site",
-            },
+            plan["target"]["productionUrl"],
+            f"https://{plan['target']['productionWorker']}.sisyphus-org.workers.dev",
         )
-        self.assertNotIn(
-            "generate_repository_from_template",
-            [action["action"] for action in actions],
+        self.assertEqual(
+            plan["target"]["previewWorker"],
+            bootstrap.derive_preview_worker("example-site"),
         )
-        initial_commit = next(
-            action
-            for action in actions
-            if action["action"] == "create_initial_main_commit"
+        self.assertRegex(plan["source"]["templateChecksum"], r"^[0-9a-f]{64}$")
+        self.assertRegex(plan["source"]["implementationChecksum"], r"^[0-9a-f]{64}$")
+        self.assertEqual(
+            len(plan["source"]["implementationManifest"]),
+            len(bootstrap.IMPLEMENTATION_PATHS),
         )
-        self.assertEqual(initial_commit["sourceTemplateRevision"], "a" * 40)
+        self.assertRegex(plan["source"]["renderedChecksum"], r"^[0-9a-f]{64}$")
+        self.assertGreater(len(plan["source"]["renderedManifest"]), 20)
+        self.assertNotIn("secretValues", json.dumps(plan))
 
-    def test_scaffold_reads_are_pinned_to_verified_template_revision(self):
-        client = FakeClient(ready_responses())
-        planner.build_plan("example-site", client)
-
-        scaffold_calls = [call for call in client.calls if "/contents/" in call]
-        self.assertTrue(scaffold_calls)
-        self.assertTrue(all(call.endswith(f"?ref={'a' * 40}") for call in scaffold_calls))
-
-    def test_unconfigured_approved_template_revision_blocks(self):
-        planner.STANDARD["approvedTemplateRevision"] = None
-        client = FakeClient(ready_responses())
-
-        plan = planner.build_plan("example-site", client)
-
-        self.assertFalse(plan["ready"])
-        self.assertIn("approved template revision is not configured", plan["blockers"])
-        self.assertFalse(any("/contents/" in call for call in client.calls))
-
-    def test_template_revision_drift_blocks(self):
-        planner.STANDARD["approvedTemplateRevision"] = "b" * 40
-        client = FakeClient(ready_responses())
-
-        plan = planner.build_plan("example-site", client)
-
-        self.assertFalse(plan["ready"])
-        self.assertIn(
-            f"approved template revision drifted: expected {'b' * 40}, got {'a' * 40}",
-            plan["blockers"],
-        )
-        self.assertFalse(any("/contents/" in call for call in client.calls))
-
-    def test_existing_target_blocks_without_planning_an_overwrite(self):
+    def test_existing_repository_blocks_without_writes(self):
         responses = ready_responses()
-        responses["/repos/sisyphus-org/example-site"] = result(
+        responses[("GET", "/repos/sisyphus-org/example-site")] = result(
             200, {"full_name": "sisyphus-org/example-site"}
         )
-        plan = planner.build_plan("example-site", FakeClient(responses))
-        self.assertFalse(plan["ready"])
-        self.assertIn(
-            "target repository already exists: sisyphus-org/example-site", plan["blockers"]
-        )
-
-    def test_missing_template_blocks_and_skips_scaffold_reads(self):
-        responses = ready_responses()
-        template = planner.STANDARD["templateRepository"]
-        responses[f"/repos/{template}"] = result(404, {"message": "Not Found"})
-        for path in planner.STANDARD["requiredTemplateFiles"]:
-            responses.pop(planner.content_path(template, path, ref="a" * 40))
         client = FakeClient(responses)
-        plan = planner.build_plan("example-site", client)
-        self.assertFalse(plan["ready"])
-        self.assertIn(f"approved template repository is missing: {template}", plan["blockers"])
-        self.assertFalse(any("/contents/" in call for call in client.calls))
-
-    def test_missing_required_scaffold_file_blocks(self):
-        responses = ready_responses()
-        template = planner.STANDARD["templateRepository"]
-        missing = ".github/workflows/pr-preview.yml"
-        responses[planner.content_path(template, missing, ref="a" * 40)] = result(
-            404, {"message": "Not Found"}
-        )
-        plan = planner.build_plan("example-site", FakeClient(responses))
-        self.assertFalse(plan["ready"])
-        scaffold = next(item for item in plan["checks"] if item["name"] == "template_scaffold")
-        self.assertIn(missing, scaffold["detail"])
-
-    def test_non_file_or_wrong_path_scaffold_entry_blocks(self):
-        template = planner.STANDARD["templateRepository"]
-        required_path = "README.md"
-        for payload in (
-            {"type": "dir", "path": required_path},
-            {"type": "file", "path": "different.md"},
-            ["not", "an", "object"],
-        ):
-            with self.subTest(payload=payload):
-                responses = ready_responses()
-                responses[
-                    planner.content_path(template, required_path, ref="a" * 40)
-                ] = result(200, payload)
-
-                plan = planner.build_plan("example-site", FakeClient(responses))
-
-                self.assertFalse(plan["ready"])
-                scaffold = next(
-                    item for item in plan["checks"]
-                    if item["name"] == "template_scaffold"
-                )
-                self.assertIn(required_path, scaffold["detail"])
-
-    def test_unverifiable_org_membership_is_a_blocker(self):
-        responses = ready_responses()
-        responses["/user/memberships/orgs/sisyphus-org"] = result(403, {"message": "Forbidden"})
-        plan = planner.build_plan("example-site", FakeClient(responses))
+        plan = bootstrap.build_plan("example-site", client)
         self.assertFalse(plan["ready"])
         self.assertIn(
-            "GitHub token cannot verify organization membership/repository-create capability",
+            "target repository already exists: sisyphus-org/example-site",
             plan["blockers"],
         )
+        self.assertTrue(all(call[0] == "GET" for call in client.calls))
 
-    def test_missing_secret_names_block_without_exposing_values(self):
-        responses = ready_responses()
-        responses["/orgs/sisyphus-org/actions/secrets/CLOUDFLARE_API_TOKEN"] = result(
-            404, {"message": "Not Found"}
-        )
-        plan = planner.build_plan("example-site", FakeClient(responses))
-        serialized = json.dumps(plan)
-        self.assertFalse(plan["ready"])
-        self.assertIn("CLOUDFLARE_API_TOKEN", serialized)
-        self.assertNotIn("super-secret-value", serialized)
-
-    def test_unexpected_actor_blocks(self):
-        responses = ready_responses()
-        responses["/user"] = result(200, {"login": "someone-else"})
-        plan = planner.build_plan("example-site", FakeClient(responses))
-        self.assertFalse(plan["ready"])
-        self.assertIn("GitHub actor must be alexxpetrov, got someone-else", plan["blockers"])
-
-    def test_active_non_admin_membership_does_not_claim_create_capability(self):
-        responses = ready_responses()
-        responses["/user/memberships/orgs/sisyphus-org"] = result(
-            200, {"state": "active", "role": "member"}
-        )
-        plan = planner.build_plan("example-site", FakeClient(responses))
-        self.assertFalse(plan["ready"])
-        self.assertIn(
-            "active GitHub organization role does not prove repository-create capability: member",
-            plan["blockers"],
-        )
-
-    def test_global_secret_visibility_requires_no_selected_grant(self):
-        responses = ready_responses()
-        for name in planner.STANDARD["requiredOrgSecrets"]:
-            responses[f"/orgs/sisyphus-org/actions/secrets/{name}"] = result(
-                200, {"name": name, "visibility": "all"}
-            )
-        plan = planner.build_plan("example-site", FakeClient(responses))
+    def test_plan_does_not_read_membership_or_secret_metadata(self):
+        client = FakeClient(ready_responses())
+        plan = bootstrap.build_plan("example-site", client)
+        paths = [path for method, path, _payload in client.calls if method == "GET"]
         self.assertTrue(plan["ready"])
-        access = next(
-            item
-            for item in plan["plannedActions"]
-            if item["action"] == "ensure_repository_access_to_org_secrets"
-        )
-        self.assertEqual(access["selectedSecretNames"], [])
-        self.assertEqual(access["alreadyGlobalSecretNames"], planner.STANDARD["requiredOrgSecrets"])
+        self.assertEqual(plan["blockers"], [])
+        self.assertEqual(plan["warnings"], [])
+        self.assertFalse(any("memberships" in path for path in paths))
+        self.assertFalse(any("actions/secrets" in path for path in paths))
 
-    def test_private_only_secret_blocks_public_standard(self):
-        responses = ready_responses()
-        responses["/orgs/sisyphus-org/actions/secrets/CLOUDFLARE_API_TOKEN"] = result(
-            200, {"name": "CLOUDFLARE_API_TOKEN", "visibility": "private"}
+
+class ApplyTests(unittest.TestCase):
+    def ready_plan(self):
+        return bootstrap.build_plan("example-site", FakeClient(ready_responses()))
+
+    def test_invalid_reviewer_id_rejects_before_first_external_write(self):
+        plan = self.ready_plan()
+        plan["resolved"]["reviewerId"] = None
+        plan["checksum"] = bootstrap._plan_checksum(plan)
+        client = FakeClient({})
+        with self.assertRaisesRegex(bootstrap.ContractError, "reviewer id"):
+            bootstrap.apply_plan(
+                "example-site",
+                plan,
+                "00000000-0000-4000-8000-000000000001",
+                plan["checksum"],
+                client,
+            )
+        self.assertEqual(client.calls, [])
+
+    def test_production_worker_target_substitution_rejects_before_first_external_write(self):
+        plan = self.ready_plan()
+        plan["target"]["productionWorker"] = "attacker-worker"
+        plan["target"]["productionUrl"] = (
+            "https://attacker-worker.sisyphus-org.workers.dev"
         )
-        plan = planner.build_plan("example-site", FakeClient(responses))
-        self.assertFalse(plan["ready"])
-        self.assertIn(
-            "required organization Actions secrets are private-repository-only",
-            plan["blockers"],
+        plan["checksum"] = bootstrap._plan_checksum(plan)
+        client = FakeClient({})
+        with self.assertRaisesRegex(bootstrap.ContractError, "production Worker target"):
+            bootstrap.apply_plan(
+                "example-site",
+                plan,
+                "00000000-0000-4000-8000-000000000001",
+                plan["checksum"],
+                client,
+            )
+        self.assertEqual(client.calls, [])
+
+    def test_wrong_checksum_rejects_before_first_external_write(self):
+        plan = self.ready_plan()
+        client = FakeClient()
+        with self.assertRaisesRegex(bootstrap.ContractError, "checksum-bound"):
+            bootstrap.apply_plan(
+                "example-site",
+                plan,
+                "11111111-1111-4111-8111-111111111111",
+                "0" * 64,
+                client,
+            )
+        self.assertEqual(client.calls, [])
+
+    def test_template_drift_rejects_before_first_external_write(self):
+        plan = self.ready_plan()
+        plan["source"]["templateChecksum"] = "0" * 64
+        plan["checksum"] = bootstrap._plan_checksum(plan)
+        client = FakeClient()
+        with self.assertRaisesRegex(bootstrap.ContractError, "template changed"):
+            bootstrap.apply_plan(
+                "example-site",
+                plan,
+                "11111111-1111-4111-8111-111111111111",
+                plan["checksum"],
+                client,
+            )
+        self.assertEqual(client.calls, [])
+
+    def test_implementation_drift_rejects_before_first_external_write(self):
+        plan = self.ready_plan()
+        plan["source"]["implementationChecksum"] = "0" * 64
+        plan["checksum"] = bootstrap._plan_checksum(plan)
+        client = FakeClient()
+        with self.assertRaisesRegex(bootstrap.ContractError, "implementation changed"):
+            bootstrap.apply_plan(
+                "example-site",
+                plan,
+                "11111111-1111-4111-8111-111111111111",
+                plan["checksum"],
+                client,
+            )
+        self.assertEqual(client.calls, [])
+
+    def test_verify_repository_reads_back_tree_reviewer_deploy_and_health(self):
+        plan = self.ready_plan()
+        target = "sisyphus-org/example-site"
+        main_sha = "d" * 40
+        expected_tree = [
+            {
+                "path": item["path"],
+                "sha": item["gitBlobSha"],
+                "type": "blob",
+            }
+            for item in plan["source"]["renderedManifest"]
+        ]
+        deploy_path = (
+            f"/repos/{target}/actions/workflows/deploy.yml/runs?"
+            f"event=push&head_sha={main_sha}&per_page=20"
+        )
+        client = FakeClient(
+            {
+                ("GET", f"/repos/{target}"): result(200, {"full_name": target}),
+                ("GET", f"/repos/{target}/commits/main"): result(
+                    200, {"sha": main_sha}
+                ),
+                ("GET", f"/repos/{target}/git/trees/main?recursive=1"): result(
+                    200, {"tree": expected_tree}
+                ),
+                (
+                    "GET",
+                    f"/repos/{target}/environments/branch-preview",
+                ): result(
+                    200,
+                    {
+                        "protection_rules": [
+                            {
+                                "type": "required_reviewers",
+                                "reviewers": [
+                                    {
+                                        "type": "User",
+                                        "reviewer": {
+                                            "id": plan["resolved"]["reviewerId"]
+                                        },
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                ),
+                ("GET", deploy_path): result(
+                    200,
+                    {
+                        "workflow_runs": [
+                            {
+                                "id": 123,
+                                "status": "completed",
+                                "conclusion": "success",
+                                "html_url": "https://github.example/run/123",
+                            }
+                        ]
+                    },
+                ),
+            }
         )
 
-    def test_template_must_be_marked_as_template(self):
-        responses = ready_responses()
-        template = planner.STANDARD["templateRepository"]
-        responses[f"/repos/{template}"] = result(200, {"is_template": False})
-        for path in planner.STANDARD["requiredTemplateFiles"]:
-            responses.pop(planner.content_path(template, path, ref="a" * 40))
-        plan = planner.build_plan("example-site", FakeClient(responses))
-        self.assertFalse(plan["ready"])
-        self.assertIn(
-            f"approved template is not marked as a GitHub template: {template}",
-            plan["blockers"],
+        class HealthResponse(io.BytesIO):
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                self.close()
+
+        with mock.patch.object(
+            bootstrap.urllib.request,
+            "urlopen",
+            return_value=HealthResponse(b'{"status":"ok"}'),
+        ) as urlopen:
+            verified = bootstrap.verify_repository(
+                "example-site",
+                plan,
+                plan["checksum"],
+                client,
+                wait_seconds=0,
+            )
+
+        self.assertEqual(verified["status"], "verified")
+        self.assertEqual(verified["mainSha"], main_sha)
+        self.assertEqual(verified["deployRunId"], 123)
+        self.assertEqual(verified["health"], {"status": "ok"})
+        self.assertEqual(urlopen.call_count, 1)
+        self.assertEqual(client.calls[-1], ("GET", deploy_path, None))
+
+    def test_apply_creates_exact_tree_environment_and_settings(self):
+        plan = self.ready_plan()
+        target = "sisyphus-org/example-site"
+        commit_sha = "a" * 40
+        initial_sha = "c" * 40
+        responses = {
+            ("GET", f"/repos/{target}"): result(404),
+            ("POST", "/orgs/sisyphus-org/repos"): result(201, {"id": 99}),
+            ("GET", f"/repos/{target}/commits/main"): result(200, {"sha": initial_sha}),
+            ("POST", f"/repos/{target}/git/trees"): result(201, {"sha": "b" * 40}),
+            ("POST", f"/repos/{target}/git/commits"): result(201, {"sha": commit_sha}),
+            ("PATCH", f"/repos/{target}/git/refs/heads/main"): result(200, {"ref": "refs/heads/main"}),
+            ("PUT", f"/repos/{target}/environments/branch-preview"): result(200),
+            ("PATCH", f"/repos/{target}"): result(200, {"default_branch": "main"}),
+        }
+        client = FakeClient(responses)
+        applied = bootstrap.apply_plan(
+            "example-site",
+            plan,
+            "11111111-1111-4111-8111-111111111111",
+            plan["checksum"],
+            client,
         )
+
+        self.assertEqual(applied["status"], "created")
+        self.assertEqual(applied["mainSha"], commit_sha)
+        methods = [call[:2] for call in client.calls]
+        self.assertIn(("POST", "/orgs/sisyphus-org/repos"), methods)
+        self.assertIn(("PUT", f"/repos/{target}/environments/branch-preview"), methods)
+        create_call = next(
+            call for call in client.calls if call[1] == "/orgs/sisyphus-org/repos"
+        )
+        self.assertTrue(create_call[2]["auto_init"])
+        commit_call = next(call for call in client.calls if call[1].endswith("/git/commits"))
+        self.assertEqual(commit_call[2]["parents"], [initial_sha])
+        ref_call = next(call for call in client.calls if call[1].endswith("/git/refs/heads/main"))
+        self.assertEqual(ref_call[0], "PATCH")
+        self.assertEqual(ref_call[2], {"sha": commit_sha, "force": False})
+        environment_call = next(
+            call for call in client.calls if call[1].endswith("/environments/branch-preview")
+        )
+        self.assertEqual(environment_call[2]["reviewers"], [{"type": "User", "id": 42}])
+        tree_call = next(call for call in client.calls if call[1].endswith("/git/trees"))
+        self.assertEqual(len(tree_call[2]["tree"]), len(plan["source"]["renderedManifest"]))
+
+    def test_existing_target_is_never_adopted_or_overwritten(self):
+        plan = self.ready_plan()
+        client = FakeClient(
+            {
+                ("GET", "/repos/sisyphus-org/example-site"): result(
+                    200, {"full_name": "sisyphus-org/example-site"}
+                )
+            }
+        )
+        with self.assertRaisesRegex(bootstrap.ContractError, "refusing overwrite"):
+            bootstrap.apply_plan(
+                "example-site",
+                plan,
+                "11111111-1111-4111-8111-111111111111",
+                plan["checksum"],
+                client,
+            )
+        self.assertTrue(all(call[0] == "GET" for call in client.calls))
 
 
 if __name__ == "__main__":

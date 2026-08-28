@@ -1,34 +1,34 @@
 id: fd7d33c1-13b1-4d5e-a30b-2fda27a5c20d
 name: github-cloudflare-repo-bootstrap
 description: >-
-  Build a read-only live plan for a standardized Cloudflare Workers repository
-  from one typed repository name. Organization, visibility, approved template,
-  Worker names, GitHub Environment, reviewer, CI/deployment contract and required
-  secret names are versioned defaults. This Phase 1 workflow performs no writes.
+  Build a checksum-bound read-only plan for a new standard Astro + Cloudflare
+  Workers repository from one typed repository name. The versioned local
+  template, organization, Environment, reviewer and secret names are fixed.
 tags:
   domain: infrastructure
   integration: github-cloudflare
   safety: read-only-plan
   owner: swe
 inputs:
-  repository:
-    type: string
-    pattern: "^[a-z][a-z0-9-]{1,54}$"
-    description: Lowercase kebab-case GitHub repository name; asked of the owner as the only input.
+  type: object
+  properties:
+    repository:
+      type: string
+      pattern: "^[a-z][a-z0-9-]{1,54}$"
+      description: Lowercase kebab-case repository name; the only project input.
+  required: [repository]
+  additionalProperties: false
 jobs:
   - name: main
-    description: Produce a deterministic live GitHub bootstrap plan without writes.
+    description: Produce a deterministic live plan without external writes.
     steps:
       - name: plan
-        description: >-
-          Validate the standard defaults and live GitHub prerequisites. Report
-          exact future writes, blockers and approval gates without changing state.
         task:
           type: model_method
           modelIdOrName: github-cloudflare-repo-bootstrap
           methodName: execute
           inputs:
-            run: python3 scripts/github_cloudflare_repo_bootstrap.py --repository '${{ inputs.repository }}'
+            run: python3 scripts/github_cloudflare_repo_bootstrap.py --repository '${{ inputs.repository }}' --mode plan
             timeout: 60000
             ignoreExitCode: false
         dependsOn: []
@@ -36,4 +36,4 @@ jobs:
         allowFailure: false
     dependsOn: []
     weight: 1
-version: 1
+version: 2

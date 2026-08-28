@@ -15,9 +15,10 @@ DEFAULT_WORKSPACE = PLUGIN_ROOT.parents[1]
 OPS_BROKER_SCHEMA = {
     "name": "ops_broker",
     "description": (
-        "Execute one typed, policy-allowlisted read-only GitHub or Swamp operation. "
-        "Caller identity is derived from the authenticated A2A session. This tool "
-        "does not accept shell commands, arbitrary URLs, credential requests, or apply mode."
+        "Execute one typed, policy-allowlisted GitHub or Swamp operation. "
+        "Caller identity is derived from the authenticated A2A session. Read-only "
+        "plans and checksum-bound repository apply/approval operations are available; "
+        "shell commands, arbitrary URLs and credential requests are never accepted."
     ),
     "parameters": {
         "type": "object",
@@ -36,11 +37,13 @@ OPS_BROKER_SCHEMA = {
                     "validate_workflow",
                     "run_readonly_workflow",
                     "plan_github_cloudflare_repository",
+                    "start_github_cloudflare_repository_apply",
+                    "approve_github_cloudflare_repository_apply",
                     "get_result",
                 ],
             },
             "arguments": {"type": "object", "maxProperties": 4},
-            "mode": {"type": "string", "enum": ["plan"]},
+            "mode": {"type": "string", "enum": ["plan", "apply"]},
         },
         "required": [
             "request_id",
@@ -78,10 +81,17 @@ def handle_ops_broker(args: dict[str, Any], **kwargs: Any) -> str:
     try:
         request = validate_request(args)
         hermes_home = _path_from_env("HERMES_HOME", Path.home() / ".hermes")
-        session_id = str(kwargs.get("session_id") or "")
-        caller = resolve_caller(session_id, hermes_home / "state.db")
         policy_path = _path_from_env("OPS_BROKER_POLICY", PLUGIN_ROOT / "policy.json")
         policy = json.loads(policy_path.read_text(encoding="utf-8"))
+        session_id = str(kwargs.get("session_id") or "")
+        owner_identities = policy.get("ownerIdentities", [])
+        if not isinstance(owner_identities, list):
+            raise BrokerError("owner identities policy must be a list")
+        caller = resolve_caller(
+            session_id,
+            hermes_home / "state.db",
+            owner_identities,
+        )
         configured_workspace = Path(
             str(policy.get("workspace") or DEFAULT_WORKSPACE)
         ).expanduser().resolve()

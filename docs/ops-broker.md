@@ -23,11 +23,13 @@ A Hermes profile is not an OS sandbox. This broker limits delegated capability, 
 - Every caller uses a distinct A2A peer token; authenticated session identity, not request JSON, selects policy.
 - The inbound A2A platform gets only the `ops-broker` toolset.
 - The Agent Card advertises only `ops-broker`.
-- The tool accepts five top-level fields and rejects `caller_profile`, arbitrary URLs, shell text, unknown fields, and non-UUID request IDs.
+- The tool accepts five top-level fields and rejects `caller_profile`, arbitrary URLs, shell text, template paths, unknown fields, and non-UUID request IDs.
 - Every command is a fixed argv list executed with `shell=False`.
 - GitHub repositories, Swamp models, workflows, and data names are exact allowlists in `plugins/ops_broker/policy.json`.
-- Phase 1 accepts only `mode: plan`; all apply/write requests fail closed.
-- Audit records contain caller, request ID, operation, mode, status, and approval state, but never command output, stderr, environment, or credentials.
+- Read-only operations require `mode: plan`; the two repository bootstrap gate operations require `mode: apply`.
+- Apply accepts only repository name plus immutable plan run ID/checksum/artifact version. It reloads and verifies artifact provenance before starting a suspended workflow.
+- Approval can resume only an exact apply run registered in broker audit and serialized by a lock for the policy-bound authenticated owner Telegram session; SWE has no approval operation. Recovery reads authoritative Swamp workflow/approval-step status and continues only the missing stage; completed runs are attested without replay.
+- Audit records contain caller, request ID, operation, mode, status, approval state and checksum/run identities, but never command output, stderr, environment, or credentials.
 
 ## Initial operations
 
@@ -40,12 +42,12 @@ A Hermes profile is not an OS sandbox. This broker limits delegated capability, 
 | `swamp.validate_model` | `model` | yes |
 | `swamp.validate_workflow` | `workflow` | yes |
 | `swamp.run_readonly_workflow` | `workflow` | yes, allowlisted workflows only |
-| `swamp.plan_github_cloudflare_repository` | `repository` | yes, `swe` only; fixed workflow and typed slug |
+| `swamp.plan_github_cloudflare_repository` | `repository` | `swe` or owner; read-only checksum-bound plan |
+| `swamp.start_github_cloudflare_repository_apply` | `repository`, `plan_run_id`, `plan_checksum`, `artifact_version` | `swe` or owner; starts exact workflow suspended at manual approval |
+| `swamp.approve_github_cloudflare_repository_apply` | `apply_run_id` | authenticated owner session only; locks and advances the exact run from authoritative Swamp state |
 | `swamp.get_result` | `model`, `name` | yes, allowlisted artifacts only |
 
-No write operation is implemented in phase 1. A future write slice must add a separately reviewed plan artifact, replay protection, an explicit human approval record, and an apply executor.
-
-Repository bootstrap plans fail closed until `approvedTemplateRevision` contains a reviewed 40-character template commit SHA. Default-branch drift and scaffold reads are checked against that exact SHA. The future write plan creates an empty repository and materializes the approved tree; it does not use GitHub's mutable template-generation endpoint.
+The repository template is versioned locally under `templates/github-cloudflare-app`. It is rendered only with the validated repository name, a plan-generated 96-bit-nonce production Worker target, and a deterministic short preview Worker name. Plan binds template, exact Worker target and rendered manifests by SHA-256. The unique production target prevents overwrite collision without Cloudflare API access. The bootstrap does not query organization membership or read/manage secret values, metadata, visibility or grants. Apply creates new repositories only; adopt-existing and overwrite are intentionally unsupported. Verification proves the exact main tree, `branch-preview` reviewer, production Actions success and runtime health before success is reported; fixed organization secret-name availability is inferred only from that deployment/runtime proof.
 
 ## Installation and activation
 
