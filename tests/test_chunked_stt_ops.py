@@ -84,6 +84,38 @@ class InputContractTests(unittest.TestCase):
 
 
 class AuditTests(unittest.TestCase):
+    def test_vendor_tree_hash_ignores_python_bytecode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "parser.py").write_text("source")
+            expected = ops.sha256_tree(root)
+            cache = root / "__pycache__"
+            cache.mkdir()
+            (cache / "parser.cpython-312.pyc").write_bytes(b"runtime-specific")
+            self.assertEqual(ops.sha256_tree(root), expected)
+
+    def test_plan_reports_vendored_number_parser_drift(self):
+        desired = ops.desired_command(Path("/runtime/chunked_qwen_stt.py"))
+        payload = ops.build_plan(
+            profile_commands={"default": desired},
+            deployed_script=Path("/runtime/chunked_qwen_stt.py"),
+            source_script=Path("/source/chunked_qwen_stt.py"),
+            deployed_hash="same",
+            source_hash="same",
+            source_vendor_hash="new-vendor",
+            deployed_vendor_hash="old-vendor",
+        )
+        self.assertEqual(payload["result"], "changes_required")
+        self.assertIn(
+            {
+                "type": "deploy-vendor",
+                "source": str(ops.SOURCE_VENDOR),
+                "target": str(ops.DEPLOYED_VENDOR),
+                "expectedSha256": "new-vendor",
+            },
+            payload["plannedActions"],
+        )
+
     def test_numeric_prompt_is_versioned_and_covers_required_formats(self):
         prompt = ops.read_desired_prompt()
         for example in (

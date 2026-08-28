@@ -12,6 +12,7 @@ normalized overlap is found. If overlap is uncertain, both texts are retained.
 
 from __future__ import annotations
 
+import importlib
 import json
 import math
 import os
@@ -38,12 +39,148 @@ MAX_AUDIO_SECONDS = 6 * 60 * 60
 MAX_CHUNKS = 720
 MIN_STEP_SECONDS = 1.0
 
+RUSSIAN_ORDINAL_TO_CARDINAL = {
+    "первого": "один",
+    "второго": "два",
+    "третьего": "три",
+    "четвертого": "четыре",
+    "четвёртого": "четыре",
+    "пятого": "пять",
+    "шестого": "шесть",
+    "седьмого": "семь",
+    "восьмого": "восемь",
+    "девятого": "девять",
+    "десятого": "десять",
+    "одиннадцатого": "одиннадцать",
+    "двенадцатого": "двенадцать",
+    "тринадцатого": "тринадцать",
+    "четырнадцатого": "четырнадцать",
+    "пятнадцатого": "пятнадцать",
+    "шестнадцатого": "шестнадцать",
+    "семнадцатого": "семнадцать",
+    "восемнадцатого": "восемнадцать",
+    "девятнадцатого": "девятнадцать",
+    "двадцатого": "двадцать",
+    "тридцатого": "тридцать",
+}
+RUSSIAN_MONTHS = (
+    "января",
+    "февраля",
+    "марта",
+    "апреля",
+    "мая",
+    "июня",
+    "июля",
+    "августа",
+    "сентября",
+    "октября",
+    "ноября",
+    "декабря",
+)
+
 
 @dataclass(frozen=True)
 class TranscriptionResult:
     text: str
     chunk_count: int
     duration_seconds: float
+
+
+def _load_russian_number_parser():
+    script_dir = Path(__file__).resolve().parent
+    vendor_candidates = (script_dir / "vendor", script_dir.parent / "vendor")
+    for candidate in vendor_candidates:
+        if (candidate / "number_parser" / "parser.py").is_file():
+            candidate_text = str(candidate)
+            if candidate_text not in sys.path:
+                sys.path.insert(0, candidate_text)
+            break
+    package = importlib.import_module("number_parser")
+    parser_module = importlib.import_module("number_parser.parser")
+    return package.parse, package.parse_number, parser_module.LanguageData("ru")
+
+
+def _number_phrase_pattern(words: Iterable[str]) -> str:
+    tokens = sorted((re.escape(word) for word in words), key=len, reverse=True)
+    token = "(?:" + "|".join(tokens) + ")"
+    return rf"{token}(?:\s+{token})*"
+
+
+def normalize_russian_numbers(text: str) -> str:
+    parse, parse_number, language_data = _load_russian_number_parser()
+    cardinal_words = set(language_data.all_numbers)
+    cardinal_pattern = _number_phrase_pattern(cardinal_words)
+    ordinal_pattern = _number_phrase_pattern(
+        cardinal_words | set(RUSSIAN_ORDINAL_TO_CARDINAL)
+    )
+
+    def parsed_phrase(value: str, *, ordinals: bool = False) -> int | None:
+        words = value.casefold().split()
+        if ordinals:
+            words = [RUSSIAN_ORDINAL_TO_CARDINAL.get(word, word) for word in words]
+        return parse_number(" ".join(words), language="ru")
+
+    decimal_re = re.compile(
+        rf"(?P<whole>{cardinal_pattern})\s+цел(?:ая|ое|ых)\s+"
+        rf"(?P<fraction>{cardinal_pattern})\s+"
+        r"(?P<denominator>десят(?:ая|ых)|сот(?:ая|ых)|тысячн(?:ая|ых))",
+        flags=re.IGNORECASE,
+    )
+
+    def replace_decimal(match: re.Match[str]) -> str:
+        whole = parsed_phrase(match.group("whole"))
+        fraction = parsed_phrase(match.group("fraction"))
+        if whole is None or fraction is None:
+            return match.group(0)
+        width = {"десят": 1, "сот": 2, "тысячн": 3}
+        denominator = match.group("denominator").casefold()
+        digits = next(
+            size for prefix, size in width.items() if denominator.startswith(prefix)
+        )
+        return f"{whole},{fraction:0{digits}d}"
+
+    text = decimal_re.sub(replace_decimal, text)
+
+    date_re = re.compile(
+        rf"(?P<day>{ordinal_pattern})\s+"
+        rf"(?P<month>{'|'.join(RUSSIAN_MONTHS)})\s+"
+        rf"(?P<year>{ordinal_pattern})\s+года",
+        flags=re.IGNORECASE,
+    )
+
+    def replace_date(match: re.Match[str]) -> str:
+        day = parsed_phrase(match.group("day"), ordinals=True)
+        year = parsed_phrase(match.group("year"), ordinals=True)
+        if day is None or year is None:
+            return match.group(0)
+        return f"{day} {match.group('month')} {year} года"
+
+    text = date_re.sub(replace_date, text)
+    text = parse(text, language="ru")
+    text = re.sub(r"\bминус\s+(\d+)\b", r"-\1", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"(?<!\d)(\d+)\s+процент(?:а|ов)?\b",
+        r"\1%",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    def replace_time(match: re.Match[str]) -> str:
+        return f"{int(match.group(1))}:{int(match.group(2)):02d}"
+
+    text = re.sub(
+        r"(?<!\d)(\d{1,2})\s+час(?:а|ов)?\s+(\d{1,2})\s+минут(?:а|ы)?\b",
+        replace_time,
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"\b(версия)\s+(\d+)\s+точка\s+(\d+)\b",
+        r"\1 \2.\3",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return text
 
 
 def plan_chunks(
@@ -357,6 +494,11 @@ def run_to_output(
         render_chunk=render_chunk,
         chunk_seconds=chunk_seconds,
         overlap_seconds=overlap_seconds,
+    )
+    result = TranscriptionResult(
+        text=normalize_russian_numbers(result.text),
+        chunk_count=result.chunk_count,
+        duration_seconds=result.duration_seconds,
     )
 
     atomic_write_text(output, result.text)

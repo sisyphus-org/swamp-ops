@@ -13,6 +13,7 @@ Telegram voice note
 → long: 180 s chunks with 3 s overlap
 → localhost:8127/transcribe for each chunk
 → conservative overlap merge
+→ deterministic local Russian number normalization
 → one UTF-8 transcript for Hermes
 ```
 
@@ -23,15 +24,19 @@ The runtime fails closed unless the Qwen endpoint is explicit HTTP loopback (`12
 ## Versioned source and deployed artifact
 
 - Source: `scripts/chunked_qwen_stt.py`
+- Vendored parser: `vendor/number_parser` (`number-parser` 0.3.2, BSD-3-Clause)
 - Stable runtime artifact: `/Users/hermes/workspaces/runtime/hermes-stt/chunked_qwen_stt.py`
+- Stable runtime vendor: `/Users/hermes/workspaces/runtime/hermes-stt/vendor/number_parser`
 - Python: `/Users/hermes/.local/share/hermes-stt/.venv/bin/python`
 - Qwen endpoint: `http://127.0.0.1:8127/transcribe`
 
-The source and deployed SHA-256 must match. New profile baselines use the stable runtime artifact through `scripts/hermes_profile_bootstrap.py`.
+The source/deployed script SHA-256 and deterministic vendor-tree SHA-256 must both match. New profile baselines use the stable runtime artifact through `scripts/hermes_profile_bootstrap.py`.
 
 ## Numeric formatting prompt
 
-Qwen3-ASR receives free-form context from `HERMES_STT_VOCAB`; the local server passes it to `processor.apply_transcription_request(prompt=...)`. The canonical value is versioned in `config/qwen-stt-numeric-prompt.txt`. Because this interface is transcription context/hotwords rather than a general instruction channel, the prompt contains only desired output-style exemplars—no spoken number words or arrow mappings that could reinforce the unwanted spelling. It biases quantities, negative and decimal numbers, dates, time, percentages, versions, and monetary amounts toward Arabic digits. This is model prompting, not heuristic transcript rewriting.
+Qwen3-ASR receives free-form context from `HERMES_STT_VOCAB`; the local server passes it to `processor.apply_transcription_request(prompt=...)`. The canonical value is versioned in `config/qwen-stt-numeric-prompt.txt`. Because this interface is transcription context/hotwords rather than a general instruction channel, the prompt contains only desired output-style exemplars—no spoken number words or arrow mappings that could reinforce the unwanted spelling. It provides best-effort bias for quantities, negative and decimal numbers, dates, time, percentages, versions, and monetary amounts.
+
+Live testing showed that prompt bias alone does not reliably change Qwen's Russian number spelling. The command wrapper therefore performs a deterministic, fully local normalization pass after chunk merge. Cardinal numbers use the vendored Russian parser; bounded contextual rules format negative values, decimal fractions, percentages, dates, clock time, and dotted versions. Audio and transcript remain local, and unrelated non-numeric text is preserved.
 
 The system LaunchDaemon must contain the exact prompt under `EnvironmentVariables.HERMES_STT_VOCAB`. Because `/Library/LaunchDaemons` and `launchctl` are owner-controlled, rollout uses a reviewed plist draft and an owner-approved restart. The plan reports only prompt hashes, not the full prompt, and emits `set-qwen-prompt` with `ownerRequired=true` when live state differs.
 
@@ -54,7 +59,7 @@ swamp workflow run chunked-qwen-stt --input mode=smoke
 swamp workflow run chunked-qwen-stt --input mode=numeric-smoke
 ```
 
-The committed workflow always uses fixed `books-7m` and `sis69-numbers` sample slugs, so no user-controlled sample value reaches the shell command. The operations script still validates slugs for direct operator use. Symlinked samples, symlinked runtime parents/output roots, and paths resolving outside the fixed runtime root are rejected. Smoke output and source audio stay under ignored `.swamp/` runtime data. The versioned result contains only hashes, metrics, and the numeric assertion result—not transcript content.
+The committed workflow always uses fixed `books-7m` and `sis69-numbers` sample slugs, so no user-controlled sample value reaches the shell command. Smoke executes the stable deployed wrapper and vendored parser rather than the worktree source, proving the live Telegram path. The operations script still validates slugs for direct operator use. Symlinked samples, symlinked runtime parents/output roots, and paths resolving outside the fixed runtime root are rejected. Smoke output and source audio stay under ignored `.swamp/` runtime data. The versioned result contains only hashes, metrics, and the numeric assertion result—not transcript content.
 
 ## Deployment and config
 

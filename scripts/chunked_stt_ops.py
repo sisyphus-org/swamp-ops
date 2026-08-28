@@ -10,13 +10,14 @@ import os
 import plistlib
 import re
 import subprocess
-import sys
 from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_SCRIPT = REPOSITORY_ROOT / "scripts" / "chunked_qwen_stt.py"
+SOURCE_VENDOR = REPOSITORY_ROOT / "vendor" / "number_parser"
 NUMERIC_PROMPT_FILE = REPOSITORY_ROOT / "config" / "qwen-stt-numeric-prompt.txt"
 DEPLOYED_SCRIPT = Path("/Users/hermes/workspaces/runtime/hermes-stt/chunked_qwen_stt.py")
+DEPLOYED_VENDOR = Path("/Users/hermes/workspaces/runtime/hermes-stt/vendor/number_parser")
 QWEN_LAUNCHDAEMON = Path("/Library/LaunchDaemons/local.qwen-stt.plist")
 QWEN_PYTHON = Path("/Users/hermes/.local/share/hermes-stt/.venv/bin/python")
 SAMPLE_ROOT = REPOSITORY_ROOT / ".swamp" / "stt-samples"
@@ -45,6 +46,23 @@ def sha256_file(path: Path) -> str:
     with path.open("rb") as handle:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
+    return digest.hexdigest()
+
+
+def sha256_tree(path: Path) -> str:
+    digest = hashlib.sha256()
+    entries = (
+        item
+        for item in path.rglob("*")
+        if item.is_file()
+        and item.suffix != ".pyc"
+        and "__pycache__" not in item.parts
+    )
+    for entry in sorted(entries):
+        digest.update(str(entry.relative_to(path)).encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(entry.read_bytes())
+        digest.update(b"\0")
     return digest.hexdigest()
 
 
@@ -97,6 +115,8 @@ def build_plan(
     source_hash: str,
     desired_prompt: str | None = None,
     live_prompt: str | None = None,
+    source_vendor_hash: str | None = None,
+    deployed_vendor_hash: str | None = None,
 ) -> dict:
     expected = desired_command(deployed_script)
     unreadable = sorted(
@@ -110,9 +130,18 @@ def build_plan(
     deployed_matches = deployed_hash == source_hash and deployed_hash is not None
     prompt_audited = desired_prompt is not None
     prompt_compliant = live_prompt == desired_prompt if prompt_audited else None
+    vendor_audited = source_vendor_hash is not None
+    vendor_matches = (
+        deployed_vendor_hash == source_vendor_hash if vendor_audited else True
+    )
     if unreadable:
         result = "error"
-    elif noncompliant or not deployed_matches or prompt_compliant is False:
+    elif (
+        noncompliant
+        or not deployed_matches
+        or not vendor_matches
+        or prompt_compliant is False
+    ):
         result = "changes_required"
     else:
         result = "compliant"
@@ -124,6 +153,15 @@ def build_plan(
                 "source": str(source_script),
                 "target": str(deployed_script),
                 "expectedSha256": source_hash,
+            }
+        )
+    if not vendor_matches:
+        actions.append(
+            {
+                "type": "deploy-vendor",
+                "source": str(SOURCE_VENDOR),
+                "target": str(DEPLOYED_VENDOR),
+                "expectedSha256": source_vendor_hash,
             }
         )
     for profile in noncompliant:
@@ -151,6 +189,10 @@ def build_plan(
         "sourceSha256": source_hash,
         "deployedScript": str(deployed_script),
         "deployedSha256": deployed_hash,
+        "sourceVendor": str(SOURCE_VENDOR),
+        "sourceVendorSha256": source_vendor_hash,
+        "deployedVendor": str(DEPLOYED_VENDOR),
+        "deployedVendorSha256": deployed_vendor_hash,
         "desiredCommand": expected,
         "numericPromptFile": str(NUMERIC_PROMPT_FILE),
         "numericPromptSha256": (
@@ -175,8 +217,14 @@ def build_plan(
 def run_plan() -> dict:
     if not SOURCE_SCRIPT.is_file():
         raise RuntimeError(f"source script missing: {SOURCE_SCRIPT}")
+    if not SOURCE_VENDOR.is_dir():
+        raise RuntimeError(f"source vendor missing: {SOURCE_VENDOR}")
     source_hash = sha256_file(SOURCE_SCRIPT)
     deployed_hash = sha256_file(DEPLOYED_SCRIPT) if DEPLOYED_SCRIPT.is_file() else None
+    source_vendor_hash = sha256_tree(SOURCE_VENDOR)
+    deployed_vendor_hash = (
+        sha256_tree(DEPLOYED_VENDOR) if DEPLOYED_VENDOR.is_dir() else None
+    )
     commands = {
         profile: read_profile_command(home) for profile, home in PROFILE_HOMES.items()
     }
@@ -190,6 +238,8 @@ def run_plan() -> dict:
         source_hash=source_hash,
         desired_prompt=desired_prompt,
         live_prompt=live_prompt,
+        source_vendor_hash=source_vendor_hash,
+        deployed_vendor_hash=deployed_vendor_hash,
     )
 
 
@@ -295,7 +345,7 @@ def run_smoke(slug: str, *, require_numeric_formats: bool = False) -> dict:
     if output.exists():
         output.unlink()
     proc = subprocess.run(
-        [sys.executable, str(SOURCE_SCRIPT), str(sample), str(output)],
+        [str(QWEN_PYTHON), str(DEPLOYED_SCRIPT), str(sample), str(output)],
         capture_output=True,
         text=True,
         timeout=840,

@@ -216,6 +216,28 @@ class TranscriptMergeTests(unittest.TestCase):
         )
 
 
+class RussianNumberNormalizationTests(unittest.TestCase):
+    def test_spoken_numbers_are_rendered_in_contextual_digit_formats(self):
+        source = (
+            "В заказе двадцать пять деталей. Температура минус семь градусов. "
+            "Расход три целых пять десятых литра. Скидка двенадцать процентов. "
+            "Встреча двадцать восьмого августа две тысячи двадцать шестого года "
+            "в четырнадцать часов тридцать минут. Версия три точка два. "
+            "Сумма одна тысяча двести рублей."
+        )
+        self.assertEqual(
+            chunked.normalize_russian_numbers(source),
+            "В заказе 25 деталей. Температура -7 градусов. "
+            "Расход 3,5 литра. Скидка 12%. "
+            "Встреча 28 августа 2026 года в 14:30. Версия 3.2. "
+            "Сумма 1200 рублей.",
+        )
+
+    def test_non_numeric_text_is_preserved(self):
+        source = "Обычная фраза без чисел и без специальных преобразований."
+        self.assertEqual(chunked.normalize_russian_numbers(source), source)
+
+
 class RuntimeTests(unittest.TestCase):
     def test_short_audio_calls_qwen_once_without_rendering_chunks(self):
         rendered = []
