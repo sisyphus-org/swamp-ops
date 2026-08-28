@@ -1,4 +1,3 @@
-import hashlib
 import json
 import sqlite3
 import subprocess
@@ -9,6 +8,7 @@ from unittest import mock
 
 from plugins.ops_broker import handle_ops_broker
 from plugins.ops_broker.broker import (
+    _canonical_plan_checksum,
     build_command,
     execute_request,
     resolve_caller,
@@ -25,10 +25,7 @@ def repository_plan(repository="example-site", *, ready=False, blockers=None):
         "target": {"repository": f"sisyphus-org/{repository}"},
         "blockers": list(blockers or ([] if ready else ["not ready"])),
     }
-    canonical = json.dumps(
-        plan, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    ).encode()
-    plan["checksum"] = hashlib.sha256(canonical).hexdigest()
+    plan["checksum"] = _canonical_plan_checksum(plan)
     return plan
 
 
@@ -799,6 +796,37 @@ class ApplyBrokerTests(unittest.TestCase):
             }
         )
 
+    def write_apply_gate(self, audit: Path, **overrides):
+        record = {
+            "event": "apply_gate",
+            "caller": "swe",
+            "apply_run_id": self.apply_run_id,
+            "repository": "example-site",
+            "plan_run_id": self.plan_run_id,
+            "plan_checksum": self.plan["checksum"],
+            "artifact_version": 7,
+        }
+        record.update(overrides)
+        audit.write_text(json.dumps(record) + "\n")
+
+    def test_start_apply_requires_writable_audit_before_workflow_invocation(self):
+        calls = []
+
+        def runner(argv, **_kwargs):
+            calls.append(argv)
+            return {"returncode": 0, "stdout": "{}", "stderr": ""}
+
+        with self.assertRaisesRegex(ValueError, "immutable audit path"):
+            execute_request(
+                self.start_request(),
+                caller="swe",
+                policy=self.policy,
+                runner=runner,
+                workspace=Path("/Users/hermes/workspaces/swamp-ops"),
+                audit_path=None,
+            )
+        self.assertEqual(calls, [])
+
     def test_start_apply_builds_only_fixed_checksum_bound_workflow_argv(self):
         command = build_command(
             "swamp.start_github_cloudflare_repository_apply",
@@ -931,20 +959,7 @@ class ApplyBrokerTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as tmp:
             audit = Path(tmp) / "audit.jsonl"
-            audit.write_text(
-                json.dumps(
-                    {
-                        "event": "apply_gate",
-                        "caller": "swe",
-                        "apply_run_id": self.apply_run_id,
-                        "repository": "example-site",
-                        "plan_run_id": self.plan_run_id,
-                        "plan_checksum": self.plan["checksum"],
-                        "artifact_version": 7,
-                    }
-                )
-                + "\n"
-            )
+            self.write_apply_gate(audit)
 
             def runner(_argv, **_kwargs):
                 return {
@@ -988,20 +1003,7 @@ class ApplyBrokerTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as tmp:
             audit = Path(tmp) / "audit.jsonl"
-            audit.write_text(
-                json.dumps(
-                    {
-                        "event": "apply_gate",
-                        "caller": "swe",
-                        "apply_run_id": self.apply_run_id,
-                        "repository": "example-site",
-                        "plan_run_id": self.plan_run_id,
-                        "plan_checksum": self.plan["checksum"],
-                        "artifact_version": 7,
-                    }
-                )
-                + "\n"
-            )
+            self.write_apply_gate(audit)
             calls = []
 
             def runner(argv, **_kwargs):
@@ -1055,20 +1057,7 @@ class ApplyBrokerTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as tmp:
             audit = Path(tmp) / "audit.jsonl"
-            audit.write_text(
-                json.dumps(
-                    {
-                        "event": "apply_gate",
-                        "caller": "swe",
-                        "apply_run_id": self.apply_run_id,
-                        "repository": "example-site",
-                        "plan_run_id": self.plan_run_id,
-                        "plan_checksum": self.plan["checksum"],
-                        "artifact_version": 7,
-                    }
-                )
-                + "\n"
-            )
+            self.write_apply_gate(audit)
             calls = []
 
             def runner(argv, **_kwargs):
@@ -1119,20 +1108,7 @@ class ApplyBrokerTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as tmp:
             audit = Path(tmp) / "audit.jsonl"
-            audit.write_text(
-                json.dumps(
-                    {
-                        "event": "apply_gate",
-                        "caller": "swe",
-                        "apply_run_id": self.apply_run_id,
-                        "repository": "example-site",
-                        "plan_run_id": self.plan_run_id,
-                        "plan_checksum": self.plan["checksum"],
-                        "artifact_version": 7,
-                    }
-                )
-                + "\n"
-            )
+            self.write_apply_gate(audit)
             calls = []
 
             def runner(argv, **_kwargs):

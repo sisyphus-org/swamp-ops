@@ -563,6 +563,18 @@ def execute_request(
         command = build_command(operation_key, request["arguments"], policy)
 
         if operation_key == "swamp.start_github_cloudflare_repository_apply":
+            if audit_path is None:
+                raise BrokerError("apply operations require an immutable audit path")
+            try:
+                _append_jsonl(
+                    audit_path,
+                    {
+                        **_audit_base(request, caller, operation_key, "preflight"),
+                        "event": "apply_preflight",
+                    },
+                )
+            except OSError as exc:
+                raise BrokerError("immutable audit path is not writable") from exc
             args = request["arguments"]
             approved_plan = _load_plan_artifact(
                 runner=runner,

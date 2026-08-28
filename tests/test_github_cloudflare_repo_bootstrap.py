@@ -1,8 +1,10 @@
 import importlib.util
+import io
 import json
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "github_cloudflare_repo_bootstrap.py"
 SPEC = importlib.util.spec_from_file_location("github_cloudflare_repo_bootstrap", SCRIPT)
@@ -217,6 +219,21 @@ class ApplyTests(unittest.TestCase):
     def ready_plan(self):
         return bootstrap.build_plan("example-site", FakeClient(ready_responses()))
 
+    def test_invalid_reviewer_id_rejects_before_first_external_write(self):
+        plan = self.ready_plan()
+        plan["resolved"]["reviewerId"] = None
+        plan["checksum"] = bootstrap._plan_checksum(plan)
+        client = FakeClient({})
+        with self.assertRaisesRegex(bootstrap.ContractError, "reviewer id"):
+            bootstrap.apply_plan(
+                "example-site",
+                plan,
+                "00000000-0000-4000-8000-000000000001",
+                plan["checksum"],
+                client,
+            )
+        self.assertEqual(client.calls, [])
+
     def test_production_worker_target_substitution_rejects_before_first_external_write(self):
         plan = self.ready_plan()
         plan["target"]["productionWorker"] = "attacker-worker"
@@ -277,6 +294,97 @@ class ApplyTests(unittest.TestCase):
                 client,
             )
         self.assertEqual(client.calls, [])
+
+    def test_verify_repository_reads_back_tree_reviewer_deploy_and_health(self):
+        plan = self.ready_plan()
+        target = "sisyphus-org/example-site"
+        main_sha = "d" * 40
+        expected_tree = [
+            {
+                "path": item["path"],
+                "sha": item["gitBlobSha"],
+                "type": "blob",
+            }
+            for item in plan["source"]["renderedManifest"]
+        ]
+        deploy_path = (
+            f"/repos/{target}/actions/workflows/deploy.yml/runs?"
+            f"event=push&head_sha={main_sha}&per_page=20"
+        )
+        client = FakeClient(
+            {
+                ("GET", f"/repos/{target}"): result(200, {"full_name": target}),
+                ("GET", f"/repos/{target}/commits/main"): result(
+                    200, {"sha": main_sha}
+                ),
+                ("GET", f"/repos/{target}/git/trees/main?recursive=1"): result(
+                    200, {"tree": expected_tree}
+                ),
+                (
+                    "GET",
+                    f"/repos/{target}/environments/branch-preview",
+                ): result(
+                    200,
+                    {
+                        "protection_rules": [
+                            {
+                                "type": "required_reviewers",
+                                "reviewers": [
+                                    {
+                                        "type": "User",
+                                        "reviewer": {
+                                            "id": plan["resolved"]["reviewerId"]
+                                        },
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                ),
+                ("GET", deploy_path): result(
+                    200,
+                    {
+                        "workflow_runs": [
+                            {
+                                "id": 123,
+                                "status": "completed",
+                                "conclusion": "success",
+                                "html_url": "https://github.example/run/123",
+                            }
+                        ]
+                    },
+                ),
+            }
+        )
+
+        class HealthResponse(io.BytesIO):
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                self.close()
+
+        with mock.patch.object(
+            bootstrap.urllib.request,
+            "urlopen",
+            return_value=HealthResponse(b'{"status":"ok"}'),
+        ) as urlopen:
+            verified = bootstrap.verify_repository(
+                "example-site",
+                plan,
+                plan["checksum"],
+                client,
+                wait_seconds=0,
+            )
+
+        self.assertEqual(verified["status"], "verified")
+        self.assertEqual(verified["mainSha"], main_sha)
+        self.assertEqual(verified["deployRunId"], 123)
+        self.assertEqual(verified["health"], {"status": "ok"})
+        self.assertEqual(urlopen.call_count, 1)
+        self.assertEqual(client.calls[-1], ("GET", deploy_path, None))
 
     def test_apply_creates_exact_tree_environment_and_settings(self):
         plan = self.ready_plan()

@@ -2,8 +2,9 @@ id: 2d9941bd-400c-4cf5-9502-178767e48474
 name: github-cloudflare-repo-bootstrap-apply
 description: >-
   After one manual approval, create the exact checksum-bound GitHub repository,
-  configure branch-preview and organization-secret access, then verify the main
-  tree, production deployment and runtime. Existing repositories are rejected.
+  configure branch-preview, reference fixed organization-secret names without
+  reading or managing their values, metadata, visibility or grants, then verify
+  the main tree, production deployment and runtime. Existing repositories are rejected.
 tags:
   domain: infrastructure
   integration: github-cloudflare

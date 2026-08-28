@@ -394,6 +394,14 @@ def _validate_bound_plan(
         != f"https://{production_worker}.{STANDARD['workersSubdomain']}.workers.dev"
     ):
         raise ContractError("approved production Worker target is inconsistent")
+    resolved = plan.get("resolved")
+    reviewer_id = resolved.get("reviewerId") if isinstance(resolved, dict) else None
+    if (
+        not isinstance(reviewer_id, int)
+        or isinstance(reviewer_id, bool)
+        or reviewer_id < 1
+    ):
+        raise ContractError("approved plan Environment reviewer id is invalid")
     template = load_template_files()
     implementation = load_implementation_files()
     rendered = render_template_files(repository, template, production_worker)
