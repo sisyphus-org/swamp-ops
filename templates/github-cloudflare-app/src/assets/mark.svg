@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Astro Cloudflare mark">
+  <rect width="64" height="64" rx="32" fill="#b6f36b"/>
+  <path d="M18 42 31 15h3l12 27h-8l-2-6H27l-2 6h-7Zm12-13h4l-2-6-2 6Z" fill="#07110f"/>
+  <path d="M23 48c5 2 13 2 18 0" fill="none" stroke="#07110f" stroke-width="3" stroke-linecap="round"/>
+</svg>

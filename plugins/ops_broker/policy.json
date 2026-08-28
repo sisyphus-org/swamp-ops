@@ -1,7 +1,29 @@
 {
   "version": 1,
   "workspace": "/Users/hermes/workspaces/swamp-ops",
+  "ownerIdentities": [
+    {
+      "source": "telegram",
+      "user_id": "442308262",
+      "caller": "owner"
+    }
+  ],
   "peers": {
+    "owner": {
+      "operations": [
+        "github.repository_access",
+        "github.list_pull_requests",
+        "github.pull_request_checks",
+        "swamp.auth_whoami",
+        "swamp.validate_model",
+        "swamp.validate_workflow",
+        "swamp.run_readonly_workflow",
+        "swamp.plan_github_cloudflare_repository",
+        "swamp.start_github_cloudflare_repository_apply",
+        "swamp.approve_github_cloudflare_repository_apply",
+        "swamp.get_result"
+      ]
+    },
     "books": {
       "operations": [
         "github.repository_access",
@@ -48,6 +70,7 @@
         "swamp.validate_workflow",
         "swamp.run_readonly_workflow",
         "swamp.plan_github_cloudflare_repository",
+        "swamp.start_github_cloudflare_repository_apply",
         "swamp.get_result"
       ]
     }
@@ -59,6 +82,7 @@
   },
   "swamp": {
     "repositoryBootstrapWorkflow": "github-cloudflare-repo-bootstrap",
+    "repositoryBootstrapApplyWorkflow": "github-cloudflare-repo-bootstrap-apply",
     "models": [
       "ops-broker-readonly-smoke"
     ],

@@ -1,3 +1,4 @@
+import hashlib
 import json
 import sqlite3
 import subprocess
@@ -13,6 +14,32 @@ from plugins.ops_broker.broker import (
     resolve_caller,
     validate_request,
 )
+
+
+def repository_plan(repository="example-site", *, ready=False, blockers=None):
+    plan = {
+        "schemaVersion": 2,
+        "mode": "plan",
+        "readOnly": True,
+        "ready": ready,
+        "target": {"repository": f"sisyphus-org/{repository}"},
+        "blockers": list(blockers or ([] if ready else ["not ready"])),
+    }
+    canonical = json.dumps(
+        plan, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode()
+    plan["checksum"] = hashlib.sha256(canonical).hexdigest()
+    return plan
+
+
+def plan_artifact(plan, *, run_id, version):
+    return {
+        "modelName": "github-cloudflare-repo-bootstrap",
+        "name": "result",
+        "version": version,
+        "ownerDefinition": {"workflowRunId": run_id},
+        "content": {"exitCode": 0, "stdout": json.dumps(plan)},
+    }
 
 
 class SmokeScriptTests(unittest.TestCase):
@@ -256,14 +283,25 @@ class CommandConstructionTests(unittest.TestCase):
 
 
 class PolicyTests(unittest.TestCase):
-    def test_repository_bootstrap_capability_is_swe_only(self):
+    def test_repository_plan_start_are_swe_capabilities_but_approval_is_owner_only(self):
         path = Path(__file__).parents[1] / "plugins" / "ops_broker" / "policy.json"
         policy = json.loads(path.read_text())
-        operation = "swamp.plan_github_cloudflare_repository"
+        plan_operation = "swamp.plan_github_cloudflare_repository"
+        start_operation = "swamp.start_github_cloudflare_repository_apply"
+        approve_operation = "swamp.approve_github_cloudflare_repository_apply"
 
-        self.assertIn(operation, policy["peers"]["swe"]["operations"])
+        self.assertIn(plan_operation, policy["peers"]["swe"]["operations"])
+        self.assertIn(start_operation, policy["peers"]["swe"]["operations"])
+        self.assertNotIn(approve_operation, policy["peers"]["swe"]["operations"])
+        self.assertIn(approve_operation, policy["peers"]["owner"]["operations"])
+        self.assertEqual(
+            policy["ownerIdentities"],
+            [{"source": "telegram", "user_id": "442308262", "caller": "owner"}],
+        )
         for peer in ("books", "crypto-analyst", "ideas"):
-            self.assertNotIn(operation, policy["peers"][peer]["operations"])
+            self.assertNotIn(plan_operation, policy["peers"][peer]["operations"])
+            self.assertNotIn(start_operation, policy["peers"][peer]["operations"])
+            self.assertNotIn(approve_operation, policy["peers"][peer]["operations"])
         self.assertEqual(
             policy["swamp"]["repositoryBootstrapWorkflow"],
             "github-cloudflare-repo-bootstrap",
@@ -373,6 +411,7 @@ class ExecutionTests(unittest.TestCase):
             }
         )
         calls = []
+        plan = repository_plan(blockers=["template missing"])
 
         def runner(argv, **kwargs):
             calls.append((argv, kwargs))
@@ -407,18 +446,7 @@ class ExecutionTests(unittest.TestCase):
                         "ownerDefinition": {"workflowRunId": "run-1"},
                         "content": {
                             "exitCode": 0,
-                            "stdout": json.dumps(
-                                {
-                                    "schemaVersion": 1,
-                                    "mode": "plan",
-                                    "readOnly": True,
-                                    "ready": False,
-                                    "target": {
-                                        "repository": "sisyphus-org/example-site"
-                                    },
-                                    "blockers": ["template missing"],
-                                }
-                            ),
+                            "stdout": json.dumps(plan),
                         },
                     }
                 ),
@@ -462,16 +490,7 @@ class ExecutionTests(unittest.TestCase):
             {
                 "workflowRunId": "run-1",
                 "artifactVersion": 7,
-                "plan": {
-                    "schemaVersion": 1,
-                    "mode": "plan",
-                    "readOnly": True,
-                    "ready": False,
-                    "target": {
-                        "repository": "sisyphus-org/example-site"
-                    },
-                    "blockers": ["template missing"],
-                },
+                "plan": plan,
             },
         )
 
@@ -586,7 +605,7 @@ class ExecutionTests(unittest.TestCase):
                 stdout = "[]"
             return {"returncode": 0, "stdout": stdout, "stderr": ""}
 
-        with self.assertRaisesRegex(ValueError, "invalid JSON object"):
+        with self.assertRaisesRegex(ValueError, "provenance is invalid"):
             execute_request(
                 request,
                 caller="swe",
@@ -613,6 +632,7 @@ class ExecutionTests(unittest.TestCase):
                 "mode": "plan",
             }
         )
+        other_plan = repository_plan("other-site", blockers=["template missing"])
 
         def runner(argv, **_kwargs):
             if argv[:3] == ["swamp", "workflow", "run"]:
@@ -634,18 +654,7 @@ class ExecutionTests(unittest.TestCase):
                     "ownerDefinition": {"workflowRunId": "run-expected"},
                     "content": {
                         "exitCode": 0,
-                        "stdout": json.dumps(
-                            {
-                                "schemaVersion": 1,
-                                "mode": "plan",
-                                "readOnly": True,
-                                "ready": False,
-                                "target": {
-                                    "repository": "sisyphus-org/other-site"
-                                },
-                                "blockers": ["template missing"],
-                            }
-                        ),
+                        "stdout": json.dumps(other_plan),
                     },
                 }
             return {"returncode": 0, "stdout": json.dumps(payload), "stderr": ""}
@@ -760,6 +769,462 @@ class ExecutionTests(unittest.TestCase):
             self.assertNotIn("error", record)
 
 
+class ApplyBrokerTests(unittest.TestCase):
+    def setUp(self):
+        self.policy = json.loads(
+            (
+                Path(__file__).parents[1]
+                / "plugins"
+                / "ops_broker"
+                / "policy.json"
+            ).read_text()
+        )
+        self.plan_run_id = "11111111-1111-4111-8111-111111111111"
+        self.apply_run_id = "22222222-2222-4222-8222-222222222222"
+        self.plan = repository_plan(ready=True)
+
+    def start_request(self):
+        return validate_request(
+            {
+                "request_id": "31058213-709a-47c1-a541-fd15f9169527",
+                "integration": "swamp",
+                "operation": "start_github_cloudflare_repository_apply",
+                "arguments": {
+                    "repository": "example-site",
+                    "plan_run_id": self.plan_run_id,
+                    "plan_checksum": self.plan["checksum"],
+                    "artifact_version": 7,
+                },
+                "mode": "apply",
+            }
+        )
+
+    def test_start_apply_builds_only_fixed_checksum_bound_workflow_argv(self):
+        command = build_command(
+            "swamp.start_github_cloudflare_repository_apply",
+            self.start_request()["arguments"],
+            self.policy,
+        )
+        self.assertEqual(
+            command,
+            [
+                "swamp",
+                "workflow",
+                "run",
+                "github-cloudflare-repo-bootstrap-apply",
+                "--input",
+                "repository=example-site",
+                "--input",
+                f"planRunId={self.plan_run_id}",
+                "--input",
+                f"planChecksum={self.plan['checksum']}",
+                "--input",
+                "artifactVersion:json=7",
+                "--json",
+            ],
+        )
+        arguments = dict(self.start_request()["arguments"])
+        arguments["url"] = "https://example.com"
+        with self.assertRaisesRegex(ValueError, "unexpected arguments"):
+            build_command(
+                "swamp.start_github_cloudflare_repository_apply",
+                arguments,
+                self.policy,
+            )
+
+    def test_start_rechecks_plan_then_registers_suspended_run_in_audit(self):
+        calls = []
+
+        def runner(argv, **_kwargs):
+            calls.append(argv)
+            if argv[:3] == ["swamp", "data", "get"]:
+                payload = plan_artifact(
+                    self.plan, run_id=self.plan_run_id, version=7
+                )
+            else:
+                payload = {"id": self.apply_run_id, "status": "suspended"}
+            return {"returncode": 0, "stdout": json.dumps(payload), "stderr": ""}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            audit = Path(tmp) / "audit.jsonl"
+            response = execute_request(
+                self.start_request(),
+                caller="swe",
+                policy=self.policy,
+                runner=runner,
+                workspace=Path("/Users/hermes/workspaces/swamp-ops"),
+                audit_path=audit,
+            )
+            records = [json.loads(line) for line in audit.read_text().splitlines()]
+
+        self.assertEqual(calls[0][:4], ["swamp", "data", "get", "github-cloudflare-repo-bootstrap"])
+        self.assertEqual(calls[1][:4], ["swamp", "workflow", "run", "github-cloudflare-repo-bootstrap-apply"])
+        self.assertEqual(response["result"]["status"], "suspended")
+        self.assertEqual(records[-1]["event"], "apply_gate")
+        self.assertEqual(records[-1]["plan_checksum"], self.plan["checksum"])
+
+    def test_blocked_plan_never_creates_manual_approval_run(self):
+        request = self.start_request()
+        blocked = repository_plan(ready=False, blockers=["target exists"])
+        request["arguments"]["plan_checksum"] = blocked["checksum"]
+        calls = []
+
+        def runner(argv, **_kwargs):
+            calls.append(argv)
+            return {
+                "returncode": 0,
+                "stdout": json.dumps(
+                    plan_artifact(blocked, run_id=self.plan_run_id, version=7)
+                ),
+                "stderr": "",
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ValueError, "not ready for apply"):
+                execute_request(
+                    request,
+                    caller="swe",
+                    policy=self.policy,
+                    runner=runner,
+                    workspace=Path("/Users/hermes/workspaces/swamp-ops"),
+                    audit_path=Path(tmp) / "audit.jsonl",
+                )
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][:3], ["swamp", "data", "get"])
+
+    def test_wrong_plan_checksum_rejects_before_apply_workflow(self):
+        request = self.start_request()
+        request["arguments"]["plan_checksum"] = "0" * 64
+        calls = []
+
+        def runner(argv, **_kwargs):
+            calls.append(argv)
+            return {
+                "returncode": 0,
+                "stdout": json.dumps(
+                    plan_artifact(self.plan, run_id=self.plan_run_id, version=7)
+                ),
+                "stderr": "",
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ValueError, "does not match approval"):
+                execute_request(
+                    request,
+                    caller="swe",
+                    policy=self.policy,
+                    runner=runner,
+                    workspace=Path("/Users/hermes/workspaces/swamp-ops"),
+                    audit_path=Path(tmp) / "audit.jsonl",
+                )
+        self.assertEqual(len(calls), 1)
+
+    def test_approval_rejects_history_with_mismatched_bound_inputs(self):
+        approve = validate_request(
+            {
+                "request_id": "81058213-709a-47c1-a541-fd15f9169527",
+                "integration": "swamp",
+                "operation": "approve_github_cloudflare_repository_apply",
+                "arguments": {"apply_run_id": self.apply_run_id},
+                "mode": "apply",
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            audit = Path(tmp) / "audit.jsonl"
+            audit.write_text(
+                json.dumps(
+                    {
+                        "event": "apply_gate",
+                        "caller": "swe",
+                        "apply_run_id": self.apply_run_id,
+                        "repository": "example-site",
+                        "plan_run_id": self.plan_run_id,
+                        "plan_checksum": self.plan["checksum"],
+                        "artifact_version": 7,
+                    }
+                )
+                + "\n"
+            )
+
+            def runner(_argv, **_kwargs):
+                return {
+                    "returncode": 0,
+                    "stdout": json.dumps(
+                        {
+                            "id": self.apply_run_id,
+                            "workflowName": "github-cloudflare-repo-bootstrap-apply",
+                            "inputs": {
+                                "repository": "different-site",
+                                "planRunId": self.plan_run_id,
+                                "planChecksum": self.plan["checksum"],
+                                "artifactVersion": 7,
+                            },
+                            "status": "suspended",
+                            "jobs": [],
+                        }
+                    ),
+                    "stderr": "",
+                }
+
+            with self.assertRaisesRegex(ValueError, "bound inputs"):
+                execute_request(
+                    approve,
+                    caller="owner",
+                    policy=self.policy,
+                    runner=runner,
+                    workspace=Path("/Users/hermes/workspaces/swamp-ops"),
+                    audit_path=audit,
+                )
+
+    def test_approval_retry_resumes_when_authoritative_step_is_already_succeeded(self):
+        approve = validate_request(
+            {
+                "request_id": "61058213-709a-47c1-a541-fd15f9169527",
+                "integration": "swamp",
+                "operation": "approve_github_cloudflare_repository_apply",
+                "arguments": {"apply_run_id": self.apply_run_id},
+                "mode": "apply",
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            audit = Path(tmp) / "audit.jsonl"
+            audit.write_text(
+                json.dumps(
+                    {
+                        "event": "apply_gate",
+                        "caller": "swe",
+                        "apply_run_id": self.apply_run_id,
+                        "repository": "example-site",
+                        "plan_run_id": self.plan_run_id,
+                        "plan_checksum": self.plan["checksum"],
+                        "artifact_version": 7,
+                    }
+                )
+                + "\n"
+            )
+            calls = []
+
+            def runner(argv, **_kwargs):
+                calls.append(argv)
+                if argv[:4] == ["swamp", "workflow", "history", "get"]:
+                    payload = {
+                        "id": self.apply_run_id,
+                        "workflowName": "github-cloudflare-repo-bootstrap-apply",
+                        "inputs": {
+                            "repository": "example-site",
+                            "planRunId": self.plan_run_id,
+                            "planChecksum": self.plan["checksum"],
+                            "artifactVersion": 7,
+                        },
+                        "status": "suspended",
+                        "jobs": [
+                            {
+                                "name": "apply",
+                                "steps": [
+                                    {"name": "approve-create", "status": "succeeded"}
+                                ],
+                            }
+                        ],
+                    }
+                else:
+                    payload = {"id": self.apply_run_id, "status": "succeeded"}
+                return {"returncode": 0, "stdout": json.dumps(payload), "stderr": ""}
+
+            response = execute_request(
+                approve,
+                caller="owner",
+                policy=self.policy,
+                runner=runner,
+                workspace=Path("/Users/hermes/workspaces/swamp-ops"),
+                audit_path=audit,
+            )
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1][:3], ["swamp", "workflow", "resume"])
+        self.assertEqual(response["result"]["status"], "succeeded")
+
+    def test_approval_retry_attests_authoritative_completed_run_without_resume(self):
+        approve = validate_request(
+            {
+                "request_id": "71058213-709a-47c1-a541-fd15f9169527",
+                "integration": "swamp",
+                "operation": "approve_github_cloudflare_repository_apply",
+                "arguments": {"apply_run_id": self.apply_run_id},
+                "mode": "apply",
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            audit = Path(tmp) / "audit.jsonl"
+            audit.write_text(
+                json.dumps(
+                    {
+                        "event": "apply_gate",
+                        "caller": "swe",
+                        "apply_run_id": self.apply_run_id,
+                        "repository": "example-site",
+                        "plan_run_id": self.plan_run_id,
+                        "plan_checksum": self.plan["checksum"],
+                        "artifact_version": 7,
+                    }
+                )
+                + "\n"
+            )
+            calls = []
+
+            def runner(argv, **_kwargs):
+                calls.append(argv)
+                return {
+                    "returncode": 0,
+                    "stdout": json.dumps(
+                        {
+                            "id": self.apply_run_id,
+                            "workflowName": "github-cloudflare-repo-bootstrap-apply",
+                            "inputs": {
+                                "repository": "example-site",
+                                "planRunId": self.plan_run_id,
+                                "planChecksum": self.plan["checksum"],
+                                "artifactVersion": 7,
+                            },
+                            "status": "succeeded",
+                            "jobs": [],
+                        }
+                    ),
+                    "stderr": "",
+                }
+
+            response = execute_request(
+                approve,
+                caller="owner",
+                policy=self.policy,
+                runner=runner,
+                workspace=Path("/Users/hermes/workspaces/swamp-ops"),
+                audit_path=audit,
+            )
+            records = [json.loads(line) for line in audit.read_text().splitlines()]
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][:4], ["swamp", "workflow", "history", "get"])
+        self.assertEqual(response["result"]["status"], "succeeded")
+        self.assertEqual(records[-1]["event"], "apply_result")
+
+    def test_approve_resumes_only_registered_exact_run_once(self):
+        approve = validate_request(
+            {
+                "request_id": "41058213-709a-47c1-a541-fd15f9169527",
+                "integration": "swamp",
+                "operation": "approve_github_cloudflare_repository_apply",
+                "arguments": {"apply_run_id": self.apply_run_id},
+                "mode": "apply",
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            audit = Path(tmp) / "audit.jsonl"
+            audit.write_text(
+                json.dumps(
+                    {
+                        "event": "apply_gate",
+                        "caller": "swe",
+                        "apply_run_id": self.apply_run_id,
+                        "repository": "example-site",
+                        "plan_run_id": self.plan_run_id,
+                        "plan_checksum": self.plan["checksum"],
+                        "artifact_version": 7,
+                    }
+                )
+                + "\n"
+            )
+            calls = []
+
+            def runner(argv, **_kwargs):
+                calls.append(argv)
+                if argv[:4] == ["swamp", "workflow", "history", "get"]:
+                    payload = {
+                        "id": self.apply_run_id,
+                        "workflowName": "github-cloudflare-repo-bootstrap-apply",
+                        "inputs": {
+                            "repository": "example-site",
+                            "planRunId": self.plan_run_id,
+                            "planChecksum": self.plan["checksum"],
+                            "artifactVersion": 7,
+                        },
+                        "status": "suspended",
+                        "jobs": [
+                            {
+                                "name": "apply",
+                                "steps": [
+                                    {"name": "approve-create", "status": "waiting_approval"}
+                                ],
+                            }
+                        ],
+                    }
+                elif argv[:3] == ["swamp", "workflow", "approve"]:
+                    payload = {"runId": self.apply_run_id, "approved": True}
+                else:
+                    payload = {"id": self.apply_run_id, "status": "succeeded"}
+                return {
+                    "returncode": 0,
+                    "stdout": json.dumps(payload),
+                    "stderr": "",
+                }
+
+            response = execute_request(
+                approve,
+                caller="owner",
+                policy=self.policy,
+                runner=runner,
+                workspace=Path("/Users/hermes/workspaces/swamp-ops"),
+                audit_path=audit,
+            )
+            with self.assertRaisesRegex(ValueError, "already approved"):
+                execute_request(
+                    approve,
+                    caller="owner",
+                    policy=self.policy,
+                    runner=runner,
+                    workspace=Path("/Users/hermes/workspaces/swamp-ops"),
+                    audit_path=audit,
+                )
+
+        self.assertEqual(
+            calls[0],
+            [
+                "swamp",
+                "workflow",
+                "history",
+                "get",
+                self.apply_run_id,
+                "--json",
+            ],
+        )
+        self.assertEqual(
+            calls[1],
+            [
+                "swamp",
+                "workflow",
+                "approve",
+                "github-cloudflare-repo-bootstrap-apply",
+                "approve-create",
+                "--run",
+                self.apply_run_id,
+                "--json",
+            ],
+        )
+        self.assertEqual(
+            calls[2],
+            [
+                "swamp",
+                "workflow",
+                "resume",
+                "github-cloudflare-repo-bootstrap-apply",
+                "--run",
+                self.apply_run_id,
+                "--json",
+            ],
+        )
+        self.assertEqual(response["status"], "ok")
+        self.assertEqual(response["result"]["status"], "succeeded")
+
+
 class PluginHandlerTests(unittest.TestCase):
     def test_handler_derives_caller_from_session_and_returns_typed_result(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -869,6 +1334,35 @@ class CallerIdentityTests(unittest.TestCase):
             connection.close()
 
             self.assertEqual(resolve_caller("session-1", db_path), "swe")
+
+    def test_resolve_caller_accepts_only_policy_bound_owner_session(self):
+        identities = [
+            {"source": "telegram", "user_id": "442308262", "caller": "owner"}
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "state.db"
+            connection = sqlite3.connect(db_path)
+            connection.execute(
+                "CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, user_id TEXT)"
+            )
+            connection.executemany(
+                "INSERT INTO sessions (id, source, user_id) VALUES (?, ?, ?)",
+                [
+                    ("owner-session", "telegram", "442308262"),
+                    ("other-session", "telegram", "999"),
+                    ("a2a-owner-session", "a2a", "owner"),
+                ],
+            )
+            connection.commit()
+            connection.close()
+
+            self.assertEqual(
+                resolve_caller("owner-session", db_path, identities), "owner"
+            )
+            with self.assertRaisesRegex(ValueError, "not an authenticated A2A peer or owner"):
+                resolve_caller("other-session", db_path, identities)
+            with self.assertRaisesRegex(ValueError, "reserved privileged principal"):
+                resolve_caller("a2a-owner-session", db_path, identities)
 
 
 if __name__ == "__main__":

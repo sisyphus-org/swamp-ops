@@ -1,0 +1,67 @@
+---
+import mark from "../assets/mark.svg";
+import "../styles/global.css";
+
+const capabilities = [
+  "Astro static output",
+  "Cloudflare Worker routing",
+  "GitHub Actions deployment",
+];
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width" />
+    <meta name="description" content="A small Astro landing page deployed through Cloudflare Workers." />
+    <meta name="theme-color" content="#07110f" />
+    <title>Astro × Cloudflare</title>
+  </head>
+  <body>
+    <main>
+      <nav aria-label="Primary navigation">
+        <a class="brand" href="/">
+          <img src={mark.src} width="34" height="34" alt="" />
+          <span>ASTRO/CF</span>
+        </a>
+        <a class="nav-link" href="/api/health">Health API ↗</a>
+      </nav>
+
+      <p class="eyebrow" role="status">__REPOSITORY__ / DEPLOYED AT THE EDGE</p>
+
+      <section class="hero">
+        <p class="eyebrow">EDGE-READY STARTER / 2026</p>
+        <h1>Ship a sharp landing page.<br /><em>Keep the stack tiny.</em></h1>
+        <p class="lede">
+          A production-shaped baseline for static Astro sites, backed by a Cloudflare Worker
+          and deployed from GitHub Actions.
+        </p>
+        <div class="actions">
+          <a class="button primary" href="https://github.com/sisyphus-org/__REPOSITORY__">View source</a>
+          <a class="button secondary" href="#stack">Explore the stack</a>
+        </div>
+      </section>
+
+      <section class="stack" id="stack" aria-labelledby="stack-title">
+        <div>
+          <p class="eyebrow">WHAT'S INSIDE</p>
+          <h2 id="stack-title">Everything needed.<br />Nothing ornamental.</h2>
+        </div>
+        <ol>
+          {capabilities.map((capability, index) => (
+            <li>
+              <span>{String(index + 1).padStart(2, "0")}</span>
+              <strong>{capability}</strong>
+            </li>
+          ))}
+        </ol>
+      </section>
+    </main>
+
+    <footer>
+      <span>SISYPHUS ORG</span>
+      <span>BUILT FOR THE EDGE</span>
+    </footer>
+  </body>
+</html>
