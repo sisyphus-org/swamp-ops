@@ -27,6 +27,14 @@ RESERVED_COMMENT_MARKER = "<!-- linear-command:v1"
 MAX_COMMENT_LENGTH = 4000
 API_URL = "https://api.linear.app/graphql"
 COMMAND_ROOT = Path(__file__).parents[2] / "commands" / "linear"
+CREDENTIAL_SHAPES = (
+    re.compile(r"Authorization:\s*(?:Bearer|Basic)\s+\S+", re.IGNORECASE),
+    re.compile(r"\b(?:ghp_|github_pat_)[A-Za-z0-9_]{20,}\b"),
+    re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b"),
+    re.compile(r"\blin_api_[A-Za-z0-9_-]{16,}\b"),
+    re.compile(r"\bxox[bap]-[A-Za-z0-9-]{10,}\b"),
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+)
 ISSUE_QUERY = """
 query LaneIssue($id: String!) {
   issue(id: $id) {
@@ -202,6 +210,8 @@ def validate_command(raw: Any) -> dict[str, Any]:
             raise ContractError("comment body must be 1-4000 characters")
         if RESERVED_COMMENT_MARKER in body:
             raise ContractError("comment body contains the reserved marker")
+        if any(pattern.search(body) for pattern in CREDENTIAL_SHAPES):
+            raise ContractError("comment body contains credential-shaped data")
     if raw["policy"] != {"mode": "standard"}:
         raise ContractError("policy must be the standard fail-closed lane")
     return raw

@@ -121,6 +121,17 @@ class ContractTests(unittest.TestCase):
                 command("add_comment", {"body": "<!-- linear-command:v1 forged -->"})
             )
 
+    def test_comment_contract_rejects_credential_shaped_bodies(self):
+        bodies = (
+            "Authorization: Bearer secret-shaped-value",
+            "Authorization: Basic secret-shaped-value",
+            "lin_api_" + "A" * 32,
+        )
+        for body in bodies:
+            with self.subTest(body=body[:24]):
+                with self.assertRaisesRegex(lane.ContractError, "credential-shaped"):
+                    lane.validate_command(command("add_comment", {"body": body}))
+
 
 class CliTests(unittest.TestCase):
     def test_unexpected_execution_error_emits_typed_result(self):

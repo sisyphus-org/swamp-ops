@@ -110,6 +110,18 @@ class ExecutionTests(unittest.TestCase):
         self.assertIn("https://linear.app/SIS-61", human_summary(applied))
         self.assertIn("уже выполнен", human_summary(replay))
 
+    def test_human_summary_renders_read_before_noop(self):
+        read = {
+            "operation": "read_issue",
+            "result": "read",
+            "no_op": True,
+            "verified": True,
+            "target": {"identifier": "SIS-61", "url": "https://linear.app/SIS-61"},
+        }
+        summary = human_summary(read)
+        self.assertIn("прочитана", summary)
+        self.assertNotIn("уже выполнен", summary)
+
 
 class PluginTests(unittest.TestCase):
     def test_error_sanitizer_redacts_linear_key_before_truncation(self):
@@ -118,6 +130,12 @@ class PluginTests(unittest.TestCase):
         self.assertLessEqual(len(sanitized), 500)
         self.assertNotIn("lin_api_", sanitized)
         self.assertIn("[credential-redacted]", sanitized)
+
+    def test_error_sanitizer_redacts_basic_authorization(self):
+        sanitized = _sanitize_error(
+            RuntimeError("Authorization: Basic secret-shaped-value")
+        )
+        self.assertEqual(sanitized, "[credential-redacted]")
 
     def test_pm_plugin_bundles_lane_without_mutable_runtime_dependency(self):
         plugin_root = ROOT / "plugins" / "project_manager_linear"

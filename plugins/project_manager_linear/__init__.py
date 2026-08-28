@@ -9,7 +9,7 @@ from typing import Any, Callable
 
 TASK_ID = re.compile(r"^t_[a-f0-9]{8,}$")
 CREDENTIAL_PATTERNS = (
-    re.compile(r"Authorization:\s*Bearer\s+\S+", re.IGNORECASE),
+    re.compile(r"Authorization:\s*(?:Bearer|Basic)\s+\S+", re.IGNORECASE),
     re.compile(r"\b(?:ghp_|github_pat_)[A-Za-z0-9_]{16,}\b"),
     re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b"),
     re.compile(r"\blin_api_[A-Za-z0-9_-]{16,}\b"),
@@ -125,7 +125,9 @@ def human_summary(result: dict[str, Any]) -> str:
     target = result.get("target") if isinstance(result, dict) else None
     url = target.get("url") if isinstance(target, dict) else ""
     operation = result.get("operation")
-    if result.get("result") == "no_op" or result.get("no_op") is True:
+    if operation == "read_issue":
+        lead = "Задача Linear прочитана. Результат verified."
+    elif result.get("result") == "no_op" or result.get("no_op") is True:
         lead = "Запрос уже выполнен; повторная мутация не потребовалась. Изменение verified."
     elif operation == "change_state":
         lead = "Статус Linear изменён и прочитан обратно. Изменение verified."
