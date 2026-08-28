@@ -1,9 +1,9 @@
 id: 8b2cd15a-7fff-4c97-b426-11bf11f8522b
 name: kanban-source-route-audit
 description: >-
-  Read-only audit of one source-profile Telegram thread subscription. Requires
-  exact notifier ownership, chat/thread routing, chat_type=thread and
-  delivery_mode=notify+wake; broker ownership fails closed.
+  Read-only audit of one source-profile Telegram root-DM wake subscription.
+  Requires exact profile, chat and participant identity, no task topic,
+  delivery_mode=wake and no pending terminal event; broker ownership fails closed.
 tags:
   domain: hermes-platform
   safety: read-only
@@ -21,9 +21,12 @@ inputs:
   chat_id:
     type: string
     pattern: "^[1-9][0-9]*$"
-  thread_id:
+  user_id:
     type: string
     pattern: "^[1-9][0-9]*$"
+  source_session_id:
+    type: string
+    pattern: "^[0-9]{8}_[0-9]{6}_[a-f0-9]{8}$"
 jobs:
   - name: main
     steps:
@@ -33,7 +36,7 @@ jobs:
           modelIdOrName: kanban-source-route-audit
           methodName: execute
           inputs:
-            run: /Users/hermes/.hermes/hermes-agent/venv/bin/python scripts/kanban_source_route_audit.py --board '${{ inputs.board }}' --task-id '${{ inputs.task_id }}' --source-profile '${{ inputs.source_profile }}' --chat-id '${{ inputs.chat_id }}' --thread-id '${{ inputs.thread_id }}'
+            run: /Users/hermes/.hermes/hermes-agent/venv/bin/python scripts/kanban_source_route_audit.py --board '${{ inputs.board }}' --task-id '${{ inputs.task_id }}' --source-profile '${{ inputs.source_profile }}' --chat-id '${{ inputs.chat_id }}' --user-id '${{ inputs.user_id }}' --source-session-id '${{ inputs.source_session_id }}'
             workingDir: .
             timeout: 60000
             ignoreExitCode: false

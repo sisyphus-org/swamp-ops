@@ -17,6 +17,7 @@ BOARD_SLUG = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 TASK_ID = re.compile(r"^t_[a-f0-9]{8}$")
 PROFILE = re.compile(r"^[a-z][a-z0-9-]{1,30}$")
 NUMERIC_ID = re.compile(r"^[1-9][0-9]*$")
+SESSION_ID = re.compile(r"^[0-9]{8}_[0-9]{6}_[a-f0-9]{8}$")
 
 TERMINAL_KINDS = {
     "completed",
@@ -48,17 +49,20 @@ def audit_route(
     task_id: str,
     source_profile: str,
     chat_id: str,
-    thread_id: str,
+    user_id: str,
+    source_session_id: str,
 ) -> dict[str, Any]:
-    """Verify one exact source-owned Telegram thread subscription."""
+    """Verify one exact source-owned Telegram root-DM wake subscription."""
     if not TASK_ID.fullmatch(task_id):
         raise AuditError("task_id must be exact t_<8 hex>")
     if not PROFILE.fullmatch(source_profile):
         raise AuditError("source_profile is invalid")
     if source_profile == "broker":
         raise AuditError("broker cannot own source-profile Telegram delivery")
-    if not NUMERIC_ID.fullmatch(chat_id) or not NUMERIC_ID.fullmatch(thread_id):
-        raise AuditError("chat_id and thread_id must be exact positive numeric IDs")
+    if not NUMERIC_ID.fullmatch(chat_id) or not NUMERIC_ID.fullmatch(user_id):
+        raise AuditError("chat_id and user_id must be exact positive numeric IDs")
+    if not SESSION_ID.fullmatch(source_session_id):
+        raise AuditError("source_session_id is invalid")
     if not db_path.is_file():
         raise AuditError(f"board database does not exist: {db_path}")
     conn = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)
@@ -71,31 +75,43 @@ def audit_route(
         if len(rows) != 1:
             raise AuditError(f"expected exactly one subscription for {task_id}")
         route = dict(rows[0])
+        # Hermes persists an unthreaded CLI subscription as either SQL NULL or
+        # an empty string depending on the call path. Both represent root DM.
+        route["thread_id"] = route.get("thread_id") or None
         raw_metadata = route.get("delivery_metadata")
         try:
-            metadata = json.loads(raw_metadata) if raw_metadata else {}
+            metadata = json.loads(raw_metadata) if raw_metadata else None
         except (TypeError, json.JSONDecodeError):
-            metadata = None
+            metadata = "<invalid-json>"
         expected = {
             "platform": "telegram",
             "chat_id": chat_id,
-            "thread_id": thread_id,
-            "chat_type": "thread",
+            "thread_id": None,
+            "user_id": user_id,
+            "chat_type": "dm",
             "notifier_profile": source_profile,
-            "delivery_mode": "notify+wake",
+            "delivery_mode": "wake",
         }
         mismatches = {
             key: {"expected": value, "actual": route.get(key)}
             for key, value in expected.items()
             if route.get(key) != value
         }
-        expected_metadata: dict[str, Any] = {
-            "thread_id": thread_id,
-            "telegram_dm_topic_created_for_send": True,
-        }
-        if metadata != expected_metadata:
+        task_row = conn.execute(
+            "SELECT session_id FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if task_row is None:
+            raise AuditError(f"task does not exist: {task_id}")
+        task_session_id = task_row["session_id"]
+        if task_session_id != source_session_id:
+            mismatches["session_id"] = {
+                "expected": source_session_id,
+                "actual": task_session_id,
+            }
+        if metadata not in (None, {"chat_type": "dm"}):
             mismatches["delivery_metadata"] = {
-                "expected": expected_metadata,
+                "expected": [None, {"chat_type": "dm"}],
                 "actual": metadata,
             }
         pending = [
@@ -107,10 +123,11 @@ def audit_route(
             if row["kind"] in TERMINAL_KINDS
         ]
         return {
-            "result": "pass" if not mismatches else "drift",
+            "result": "pass" if not mismatches and not pending else "drift",
             "readOnly": True,
             "task_id": task_id,
             "source_profile": source_profile,
+            "source_session_id": task_session_id,
             "route": {
                 **{
                     key: route.get(key)
@@ -118,6 +135,7 @@ def audit_route(
                         "platform",
                         "chat_id",
                         "thread_id",
+                        "user_id",
                         "chat_type",
                         "notifier_profile",
                         "delivery_mode",
@@ -145,7 +163,8 @@ def main() -> int:
     parser.add_argument("--task-id", required=True)
     parser.add_argument("--source-profile", required=True)
     parser.add_argument("--chat-id", required=True)
-    parser.add_argument("--thread-id", required=True)
+    parser.add_argument("--user-id", required=True)
+    parser.add_argument("--source-session-id", required=True)
     args = parser.parse_args()
     try:
         report = audit_route(
@@ -153,7 +172,8 @@ def main() -> int:
             task_id=args.task_id,
             source_profile=args.source_profile,
             chat_id=args.chat_id,
-            thread_id=args.thread_id,
+            user_id=args.user_id,
+            source_session_id=args.source_session_id,
         )
         emit(report)
         return 0 if report["result"] == "pass" else 1

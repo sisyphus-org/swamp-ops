@@ -43,7 +43,7 @@ The workflow performs no configuration or service writes. Cutover order, live ve
 
 ## `kanban-source-route-audit`
 
-Read-only SIS-60 audit for one exact source-profile Telegram task topic. It requires source-owned `notify+wake`, `chat_type=thread`, the exact chat/thread pair, and the `telegram_dm_topic_created_for_send` fail-closed marker. Broker ownership, root/no-thread routing, legacy direct-topic metadata, duplicate subscriptions and pending terminal events are reported as drift or failure.
+Read-only SIS-60 audit for one exact source-profile Telegram root-DM session. It requires source-owned `wake`, `chat_type=dm`, exact chat/user identity, `thread_id=null`, no topic metadata and no pending terminal events. Broker ownership, topic/passive routes, duplicate subscriptions and unconsumed terminal events are reported as drift or failure.
 
 ```bash
 swamp model validate kanban-source-route-audit
@@ -53,10 +53,11 @@ swamp workflow run kanban-source-route-audit \
   --input task_id=<task-id> \
   --input source_profile=<profile> \
   --input chat_id=<chat-id> \
-  --input thread_id=<thread-id>
+  --input user_id=<user-id> \
+  --input source_session_id=<source-session-id>
 ```
 
-Task-topic creation order, completion/blocker verification, source-Gateway outage testing and rollback are documented in [`docs/kanban-source-routing.md`](docs/kanban-source-routing.md).
+Wake-only subscription setup, human-facing completion/blocker verification, source-Gateway outage testing and rollback are documented in [`docs/kanban-source-routing.md`](docs/kanban-source-routing.md).
 
 ## `linear-command-lane-plan`
 
