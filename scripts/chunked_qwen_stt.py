@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import logging
 import math
 import os
 import re
@@ -38,6 +39,7 @@ MAX_OVERLAP_SECONDS = 30.0
 MAX_AUDIO_SECONDS = 6 * 60 * 60
 MAX_CHUNKS = 720
 MIN_STEP_SECONDS = 1.0
+LOGGER = logging.getLogger(__name__)
 
 RUSSIAN_ORDINAL_TO_CARDINAL = {
     "первого": "один",
@@ -156,7 +158,9 @@ def normalize_russian_numbers(text: str) -> str:
         return f"{day} {match.group('month')} {year} года"
 
     text = date_re.sub(replace_date, text)
-    text = parse(text, language="ru")
+    text = "\n\n".join(
+        parse(paragraph, language="ru") for paragraph in text.split("\n\n")
+    )
     text = re.sub(r"\bминус\s+(\d+)\b", r"-\1", text, flags=re.IGNORECASE)
     text = re.sub(
         r"(?<!\d)(\d+)\s+процент(?:а|ов)?\b",
@@ -495,8 +499,16 @@ def run_to_output(
         chunk_seconds=chunk_seconds,
         overlap_seconds=overlap_seconds,
     )
+    try:
+        normalized_text = normalize_russian_numbers(result.text)
+    except Exception:
+        LOGGER.warning(
+            "Russian number normalization failed; writing raw transcript",
+            exc_info=True,
+        )
+        normalized_text = result.text
     result = TranscriptionResult(
-        text=normalize_russian_numbers(result.text),
+        text=normalized_text,
         chunk_count=result.chunk_count,
         duration_seconds=result.duration_seconds,
     )
