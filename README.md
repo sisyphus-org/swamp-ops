@@ -41,6 +41,24 @@ swamp workflow run kanban-dispatcher-audit
 
 The workflow performs no configuration or service writes. Cutover order, live verification, recovery proof and the explicit rollback to the previous `crypto-analyst` owner are documented in [`docs/kanban-dispatcher-cutover.md`](docs/kanban-dispatcher-cutover.md).
 
+## `kanban-source-route-audit`
+
+Read-only SIS-60 audit for one exact source-profile Telegram root-DM session. It requires source-owned `wake`, `chat_type=dm`, exact chat/user identity, `thread_id=null`, no topic metadata and no pending terminal events. Broker ownership, topic/passive routes, duplicate subscriptions and unconsumed terminal events are reported as drift or failure.
+
+```bash
+swamp model validate kanban-source-route-audit
+swamp workflow validate kanban-source-route-audit
+swamp workflow run kanban-source-route-audit \
+  --input board=<board> \
+  --input task_id=<task-id> \
+  --input source_profile=<profile> \
+  --input chat_id=<chat-id> \
+  --input user_id=<user-id> \
+  --input source_session_id=<source-session-id>
+```
+
+Wake-only subscription setup, human-facing completion/blocker verification, source-Gateway outage testing and rollback are documented in [`docs/kanban-source-routing.md`](docs/kanban-source-routing.md).
+
 ## `linear-command-lane-plan`
 
 Read-only Swamp entry point for the Project Manager `linear-command.v1` lane. It accepts only a bounded command slug under `commands/linear/`, resolves one exact `SIS-N` issue, records current state and emits a typed before/after `linear-result.v1` plan. Apply is deliberately absent from the workflow and uses the same deterministic script only after review.
