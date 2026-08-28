@@ -34,7 +34,7 @@ def create_db(
     owner: str = "swe",
     cursor: int = 5,
     delivery_mode: str = "wake",
-    thread_id: str | None = "",
+    thread_id: str | None = "448864",
     chat_type: str = "dm",
     user_id: str = "442308262",
     delivery_metadata: dict[str, object] | None = None,
@@ -85,6 +85,7 @@ def run_audit(path: Path, **overrides: str):
         "source_profile": "swe",
         "chat_id": "442308262",
         "user_id": "442308262",
+        "source_thread_id": "448864",
         "source_session_id": SOURCE_SESSION,
     }
     values.update(overrides)
@@ -92,7 +93,7 @@ def run_audit(path: Path, **overrides: str):
 
 
 class RouteAuditTests(unittest.TestCase):
-    """Verify the supported root-DM wake-only source route."""
+    """Verify the supported exact-session-thread wake route."""
 
     def test_cli_wrapper_imports_bundled_audit_from_scripts_directory(self):
         wrapper = Path(__file__).parents[1] / "scripts" / "kanban_source_route_audit.py"
@@ -105,9 +106,10 @@ class RouteAuditTests(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("--source-session-id", completed.stdout)
+        self.assertIn("--source-thread-id", completed.stdout)
 
-    def test_exact_source_owned_root_dm_wake_route_passes(self):
-        """A source-profile DM with exact session and wake-only delivery is healthy."""
+    def test_exact_source_owned_session_thread_wake_route_passes(self):
+        """A DM session thread with exact session and wake-only delivery is healthy."""
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "kanban.db"
             create_db(path)
@@ -117,7 +119,7 @@ class RouteAuditTests(unittest.TestCase):
         self.assertEqual(report["source_session_id"], SOURCE_SESSION)
         self.assertEqual(report["route"]["delivery_mode"], "wake")
         self.assertEqual(report["route"]["chat_type"], "dm")
-        self.assertIsNone(report["route"]["thread_id"])
+        self.assertEqual(report["route"]["thread_id"], "448864")
         self.assertIsNone(report["route"]["delivery_metadata"])
         self.assertEqual(report["pending_terminal_events"], [])
 
@@ -142,6 +144,16 @@ class RouteAuditTests(unittest.TestCase):
             report = run_audit(path)
         self.assertEqual(report["result"], "drift")
         self.assertEqual(set(report["mismatches"]), {"delivery_metadata"})
+
+    def test_missing_or_wrong_source_thread_reports_drift(self):
+        for stored_thread in (None, "447017"):
+            with self.subTest(stored_thread=stored_thread):
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = Path(tmp) / "kanban.db"
+                    create_db(path, thread_id=stored_thread)
+                    report = run_audit(path)
+                self.assertEqual(report["result"], "drift")
+                self.assertEqual(set(report["mismatches"]), {"thread_id"})
 
     def test_broker_cannot_own_source_delivery(self):
         """The headless broker can never be the Telegram notifier."""
@@ -202,6 +214,8 @@ class RouteAuditTests(unittest.TestCase):
                 "442308262",
                 "--user-id",
                 "442308262",
+                "--source-thread-id",
+                "448864",
                 "--source-session-id",
                 SOURCE_SESSION,
             ]
@@ -259,11 +273,11 @@ class RouteAuditTests(unittest.TestCase):
         self.assertIn('pattern: "^[a-z0-9][a-z0-9_-]{0,63}$"', workflow)
         self.assertIn('pattern: "^t_[a-f0-9]{8}$"', workflow)
         self.assertIn('pattern: "^[a-z][a-z0-9-]{1,30}$"', workflow)
-        self.assertGreaterEqual(workflow.count('pattern: "^[1-9][0-9]*$"'), 2)
+        self.assertGreaterEqual(workflow.count('pattern: "^[1-9][0-9]*$"'), 3)
         self.assertIn('pattern: "^[0-9]{8}_[0-9]{6}_[a-f0-9]{8}$"', workflow)
         self.assertIn("--user-id", workflow)
         self.assertIn("--source-session-id", workflow)
-        self.assertNotIn("--thread-id", workflow)
+        self.assertIn("--source-thread-id", workflow)
         self.assertNotIn("--delivery-mode", workflow)
 
 

@@ -1,7 +1,7 @@
 ---
 name: swe-linear-request-routing
 description: Route exact SIS-N requests through Project Manager.
-version: 0.1.0
+version: 0.1.1
 author: Alexey Petrov, Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -18,9 +18,9 @@ Route bounded Linear requests through the Project Manager lane. SWE owns the exa
 ## When to Use
 
 - The owner asks to add a comment to an exact uppercase `SIS-N` issue.
-- The request is an ordinary Telegram root DM with no topic/thread.
+- The request is in an existing SWE Telegram DM session thread with a persisted Hermes session.
 
-Do not use this skill for fuzzy/missing targets, bulk operations, arbitrary teams, unsupported mutations, or Telegram topics.
+Do not use this skill for fuzzy/missing targets, bulk operations, arbitrary teams, unsupported mutations, or creation of a new per-task Telegram topic.
 
 ## Procedure
 
@@ -40,4 +40,4 @@ Do not use this skill for fuzzy/missing targets, bulk operations, arbitrary team
 
 ## Verification
 
-Success requires a source-owned root-DM `wake` route, exact persisted source session, one task, one PM run, `linear-result.v1.verified=true`, and a single normal SWE reply. Exact replay must return the existing task/result without another Linear mutation.
+Success requires a source-owned session-thread `wake` route, exact numeric `thread_id`, matching persisted Hermes session, one task, one PM run, `linear-result.v1.verified=true`, and a single normal SWE reply in that same thread. Exact replay must return the existing task/result without another Linear mutation.

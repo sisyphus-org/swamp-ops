@@ -1,6 +1,6 @@
 # SWE → Project Manager → Linear → SWE E2E
 
-SIS-61 wires an ordinary SWE Telegram root-DM request into the already verified SIS-59 deterministic Linear lane and SIS-60 exact-session wake route. Hermes core is unchanged.
+SIS-61 wires an ordinary SWE Telegram DM session-thread request into the already verified SIS-59 deterministic Linear lane and SIS-60 exact-session wake route. Hermes core is unchanged.
 
 ## User contract
 
@@ -19,7 +19,7 @@ https://linear.app/…
 
 The exact second submission is a verified no-op. It must reuse the same semantic idempotency key and existing Kanban task, perform no second Linear mutation, and produce no second comment.
 
-Internal task IDs and raw `done` lifecycle text stay hidden on success. Telegram topics, passive Kanban pings and cross-profile delivery fallback are outside the contract.
+Internal task IDs and raw `done` lifecycle text stay hidden on success. New per-task Telegram topics, passive Kanban pings and cross-profile delivery fallback are outside the contract; the owner's existing SWE session thread is reused.
 
 ## Components
 
@@ -30,9 +30,9 @@ Internal task IDs and raw `done` lifecycle text stay hidden on success. Telegram
 1. Accepts the exact bounded Russian comment form with one uppercase `SIS-N` target.
 2. Rejects missing/fuzzy/lowercase targets, unsupported operations, oversized bodies, unknown fields and credential-shaped text before durable writes.
 3. Produces exact `linear-command.v1`; command/correlation IDs are UUIDv4, while the task idempotency key is a stable SHA-256-derived semantic key.
-4. Requires the live source context to be `profile=swe`, `platform=telegram`, `chat_type=dm`, exact numeric chat/user IDs, no thread ID and a valid exact Hermes session ID.
+4. Requires the live source context to be `profile=swe`, `platform=telegram`, `chat_type=dm`, exact numeric chat/user/thread IDs and a valid exact Hermes session ID. A missing persisted contextual profile may fall back only to the process-bound `HERMES_PROFILE=swe`; a conflict fails closed.
 5. Creates one `project-manager` Kanban task in `triage` with that exact source session and force-loads `project-manager-linear-worker`.
-6. Writes exactly one source-owned root-DM subscription with `delivery_mode=wake`, `thread_id=NULL`, `chat_type=dm` and metadata exactly `{"chat_type":"dm"}`.
+6. Writes exactly one source-owned existing-thread subscription with `delivery_mode=wake`, the exact source `thread_id`, `chat_type=dm` and metadata exactly `{"chat_type":"dm"}`.
 7. Runs the bundled SIS-60 read-only route audit and fails closed in `triage` on drift.
 8. Releases a passing typed task with the shipped `specify_triage_task` kernel transition. That moves `triage → todo`, runs `recompute_ready`, and must leave the parent-free task in `ready`. `promote_task` is not valid for `triage`.
 
@@ -76,7 +76,7 @@ env -u HERMES_DELEGATED_CHILD_CONTEXT \
   scripts/sis61_local_route_smoke.py
 ```
 
-The smoke uses a temporary Kanban DB under this repository and removes it afterward. It performs no external/network write. Healthy output has one task, one subscription, exact source session, `taskStatus=ready`, `deliveryMode=wake`, `threadId=null`, and replay `already_in_flight`.
+The smoke uses a temporary Kanban DB under this repository and removes it afterward. It performs no external/network write. Healthy output has one task, one subscription, exact source session/thread, `taskStatus=ready`, `deliveryMode=wake`, `threadId=448864`, and replay `already_in_flight`.
 
 ## Reviewed rollout
 
@@ -101,13 +101,13 @@ Project Manager has no resident Gateway requirement for this path: the broker di
 
 ## Live success and replay proof
 
-After rollout, the owner sends the supported phrase once from the ordinary SWE root DM, never a Telegram topic.
+After rollout, the owner sends the supported phrase once from the existing SWE DM session thread. The flow must not create another topic for the Kanban task.
 
 Operational read-back must prove:
 
 - exactly one task with the semantic idempotency key;
 - task `session_id` equals the exact creating SWE session;
-- exactly one subscription owned by SWE with root-DM `wake` fields;
+- exactly one subscription owned by SWE with the exact source `thread_id` and `wake` fields;
 - route audit passes before dispatch and after the terminal cursor advances;
 - broker is the only claimant and one PM run completes;
 - `task.result` parses as `linear-result.v1` with `verified=true` and exact SIS-61 URL;

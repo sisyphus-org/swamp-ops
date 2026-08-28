@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any, Callable
 
@@ -103,7 +104,7 @@ class HermesKanbanBoard:
                 task_id=task_id,
                 platform="telegram",
                 chat_id=source.chat_id,
-                thread_id=None,
+                thread_id=source.thread_id,
                 user_id=source.user_id,
                 chat_type="dm",
                 notifier_profile="swe",
@@ -120,6 +121,7 @@ class HermesKanbanBoard:
             source_profile="swe",
             chat_id=source.chat_id,
             user_id=source.user_id,
+            source_thread_id=source.thread_id,
             source_session_id=source.session_id,
         )
 
@@ -163,6 +165,7 @@ def _default_session_getter(name: str, default: str = "") -> str:
 def _source_context(
     *,
     handler_session_id: str,
+    runtime_profile: str,
     session_getter: Callable[[str, str], str],
 ) -> SourceContext:
     contextual_session_id = session_getter("HERMES_SESSION_ID", "")
@@ -173,9 +176,12 @@ def _source_context(
     ):
         raise RouteError("handler session id does not match gateway source session")
     session_id = handler_session_id or contextual_session_id
+    contextual_profile = session_getter("HERMES_SESSION_PROFILE", "")
+    if contextual_profile and runtime_profile and contextual_profile != runtime_profile:
+        raise RouteError("gateway source profile conflicts with runtime profile")
     return SourceContext(
         session_id=session_id,
-        profile=session_getter("HERMES_SESSION_PROFILE", ""),
+        profile=contextual_profile or runtime_profile,
         platform=session_getter("HERMES_SESSION_PLATFORM", ""),
         chat_id=session_getter("HERMES_SESSION_CHAT_ID", ""),
         user_id=session_getter("HERMES_SESSION_USER_ID", ""),
@@ -193,8 +199,10 @@ def handle_swe_linear_request(args: dict[str, Any], **kwargs: Any) -> str:
         if not isinstance(request, str):
             raise RouteError("request must be text")
         session_getter = kwargs.get("session_getter") or _default_session_getter
+        environ = kwargs.get("environ") or os.environ
         source = _source_context(
             handler_session_id=str(kwargs.get("session_id") or ""),
+            runtime_profile=str(environ.get("HERMES_PROFILE") or ""),
             session_getter=session_getter,
         )
         board_factory = kwargs.get("board_factory") or HermesKanbanBoard
