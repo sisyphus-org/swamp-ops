@@ -49,7 +49,7 @@ def desired_command(deployed_script: Path = DEPLOYED_SCRIPT) -> str:
     return f"{QWEN_PYTHON} {deployed_script} {{input_path}} {{output_path}}"
 
 
-def read_profile_command(profile_home: Path) -> str:
+def read_profile_command(profile_home: Path) -> str | None:
     env = dict(os.environ)
     env["HERMES_HOME"] = str(profile_home)
     proc = subprocess.run(
@@ -60,24 +60,34 @@ def read_profile_command(profile_home: Path) -> str:
         env=env,
     )
     if proc.returncode != 0:
-        return f"<unreadable: {proc.stderr.strip() or proc.stdout.strip()}>"
+        return None
     return " ".join(proc.stdout.split())
 
 
 def build_plan(
     *,
-    profile_commands: dict[str, str],
+    profile_commands: dict[str, str | None],
     deployed_script: Path,
     source_script: Path,
     deployed_hash: str | None,
     source_hash: str,
 ) -> dict:
     expected = desired_command(deployed_script)
+    unreadable = sorted(
+        profile for profile, command in profile_commands.items() if command is None
+    )
     noncompliant = sorted(
-        profile for profile, command in profile_commands.items() if command != expected
+        profile
+        for profile, command in profile_commands.items()
+        if command is not None and command != expected
     )
     deployed_matches = deployed_hash == source_hash and deployed_hash is not None
-    result = "compliant" if not noncompliant and deployed_matches else "changes_required"
+    if unreadable:
+        result = "error"
+    elif noncompliant or not deployed_matches:
+        result = "changes_required"
+    else:
+        result = "compliant"
     actions = []
     if not deployed_matches:
         actions.append(
@@ -106,9 +116,10 @@ def build_plan(
         "deployedSha256": deployed_hash,
         "desiredCommand": expected,
         "profileCommands": profile_commands,
+        "unreadableProfiles": unreadable,
         "noncompliantProfiles": noncompliant,
         "plannedActions": actions,
-        "approvalRequiredBeforeApply": bool(actions),
+        "approvalRequiredBeforeApply": bool(actions) or bool(unreadable),
     }
 
 
@@ -174,6 +185,24 @@ def resolve_sample(slug: str) -> Path:
     return matches[0]
 
 
+def parse_metrics(stderr: str) -> dict:
+    for line in reversed(stderr.splitlines()):
+        candidate = line.strip()
+        if not candidate.startswith("{"):
+            continue
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if (
+            isinstance(parsed, dict)
+            and "durationSeconds" in parsed
+            and "chunkCount" in parsed
+        ):
+            return parsed
+    raise RuntimeError("chunked STT smoke produced no metrics line")
+
+
 def run_smoke(slug: str) -> dict:
     sample = resolve_sample(validate_sample_slug(slug))
     output_root = validated_runtime_directory(
@@ -192,8 +221,7 @@ def run_smoke(slug: str) -> dict:
     )
     if proc.returncode != 0 or not output.is_file():
         raise RuntimeError(f"chunked STT smoke failed: {proc.stderr.strip()}")
-    stderr_lines = [line for line in proc.stderr.splitlines() if line.strip()]
-    metrics = json.loads(stderr_lines[-1])
+    metrics = parse_metrics(proc.stderr)
     transcript = output.read_text(encoding="utf-8")
     return {
         "mode": "smoke",

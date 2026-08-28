@@ -99,18 +99,47 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(payload["result"], "compliant")
         self.assertEqual(payload["noncompliantProfiles"], [])
 
+    def test_unreadable_profile_is_reported_without_write_plan(self):
+        desired = ops.desired_command(Path("/runtime/chunked_qwen_stt.py"))
+        payload = ops.build_plan(
+            profile_commands={"default": None, "books": desired},
+            deployed_script=Path("/runtime/chunked_qwen_stt.py"),
+            source_script=Path("/source/chunked_qwen_stt.py"),
+            deployed_hash="same",
+            source_hash="same",
+        )
+        self.assertEqual(payload["result"], "error")
+        self.assertEqual(payload["unreadableProfiles"], ["default"])
+        self.assertEqual(payload["noncompliantProfiles"], [])
+        self.assertFalse(
+            any(
+                action.get("profile") == "default"
+                for action in payload["plannedActions"]
+            )
+        )
+
+    def test_metrics_parser_ignores_trailing_diagnostics(self):
+        metrics = ops.parse_metrics(
+            "warning before\n"
+            '{"durationSeconds":426.22,"chunkCount":3,"ok":true}\n'
+            "warning after\n"
+        )
+        self.assertEqual(metrics["durationSeconds"], 426.22)
+        self.assertEqual(metrics["chunkCount"], 3)
+
 
 class WorkflowContractTests(unittest.TestCase):
-    def test_workflow_has_bounded_mode_and_sample_slug(self):
+    def test_workflow_has_bounded_mode_and_fixed_sample_slug(self):
         workflow_path = (
             SCRIPT.parents[1] / "workflows" / "workflow-chunked-qwen-stt.yaml"
         )
         parsed = yaml.safe_load(workflow_path.read_text())
         self.assertEqual(parsed["inputs"]["mode"]["enum"], ["plan", "smoke"])
-        self.assertEqual(parsed["inputs"]["sample"]["pattern"], "^[a-z0-9][a-z0-9-]{0,63}$")
+        self.assertNotIn("sample", parsed["inputs"])
         command = parsed["jobs"][0]["steps"][0]["task"]["inputs"]["run"]
         self.assertIn("--mode '${{ inputs.mode }}'", command)
-        self.assertIn("--sample '${{ inputs.sample }}'", command)
+        self.assertIn("--sample books-7m", command)
+        self.assertNotIn("inputs.sample", command)
         self.assertEqual(
             parsed["jobs"][0]["steps"][0]["task"]["inputs"]["workingDir"],
             ".",

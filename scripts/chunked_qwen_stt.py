@@ -300,17 +300,40 @@ def transcribe_in_chunks(
         for index, (start, end) in enumerate(chunks):
             chunk_path = root / f"chunk-{index:03d}.wav"
             render_chunk(source, start, end, chunk_path)
-            transcript = transcribe(chunk_path).strip()
-            if not transcript:
-                raise ValueError(
-                    f"Qwen returned an empty transcript for chunk {index + 1}"
-                )
-            transcripts.append(transcript)
+            try:
+                transcript = transcribe(chunk_path).strip()
+                if not transcript:
+                    raise ValueError(
+                        f"Qwen returned an empty transcript for chunk {index + 1}"
+                    )
+                transcripts.append(transcript)
+            finally:
+                chunk_path.unlink(missing_ok=True)
     return TranscriptionResult(
         text=merge_transcripts(transcripts),
         chunk_count=len(chunks),
         duration_seconds=duration_seconds,
     )
+
+
+def atomic_write_text(output: Path, text: str) -> None:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=output.parent,
+            prefix=f".{output.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temp_path = Path(handle.name)
+            handle.write(text)
+        temp_path.replace(output)
+    finally:
+        if temp_path is not None and temp_path.exists():
+            temp_path.unlink()
 
 
 def run_to_output(
@@ -336,23 +359,7 @@ def run_to_output(
         overlap_seconds=overlap_seconds,
     )
 
-    output.parent.mkdir(parents=True, exist_ok=True)
-    temp_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=output.parent,
-            prefix=f".{output.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as handle:
-            handle.write(result.text)
-            temp_path = Path(handle.name)
-        temp_path.replace(output)
-    finally:
-        if temp_path is not None and temp_path.exists():
-            temp_path.unlink()
+    atomic_write_text(output, result.text)
     return result
 
 

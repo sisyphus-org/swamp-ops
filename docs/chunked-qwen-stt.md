@@ -43,12 +43,10 @@ swamp workflow run chunked-qwen-stt --input mode=plan
 # Stage a local sample in ignored runtime data, then run real Qwen smoke
 mkdir -p .swamp/stt-samples
 cp /path/to/sample.ogg .swamp/stt-samples/books-7m.ogg
-swamp workflow run chunked-qwen-stt \
-  --input mode=smoke \
-  --input sample=books-7m
+swamp workflow run chunked-qwen-stt --input mode=smoke
 ```
 
-The sample input is a bounded slug, never a path. Symlinked samples, symlinked runtime parents/output roots, and paths resolving outside the fixed runtime root are rejected. Smoke output and source audio stay under ignored `.swamp/` runtime data. The versioned result contains only hashes and metrics, not transcript content.
+The committed workflow always uses the fixed `books-7m` sample slug, so no user-controlled sample value reaches the shell command. The operations script still validates slugs for direct operator use. Symlinked samples, symlinked runtime parents/output roots, and paths resolving outside the fixed runtime root are rejected. Smoke output and source audio stay under ignored `.swamp/` runtime data. The versioned result contains only hashes and metrics, not transcript content.
 
 ## Deployment and config
 

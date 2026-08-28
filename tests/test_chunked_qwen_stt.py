@@ -241,6 +241,7 @@ class RuntimeTests(unittest.TestCase):
 
     def test_long_audio_renders_and_transcribes_every_planned_chunk(self):
         rendered = []
+        rendered_paths = []
         transcribed = []
         responses = iter(
             [
@@ -251,8 +252,11 @@ class RuntimeTests(unittest.TestCase):
         )
 
         def render(source, start, end, output):
+            if rendered_paths:
+                self.assertFalse(rendered_paths[-1].exists())
             rendered.append((round(start, 2), round(end, 2)))
             output.write_bytes(b"fixture")
+            rendered_paths.append(output)
 
         def transcribe(path):
             transcribed.append(path)
@@ -268,6 +272,7 @@ class RuntimeTests(unittest.TestCase):
         )
         self.assertEqual(rendered, [(0.0, 180.0), (177.0, 357.0), (354.0, 426.22)])
         self.assertEqual(len(transcribed), 3)
+        self.assertTrue(all(not path.exists() for path in rendered_paths))
         self.assertEqual(result.chunk_count, 3)
         self.assertEqual(
             result.text,
@@ -307,6 +312,37 @@ class RuntimeTests(unittest.TestCase):
                         output.read_text(),
                         "previous complete transcript",
                     )
+
+    def test_atomic_write_cleans_temp_file_when_write_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = root / "transcript.txt"
+            output.write_text("previous complete transcript")
+            temp_path = root / ".transcript.txt.fixture.tmp"
+
+            class FailingHandle:
+                name = str(temp_path)
+
+                def __enter__(self):
+                    temp_path.write_text("")
+                    return self
+
+                def __exit__(self, exc_type, exc, traceback):
+                    return False
+
+                def write(self, text):
+                    temp_path.write_text("partial")
+                    raise OSError("disk write failed")
+
+            with mock.patch.object(
+                chunked.tempfile,
+                "NamedTemporaryFile",
+                return_value=FailingHandle(),
+            ):
+                with self.assertRaisesRegex(OSError, "disk write failed"):
+                    chunked.atomic_write_text(output, "replacement")
+            self.assertEqual(output.read_text(), "previous complete transcript")
+            self.assertFalse(temp_path.exists())
 
 
 if __name__ == "__main__":

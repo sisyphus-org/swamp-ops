@@ -39,7 +39,7 @@ Swamp provides a read-only live rollout plan and a bounded real-audio smoke mode
 swamp model validate chunked-qwen-stt
 swamp workflow validate chunked-qwen-stt
 swamp workflow run chunked-qwen-stt --input mode=plan
-swamp workflow run chunked-qwen-stt --input mode=smoke --input sample=books-7m
+swamp workflow run chunked-qwen-stt --input mode=smoke
 ```
 
 Source: `scripts/chunked_qwen_stt.py`. Operations/audit entry point: `scripts/chunked_stt_ops.py`. Runbook and rollback: [`docs/chunked-qwen-stt.md`](docs/chunked-qwen-stt.md).
