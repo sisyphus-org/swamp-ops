@@ -1,0 +1,11 @@
+type: command/shell
+typeVersion: 2026.02.09.1
+id: e8a04fe9-d278-4512-8ccc-40555c64da6b
+name: chunked-qwen-stt
+version: 1
+tags:
+  domain: hermes-platform
+  safety: read-only-plan-and-bounded-smoke
+  owner: default
+globalArguments: {}
+methods: {}

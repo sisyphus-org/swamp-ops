@@ -26,7 +26,7 @@ DEFAULT_MODEL = "openai-codex/gpt-5.6-sol-900k"
 DEFAULT_WORKSPACE = WORKSPACES_ROOT
 QWEN3_STT_COMMAND = (
     "/Users/hermes/.local/share/hermes-stt/.venv/bin/python "
-    "/Users/hermes/.local/share/hermes-stt/qwen3_stt.py "
+    "/Users/hermes/workspaces/runtime/hermes-stt/chunked_qwen_stt.py "
     "{input_path} {output_path}"
 )
 FALLBACK_CHAIN = [

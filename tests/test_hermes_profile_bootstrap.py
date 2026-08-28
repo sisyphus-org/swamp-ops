@@ -38,6 +38,10 @@ class BootstrapContractTests(unittest.TestCase):
         self.assertIn("provider: qwen3", rendered)
         self.assertIn("language: ru", rendered)
         self.assertIn(bootstrap.QWEN3_STT_COMMAND, rendered)
+        self.assertIn(
+            "/Users/hermes/workspaces/runtime/hermes-stt/chunked_qwen_stt.py",
+            bootstrap.QWEN3_STT_COMMAND,
+        )
         self.assertIn('cwd: "/Users/hermes/workspaces"', rendered)
         self.assertIn("laguna-s-2.1-free", rendered)
         self.assertIn("nemotron-3.5-lightning-free", rendered)

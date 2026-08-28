@@ -29,6 +29,21 @@ The plan reports role-specific required variables and dedicated Gateway safe roo
 
 Script: `scripts/hermes_profile_bootstrap.py`. Verified 2026-08-27: role-specific plan runs, apply for `broker` and `project-manager`, config/model/STT checks, and refuse-on-existing behavior passed with real inputs.
 
+## `chunked-qwen-stt`
+
+Local long-voice transcription without the single-pass 1024-token cutoff. The deterministic runtime wrapper keeps short recordings on one Qwen request, splits longer audio into overlapping 180-second chunks, and conservatively merges transcripts without publishing partial output on chunk failure.
+
+Swamp provides a read-only live rollout plan and a bounded real-audio smoke mode whose artifacts contain hashes and metrics, never transcript text:
+
+```bash
+swamp model validate chunked-qwen-stt
+swamp workflow validate chunked-qwen-stt
+swamp workflow run chunked-qwen-stt --input mode=plan
+swamp workflow run chunked-qwen-stt --input mode=smoke --input sample=books-7m
+```
+
+Source: `scripts/chunked_qwen_stt.py`. Operations/audit entry point: `scripts/chunked_stt_ops.py`. Runbook and rollback: [`docs/chunked-qwen-stt.md`](docs/chunked-qwen-stt.md).
+
 ## `kanban-dispatcher-audit`
 
 Deterministic read-only production audit for the SIS-58 single-dispatcher topology. It checks the fixed seven-profile roster, requires every `kanban.dispatch_in_gateway` value to be explicit, requires only `broker=true`, and resolves the sole holder of `/Users/hermes/.hermes/kanban/.dispatcher.lock` back to its gateway profile.
