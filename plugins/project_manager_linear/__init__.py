@@ -65,6 +65,33 @@ def _load_current_task(task_id: str, db_path: Path) -> Any:
     return task
 
 
+def _reserve_current_run(
+    task_id: str,
+    run_id: int,
+    db_path: Path,
+    claim_lock: str,
+) -> bool:
+    """Extend the exact worker claim and prove its run still owns the task."""
+    from hermes_cli import kanban_db as kb
+
+    if not db_path.is_file():
+        raise FileNotFoundError("pinned Kanban database does not exist")
+    conn = kb.connect(db_path=db_path)
+    try:
+        if not kb.heartbeat_claim(conn, task_id, claimer=claim_lock):
+            return False
+        return bool(
+            kb.heartbeat_worker(
+                conn,
+                task_id,
+                note="project-manager Linear execution reserved",
+                expected_run_id=run_id,
+            )
+        )
+    finally:
+        conn.close()
+
+
 def _command_from_task(task: Any) -> dict[str, Any]:
     body = _task_value(task, "body")
     if not isinstance(body, str) or not body or len(body.encode("utf-8")) > 32768:
@@ -210,6 +237,12 @@ def handle_pm_linear_execute(args: dict[str, Any], **kwargs: Any) -> str:
             {"status": "rejected", "error": "tool requires a pinned Kanban database"},
             sort_keys=True,
         )
+    claim_lock = str(environ.get("HERMES_KANBAN_CLAIM_LOCK") or "").strip()
+    if not claim_lock or len(claim_lock) > 256:
+        return json.dumps(
+            {"status": "rejected", "error": "tool requires the current claim lock"},
+            sort_keys=True,
+        )
 
     task_loader: Callable[[str, Path], Any] = (
         kwargs.get("task_loader") or _load_current_task
@@ -233,6 +266,26 @@ def handle_pm_linear_execute(args: dict[str, Any], **kwargs: Any) -> str:
     ):
         return json.dumps(
             {"status": "rejected", "error": "current Kanban task/run binding is invalid"},
+            sort_keys=True,
+        )
+
+    run_reserver: Callable[[str, int, Path, str], bool] = (
+        kwargs.get("run_reserver") or _reserve_current_run
+    )
+    try:
+        reserved = run_reserver(task_id, int(raw_run_id), db_path, claim_lock)
+    except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+        return json.dumps(
+            {
+                "status": "rejected",
+                "error": "current Kanban run could not be reserved",
+                "error_class": type(exc).__name__,
+            },
+            sort_keys=True,
+        )
+    if not reserved:
+        return json.dumps(
+            {"status": "rejected", "error": "current Kanban run was superseded"},
             sort_keys=True,
         )
 

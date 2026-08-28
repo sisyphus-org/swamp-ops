@@ -209,11 +209,13 @@ class PluginTests(unittest.TestCase):
                 client_factory=lambda _token: object(),
                 lifecycle_factory=lambda _task_id: lifecycle,
                 task_loader=lambda _task_id, _db_path: task_record(),
+                run_reserver=lambda *_args: True,
                 environ={
                     "HERMES_PROFILE": "project-manager",
                     "HERMES_KANBAN_TASK": "t_1234abcd",
                     "HERMES_KANBAN_RUN_ID": "7",
                     "HERMES_KANBAN_DB": "/tmp/kanban.db",
+                    "HERMES_KANBAN_CLAIM_LOCK": "test-claim",
                     "HERMES_HOME": "/tmp/project-manager",
                     "LINEAR_TOKEN": "fixture-token",
                 },
@@ -275,6 +277,7 @@ class PluginTests(unittest.TestCase):
                                 "HERMES_KANBAN_TASK": task_id,
                                 "HERMES_KANBAN_RUN_ID": str(run_id),
                                 "HERMES_KANBAN_DB": str(db_path),
+                                "HERMES_KANBAN_CLAIM_LOCK": str(claimed.claim_lock),
                                 "HERMES_HOME": tmp,
                                 "LINEAR_TOKEN": "fixture-token",
                             },
@@ -297,11 +300,13 @@ class PluginTests(unittest.TestCase):
                 client_factory=BrokenClient,
                 lifecycle_factory=lambda _task_id: lifecycle,
                 task_loader=lambda _task_id, _db_path: task_record(),
+                run_reserver=lambda *_args: True,
                 environ={
                     "HERMES_PROFILE": "project-manager",
                     "HERMES_KANBAN_TASK": "t_1234abcd",
                     "HERMES_KANBAN_RUN_ID": "7",
                     "HERMES_KANBAN_DB": "/tmp/kanban.db",
+                    "HERMES_KANBAN_CLAIM_LOCK": "test-claim",
                     "HERMES_HOME": "/tmp/project-manager",
                     "LINEAR_TOKEN": "fixture-token",
                 },
@@ -330,6 +335,12 @@ class PluginTests(unittest.TestCase):
                 "HERMES_PROFILE": "project-manager",
                 "HERMES_KANBAN_TASK": "t_1234abcd",
                 "HERMES_KANBAN_RUN_ID": "",
+            },
+            {
+                "HERMES_PROFILE": "project-manager",
+                "HERMES_KANBAN_TASK": "t_1234abcd",
+                "HERMES_KANBAN_RUN_ID": "7",
+                "HERMES_KANBAN_DB": "/tmp/kanban.db",
             },
         ):
             with self.subTest(environ=environ):
@@ -365,6 +376,7 @@ class PluginTests(unittest.TestCase):
                             "HERMES_KANBAN_TASK": "t_1234abcd",
                             "HERMES_KANBAN_RUN_ID": "7",
                             "HERMES_KANBAN_DB": "/tmp/kanban.db",
+                            "HERMES_KANBAN_CLAIM_LOCK": "test-claim",
                         },
                     )
                 )
@@ -403,6 +415,7 @@ class PluginTests(unittest.TestCase):
                     "HERMES_KANBAN_TASK": "t_1234abcd",
                     "HERMES_KANBAN_RUN_ID": "7",
                     "HERMES_KANBAN_DB": "/tmp/kanban.db",
+                    "HERMES_KANBAN_CLAIM_LOCK": "test-claim",
                 },
             )
         )
@@ -410,6 +423,32 @@ class PluginTests(unittest.TestCase):
         self.assertEqual(result["error_class"], "OperationalError")
         self.assertNotIn("secret-shaped-value", json.dumps(result))
         client_factory.assert_not_called()
+
+    def test_superseded_claim_rejects_before_linear_or_lifecycle_call(self):
+        client_factory = mock.Mock()
+        lifecycle_factory = mock.Mock()
+        run_reserver = mock.Mock(return_value=False)
+        result = json.loads(
+            handle_pm_linear_execute(
+                {},
+                task_loader=lambda _task_id, _db_path: task_record(),
+                run_reserver=run_reserver,
+                client_factory=client_factory,
+                lifecycle_factory=lifecycle_factory,
+                environ={
+                    "HERMES_PROFILE": "project-manager",
+                    "HERMES_KANBAN_TASK": "t_1234abcd",
+                    "HERMES_KANBAN_RUN_ID": "7",
+                    "HERMES_KANBAN_DB": "/tmp/kanban.db",
+                    "HERMES_KANBAN_CLAIM_LOCK": "old-claim",
+                },
+            )
+        )
+        self.assertEqual(result["status"], "rejected")
+        self.assertIn("superseded", result["error"])
+        run_reserver.assert_called_once()
+        client_factory.assert_not_called()
+        lifecycle_factory.assert_not_called()
 
     def test_malformed_persisted_envelope_blocks_without_linear_call(self):
         lifecycle = FakeLifecycle()
@@ -422,11 +461,13 @@ class PluginTests(unittest.TestCase):
                 ),
                 client_factory=client_factory,
                 lifecycle_factory=lambda _task_id: lifecycle,
+                run_reserver=lambda *_args: True,
                 environ={
                     "HERMES_PROFILE": "project-manager",
                     "HERMES_KANBAN_TASK": "t_1234abcd",
                     "HERMES_KANBAN_RUN_ID": "7",
                     "HERMES_KANBAN_DB": "/tmp/kanban.db",
+                    "HERMES_KANBAN_CLAIM_LOCK": "test-claim",
                 },
             )
         )
