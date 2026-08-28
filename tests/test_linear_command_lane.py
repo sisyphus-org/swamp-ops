@@ -247,6 +247,12 @@ class ExecutionTests(unittest.TestCase):
         with self.assertRaisesRegex(lane.ContractError, "issue payload"):
             lane.execute_command(client, command(), mode="plan")
 
+    def test_null_team_payload_becomes_contract_error(self):
+        client = FakeClient()
+        client.current["team"] = None
+        with self.assertRaisesRegex(lane.ContractError, "SIS team"):
+            lane.execute_command(client, command(), mode="plan")
+
     def test_state_plan_records_before_after_without_write(self):
         client = FakeClient()
         result = lane.execute_command(
@@ -293,6 +299,21 @@ class ExecutionTests(unittest.TestCase):
             with self.assertRaisesRegex(lane.ContractError, "read-back verification"):
                 lane.execute_command(
                     StaleClient(),
+                    command("change_state", {"state": "In Review"}),
+                    mode="apply",
+                    journal_path=Path(tmp) / "journal.json",
+                )
+
+    def test_state_apply_null_read_back_state_becomes_contract_error(self):
+        class NullStateClient(FakeClient):
+            def update_issue_state(self, issue_id, state_id):
+                self.writes.append(("state", issue_id, state_id))
+                self.current["state"] = None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(lane.ContractError, "read-back verification"):
+                lane.execute_command(
+                    NullStateClient(),
                     command("change_state", {"state": "In Review"}),
                     mode="apply",
                     journal_path=Path(tmp) / "journal.json",

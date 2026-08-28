@@ -341,7 +341,13 @@ def execute_command(
     issue = client.get_issue(identifier)
     if not isinstance(issue, dict) or issue.get("identifier") != identifier:
         raise ContractError(f"exact Linear issue not found: {identifier}")
-    if issue.get("team", {}).get("key") != "SIS":
+    team = issue.get("team")
+    if (
+        not isinstance(team, dict)
+        or team.get("key") != "SIS"
+        or not isinstance(team.get("id"), str)
+        or not team["id"].strip()
+    ):
         raise ContractError(f"exact target is not in the SIS team: {identifier}")
     before = issue_snapshot(issue)
     base = result_base(command, issue, mode)
@@ -384,10 +390,16 @@ def execute_command(
             }
         client.update_issue_state(issue["id"], states[0]["id"])
         verified_issue = client.get_issue(identifier)
+        verified_state = (
+            verified_issue.get("state")
+            if isinstance(verified_issue, dict)
+            else None
+        )
         if (
             not isinstance(verified_issue, dict)
             or verified_issue.get("identifier") != identifier
-            or verified_issue.get("state", {}).get("name") != requested
+            or not isinstance(verified_state, dict)
+            or verified_state.get("name") != requested
         ):
             raise ContractError("state read-back verification failed")
         return finish({

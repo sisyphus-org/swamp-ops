@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
 
 from plugins.project_manager_linear import (  # noqa: E402
     PM_LINEAR_EXECUTE_SCHEMA,
+    _sanitize_error,
     execute_pm_command,
     handle_pm_linear_execute,
     human_summary,
@@ -111,6 +112,13 @@ class ExecutionTests(unittest.TestCase):
 
 
 class PluginTests(unittest.TestCase):
+    def test_error_sanitizer_redacts_linear_key_before_truncation(self):
+        error = RuntimeError("x" * 485 + " lin_api_" + "A" * 100)
+        sanitized = _sanitize_error(error)
+        self.assertLessEqual(len(sanitized), 500)
+        self.assertNotIn("lin_api_", sanitized)
+        self.assertIn("[credential-redacted]", sanitized)
+
     def test_pm_plugin_bundles_lane_without_mutable_runtime_dependency(self):
         plugin_root = ROOT / "plugins" / "project_manager_linear"
         self.assertTrue((plugin_root / "lane.py").is_file())

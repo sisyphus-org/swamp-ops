@@ -117,6 +117,7 @@ class ParseTests(unittest.TestCase):
             "Удали SIS-61",
             "Добавь к SIS-61 комментарий: ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890",
             "Добавь к SIS-61 комментарий: Authorization: Bearer secret-shaped-value",
+            "Добавь к SIS-61 комментарий: Authorization: Basic secret-shaped-value",
         )
         for text in cases:
             with self.subTest(text=text):

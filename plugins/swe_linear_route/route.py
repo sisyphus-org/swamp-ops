@@ -19,7 +19,7 @@ SESSION_ID = re.compile(r"^[0-9]{8}_[0-9]{6}_[a-f0-9]{8}$")
 NUMERIC_ID = re.compile(r"^[1-9][0-9]*$")
 TERMINAL_IN_FLIGHT = {"todo", "ready", "running", "review"}
 CREDENTIAL_SHAPES = (
-    re.compile(r"Authorization:\s*Bearer\s+\S+", re.IGNORECASE),
+    re.compile(r"Authorization:\s*(?:Bearer|Basic)\s+\S+", re.IGNORECASE),
     re.compile(r"\b(?:ghp_|github_pat_)[A-Za-z0-9_]{20,}\b"),
     re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b"),
     re.compile(r"\bxox[bap]-[A-Za-z0-9-]{10,}\b"),

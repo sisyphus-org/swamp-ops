@@ -12,6 +12,7 @@ CREDENTIAL_PATTERNS = (
     re.compile(r"Authorization:\s*Bearer\s+\S+", re.IGNORECASE),
     re.compile(r"\b(?:ghp_|github_pat_)[A-Za-z0-9_]{16,}\b"),
     re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b"),
+    re.compile(r"\blin_api_[A-Za-z0-9_-]{16,}\b"),
 )
 
 PM_LINEAR_EXECUTE_SCHEMA = {
@@ -134,10 +135,16 @@ def human_summary(result: dict[str, Any]) -> str:
 
 
 def _sanitize_error(exc: BaseException) -> str:
-    text = str(exc).strip()[:500] or type(exc).__name__
+    text = str(exc).strip() or type(exc).__name__
+    marker = "[credential-redacted]"
     for pattern in CREDENTIAL_PATTERNS:
-        text = pattern.sub("[credential-redacted]", text)
-    return text
+        text = pattern.sub(marker, text)
+    if len(text) <= 500:
+        return text
+    truncated = text[:500]
+    if marker in text and marker not in truncated:
+        return text[: 500 - len(marker)].rstrip() + marker
+    return truncated
 
 
 class HermesKanbanLifecycle:
