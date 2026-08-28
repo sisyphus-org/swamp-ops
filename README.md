@@ -71,6 +71,12 @@ LINEAR_TOKEN=... swamp workflow run linear-command-lane-plan --input command=<sl
 
 MVP operations are exact read, safe workflow-state change, and one bounded comment. Bulk/fuzzy targeting, `Done`, `Canceled`, `Duplicate`, archive/delete and structural writes fail closed. Apply uses marker-based replay protection, a hash-only idempotency journal and exact read-back verification. Contract, examples and SIS-59 live evidence: [`docs/linear-command-lane.md`](docs/linear-command-lane.md).
 
+## `swe-linear-route` + `project-manager-linear`
+
+SIS-61 connects an ordinary SWE Telegram root-DM comment request to the deterministic Project Manager lane without changing Hermes core. `swe-linear-route` validates the exact source session, creates one typed triage task, writes one root-DM `wake` subscription, requires the SIS-60 route audit and only then releases the task. `project-manager-linear` performs plan/apply/read-back inside the PM worker and owns the typed Kanban complete/block transition.
+
+Both plugins are self-contained reviewed artifacts: the SIS-59 lane implementation and SIS-60 audit implementation live inside their respective plugin packages; the existing scripts are thin CLI/Swamp wrappers. Exact replay reuses one semantic idempotency key and task, and credential-shaped request text is rejected before durable writes. Local smoke, reviewed profile rollout, live proof, failure probes and rollback: [`docs/swe-project-manager-linear-e2e.md`](docs/swe-project-manager-linear-e2e.md).
+
 ## `linear-project-standard`
 
 Organization-wide Linear hierarchy contract:

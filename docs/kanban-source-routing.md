@@ -34,7 +34,7 @@ hermes kanban --board <board> notify-subscribe <task-id> \
   --delivery-mode wake
 ```
 
-`notify-subscribe` uses the existing root-DM subscription key and updates the route rather than creating a second route. Source profiles must complete this step and require an audit pass while the task remains in triage. Only then may they run `hermes kanban --board <board> promote <task-id> "source route verified"`. A setup failure leaves the task in triage for reconciliation; it must not be delivered by broker, default or another profile.
+`notify-subscribe` uses the existing root-DM subscription key and updates the route rather than creating a second route. Source profiles must complete this step and require an audit pass while the task remains in triage. A fully typed task is then released through the shipped `specify_triage_task` kernel transition with its existing title/body/assignee unchanged; that atomically moves `triage → todo` and runs `recompute_ready`, so a parent-free task must reach `ready`. Do not call `promote_task` directly on `triage`: it accepts only `todo` or `blocked`. A setup failure leaves the task in triage for reconciliation; it must not be delivered by broker, default or another profile.
 
 ## Read-only audit
 
@@ -67,7 +67,7 @@ For both completion and blocker:
 1. Create the task in triage so the worker cannot execute yet.
 2. Upsert the root-DM wake-only subscription.
 3. Run the audit and require `result=pass`.
-4. Explicitly promote the task and allow it to reach the expected terminal event.
+4. Release the typed triage task through `specify_triage_task`, require `ready`, and allow it to reach the expected terminal event.
 5. Confirm no raw `Kanban <task-id> done/blocked` passive message appears.
 6. Confirm the source profile gateway logs `kanban notifier: woke agent for <task>` and the exact root-DM session is reused.
 7. Confirm the source agent sends one human-facing result through its own bot.

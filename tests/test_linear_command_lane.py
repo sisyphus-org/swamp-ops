@@ -3,6 +3,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import subprocess
 import sys
 import tempfile
 import time
@@ -11,7 +12,12 @@ from unittest import mock
 from pathlib import Path
 
 
-SCRIPT = Path(__file__).parents[1] / "scripts" / "linear_command_lane.py"
+SCRIPT = (
+    Path(__file__).parents[1]
+    / "plugins"
+    / "project_manager_linear"
+    / "lane.py"
+)
 SPEC = importlib.util.spec_from_file_location("linear_command_lane", SCRIPT)
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError(f"cannot import Linear command lane: {SCRIPT}")
@@ -133,6 +139,18 @@ class CliTests(unittest.TestCase):
 
 
 class WorkflowContractTests(unittest.TestCase):
+    def test_cli_wrapper_imports_bundled_lane_from_scripts_directory(self):
+        wrapper = Path(__file__).parents[1] / "scripts" / "linear_command_lane.py"
+        completed = subprocess.run(
+            [sys.executable, str(wrapper), "--help"],
+            cwd=wrapper.parent,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("--command", completed.stdout)
+
     def test_workflow_is_bounded_and_plan_only(self):
         workflow = (
             Path(__file__).parents[1]

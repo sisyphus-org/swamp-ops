@@ -1,0 +1,8 @@
+name: project-manager-linear
+version: 0.1.0
+description: >-
+  Deterministic Project Manager Linear plan, apply, read-back, and Kanban handoff.
+author: sisyphus-org
+kind: backend
+provides_tools:
+  - pm_linear_execute
