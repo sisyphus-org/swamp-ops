@@ -260,6 +260,7 @@ def validate_numeric_transcript(transcript: str) -> list[str]:
     checks = {
         "quantity-25": r"(?<!\d)25(?!\d)",
         "negative-7": r"(?<!\d)-7(?!\d)",
+        "decimal-3-5": r"(?<!\d)3,5(?!\d)",
         "percent-12": r"(?<!\d)12\s*%",
         "date-28": r"(?<!\d)28\s+августа",
         "year-2026": r"(?<!\d)2026(?!\d)",
@@ -274,7 +275,8 @@ def validate_numeric_transcript(transcript: str) -> list[str]:
     ]
     number_words = re.compile(
         r"\b(?:двадцать|пять|минус\s+семь|двенадцать|две\s+тысячи|"
-        r"четырнадцать|тридцать|три\s+точка\s+два|тысяча\s+двести)\b",
+        r"три\s+целых\s+пять\s+десятых|четырнадцать|тридцать|"
+        r"три\s+точка\s+два|тысяча\s+двести)\b",
         flags=re.IGNORECASE,
     )
     if number_words.search(transcript):

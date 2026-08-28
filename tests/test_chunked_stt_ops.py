@@ -195,7 +195,8 @@ class AuditTests(unittest.TestCase):
 class NumericTranscriptTests(unittest.TestCase):
     def test_numeric_smoke_accepts_digit_formatted_transcript(self):
         transcript = (
-            "В заказе 25 деталей. Температура -7 градусов. Скидка 12%. "
+            "В заказе 25 деталей. Температура -7 градусов. Расход 3,5 литра. "
+            "Скидка 12%. "
             "Встреча 28 августа 2026 года в 14:30. Версия 3.2. "
             "Сумма 1200 рублей."
         )
@@ -203,9 +204,11 @@ class NumericTranscriptTests(unittest.TestCase):
 
     def test_numeric_smoke_reports_missing_formats_and_number_words(self):
         issues = ops.validate_numeric_transcript(
-            "В заказе двадцать пять деталей. Скидка двенадцать процентов."
+            "В заказе двадцать пять деталей. Расход три целых пять десятых "
+            "литра. Скидка двенадцать процентов."
         )
         self.assertIn("missing:quantity-25", issues)
+        self.assertIn("missing:decimal-3-5", issues)
         self.assertIn("missing:percent-12", issues)
         self.assertIn("number-words-remain", issues)
 

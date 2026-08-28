@@ -31,7 +31,7 @@ The source and deployed SHA-256 must match. New profile baselines use the stable
 
 ## Numeric formatting prompt
 
-Qwen3-ASR receives free-form context from `HERMES_STT_VOCAB`; the local server passes it to `processor.apply_transcription_request(prompt=...)`. The canonical value is versioned in `config/qwen-stt-numeric-prompt.txt`. It biases quantities, negative and decimal numbers, dates, time, percentages, versions, and monetary amounts toward Arabic digits. This is model prompting, not heuristic transcript rewriting.
+Qwen3-ASR receives free-form context from `HERMES_STT_VOCAB`; the local server passes it to `processor.apply_transcription_request(prompt=...)`. The canonical value is versioned in `config/qwen-stt-numeric-prompt.txt`. Because this interface is transcription context/hotwords rather than a general instruction channel, the prompt contains only desired output-style exemplars—no spoken number words or arrow mappings that could reinforce the unwanted spelling. It biases quantities, negative and decimal numbers, dates, time, percentages, versions, and monetary amounts toward Arabic digits. This is model prompting, not heuristic transcript rewriting.
 
 The system LaunchDaemon must contain the exact prompt under `EnvironmentVariables.HERMES_STT_VOCAB`. Because `/Library/LaunchDaemons` and `launchctl` are owner-controlled, rollout uses a reviewed plist draft and an owner-approved restart. The plan reports only prompt hashes, not the full prompt, and emits `set-qwen-prompt` with `ownerRequired=true` when live state differs.
 
