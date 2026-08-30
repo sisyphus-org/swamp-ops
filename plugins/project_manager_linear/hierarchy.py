@@ -3,25 +3,40 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
-import re
+import sys
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 MAX_NAME = 200
 MAX_DESCRIPTION = 10_000
 MAX_COMMAND_BYTES = 24_576
-SAFE_STATES = {"Backlog", "Todo", "Research", "In Progress", "In Review"}
-CREDENTIAL_SHAPES = (
-    re.compile(r"Authorization:\s*(?:Bearer|Basic)\s+\S+", re.IGNORECASE),
-    re.compile(r"\b(?:ghp_|github_pat_)[A-Za-z0-9_]{20,}\b"),
-    re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b"),
-    re.compile(r"\blin_api_[A-Za-z0-9_-]{16,}\b"),
-    re.compile(r"\bxox[bap]-[A-Za-z0-9-]{10,}\b"),
-    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
-)
-RESERVED_MARKER = "<!-- linear-command"
+
+
+def _load_validation() -> Any:
+    """Load shared bundled policy in package and standalone contexts."""
+    name = "project_manager_linear_validation"
+    existing = sys.modules.get(name)
+    if existing is not None:
+        return existing
+    spec = importlib.util.spec_from_file_location(
+        name, Path(__file__).with_name("validation.py")
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("bundled validation module could not be loaded")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_VALIDATION = _load_validation()
+SAFE_STATES = _VALIDATION.SAFE_STATES
+CREDENTIAL_SHAPES = _VALIDATION.CREDENTIAL_SHAPES
+RESERVED_MARKER = _VALIDATION.RESERVED_MARKER
 
 
 @dataclass(frozen=True)

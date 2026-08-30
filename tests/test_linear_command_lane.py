@@ -427,6 +427,8 @@ class ClientTests(unittest.TestCase):
                 return {"commentCreate": {"success": True, "comment": variables["input"]}}
             if query == lane.ISSUE_CREATE:
                 return {"issueCreate": {"success": True, "issue": {"id": "new", "identifier": "SIS-99"}}}
+            if query == lane.PROJECT_ISSUE_CREATE:
+                return {"issueCreate": {"success": True, "issue": {"id": "new", "identifier": "SIS-100"}}}
             raise AssertionError("unexpected query")
 
     def test_client_methods_use_fixed_graphql_shapes(self):
@@ -447,16 +449,26 @@ class ClientTests(unittest.TestCase):
             description="Description",
             priority=2,
         )
+        client.create_project_issue(
+            issue_id="hierarchy-uuid",
+            team_id="team-uuid",
+            project_id="project-uuid",
+            milestone_id="milestone-uuid",
+            title="Hierarchy issue",
+            state_id="state-uuid",
+            description="Description",
+        )
+        calls = {query: variables for query, variables in client.calls}
         self.assertEqual(
-            client.calls[-4][1],
+            calls[lane.ISSUE_UPDATE],
             {"id": "issue-uuid", "input": {"stateId": "state-uuid"}},
         )
         self.assertEqual(
-            client.calls[-3][1],
+            calls[lane.COMMENT_CREATE],
             {"input": {"id": "comment-uuid", "issueId": "issue-uuid", "body": "body"}},
         )
         self.assertEqual(
-            client.calls[-1][1],
+            calls[lane.ISSUE_CREATE],
             {
                 "input": {
                     "id": "created-uuid",
@@ -469,6 +481,15 @@ class ClientTests(unittest.TestCase):
                 }
             },
         )
+        hierarchy_input = calls[lane.PROJECT_ISSUE_CREATE]["input"]
+        self.assertEqual(hierarchy_input["stateId"], "state-uuid")
+        self.assertNotIn("state_id", hierarchy_input)
+
+    def test_hierarchy_and_lane_share_validation_policy_constants(self):
+        hierarchy = lane._load_hierarchy()
+        self.assertIs(lane.SAFE_STATES, hierarchy.SAFE_STATES)
+        self.assertIs(lane.CREDENTIAL_SHAPES, hierarchy.CREDENTIAL_SHAPES)
+        self.assertEqual(lane.RESERVED_COMMENT_MARKER, f"{hierarchy.RESERVED_MARKER}:v2")
 
     def test_non_json_linear_response_becomes_contract_error(self):
         client = lane.LinearClient("fixture")

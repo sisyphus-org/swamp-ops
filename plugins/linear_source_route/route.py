@@ -325,14 +325,18 @@ def _verified_replay(
         "change",
         "policy",
     }
+    id_fields = ("command_id", "correlation_id")
     try:
-        command_ids = [uuid.UUID(str(persisted[field])) for field in ("command_id", "correlation_id")]
+        command_ids = {
+            field: uuid.UUID(str(persisted[field]))
+            for field in id_fields
+        }
     except (KeyError, ValueError, AttributeError, TypeError) as exc:
         raise RouteError("completed replay has an invalid persisted command") from exc
     if (
         set(persisted) != expected_command_fields
-        or any(value.version != 4 for value in command_ids)
-        or any(str(value) != persisted[field] for value, field in zip(command_ids, ("command_id", "correlation_id")))
+        or any(value.version != 4 for value in command_ids.values())
+        or any(str(value) != persisted[field] for field, value in command_ids.items())
     ):
         raise RouteError("completed replay has an invalid persisted command")
     semantic_fields = ("schema_version", "idempotency_key", "source_profile", "operation", "target", "change", "policy")
