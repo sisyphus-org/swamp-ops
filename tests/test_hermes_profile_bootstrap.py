@@ -70,6 +70,9 @@ class BootstrapContractTests(unittest.TestCase):
             Path("/Users/hermes/workspaces"),
         )
         parsed_source = yaml.safe_load(source)
+        self.assertFalse(
+            parsed_source["gateway"]["platforms"]["telegram"]["enabled"]
+        )
         self.assertNotIn("mcp_servers", parsed_source)
         source_command = parsed_source["secrets"]["command"]["command"]
         self.assertNotIn("LINEAR_TOKEN", source_command)

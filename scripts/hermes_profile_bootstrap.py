@@ -140,6 +140,9 @@ secrets:
 SOURCE_ROUTING_CONFIG = """\
 gateway:
   multiplex_profiles: false
+  platforms:
+    telegram:
+      enabled: false
 
 kanban:
   dispatch_in_gateway: false
