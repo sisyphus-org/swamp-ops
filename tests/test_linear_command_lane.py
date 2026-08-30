@@ -498,6 +498,25 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(issue_client.children[0]["description"], "  indented\ntrailing  ")
             self.assertEqual(uuid.UUID(issue_client.children[0]["id"]).version, 4)
 
+    def test_missing_deterministic_comment_does_not_query_absent_entity(self):
+        class LinearMissingLookupClient(FakeClient):
+            def get_comment(self, comment_id):
+                found = super().get_comment(comment_id)
+                if found is None:
+                    raise lane.ContractError("Linear GraphQL error: Entity not found: Comment")
+                return found
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = LinearMissingLookupClient()
+            result = lane.execute_command(
+                client,
+                command("add_comment", {"body": "clean live contract"}),
+                mode="apply",
+                journal_path=Path(tmp) / "journal.json",
+            )
+            self.assertEqual(result["result"], "applied")
+            self.assertEqual(len(client.comments), 1)
+
     def test_comment_apply_fails_when_deterministic_id_is_not_read_back(self):
         class MissingCommentClient(FakeClient):
             def create_comment(self, issue_id, comment_id, body):
