@@ -388,6 +388,27 @@ class LinearClient:
         if result.get("success") is not True:
             raise ContractError("Linear hierarchy issue creation did not succeed")
 
+    def update_project_issue(
+        self,
+        issue_id: str,
+        *,
+        description: str | None = None,
+        state_id: str | None = None,
+    ) -> None:
+        """Reconcile bounded managed fields on one deterministic hierarchy issue."""
+        payload: dict[str, Any] = {}
+        if description is not None:
+            payload["description"] = description
+        if state_id is not None:
+            payload["stateId"] = state_id
+        if not payload:
+            raise ContractError("Linear hierarchy issue update has no managed fields")
+        result = self.execute(ISSUE_UPDATE, {"id": issue_id, "input": payload})[
+            "issueUpdate"
+        ]
+        if result.get("success") is not True:
+            raise ContractError("Linear hierarchy issue update did not succeed")
+
 
 def validate_command(raw: Any) -> dict[str, Any]:
     """Validate the exact linear-command.v2 envelope and return it unchanged."""
