@@ -180,7 +180,7 @@ def parse_linear_request(
                 r"SIS-[1-9][0-9]*", identifier
             ):
                 raise RouteError("target must be an exact SIS-N identifier")
-            if state not in {"Backlog", "Todo", "Research", "In Progress", "In Review"}:
+            if state not in SAFE_STATES:
                 raise RouteError("state is not in the safe-state allowlist")
             target = {"type": "issue", "identifier": identifier}
             change = {"state": state}
@@ -208,7 +208,7 @@ def parse_linear_request(
                 raise RouteError("create request contains credential-shaped data")
             if not isinstance(parent, str) or not re.fullmatch(r"SIS-[1-9][0-9]*", parent):
                 raise RouteError("parent must be an exact SIS-N identifier")
-            if state not in {"Backlog", "Todo", "Research", "In Progress", "In Review"}:
+            if state not in SAFE_STATES:
                 raise RouteError("state is not in the safe-state allowlist")
             if priority not in {"High", "Medium", "Low"}:
                 raise RouteError("priority is not in the bounded allowlist")

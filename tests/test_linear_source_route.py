@@ -3,6 +3,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 MODULE = Path(__file__).parents[1] / "plugins" / "linear_source_route" / "route.py"
@@ -151,6 +152,33 @@ class ParseTests(unittest.TestCase):
 
         self.assertEqual(default["idempotency_key"], ideas["idempotency_key"])
         self.assertNotEqual(default["source_profile"], ideas["source_profile"])
+
+    def test_all_structured_state_operations_share_safe_state_allowlist(self):
+        extended = set(route.SAFE_STATES) | {"Review Canary"}
+        requests = [
+            {
+                "operation": "change_state",
+                "identifier": "SIS-68",
+                "state": "Review Canary",
+            },
+            {
+                "operation": "create_issue",
+                "title": "Shared state allowlist proof",
+                "description": "",
+                "parent_identifier": "SIS-68",
+                "state": "Review Canary",
+                "priority": "Low",
+            },
+        ]
+        with mock.patch.object(route, "SAFE_STATES", extended):
+            for request in requests:
+                with self.subTest(operation=request["operation"]):
+                    parsed = route.parse_linear_request(
+                        request,
+                        source_profile="default",
+                        uuid_factory=uuid_factory(),
+                    )
+                    self.assertEqual(parsed.command["change"]["state"], "Review Canary")
 
     def test_exact_comment_request_becomes_bounded_command(self):
         parsed = route.parse_linear_request(
