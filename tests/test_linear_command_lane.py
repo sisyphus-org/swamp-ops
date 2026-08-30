@@ -873,6 +873,14 @@ class ExecutionTests(unittest.TestCase):
                 "Visit https://a.example/x.",
                 "Visit [https://a.example/x.](<https://a.example/x.>)",
             ),
+            (
+                "Visit https://a.example/x\"",
+                "Visit [https://a.example/x\"](<https://a.example/x\">)",
+            ),
+            (
+                "Visit https://a.example/x'",
+                "Visit [https://a.example/x'](<https://a.example/x'>)",
+            ),
         )
         for desired_unsafe, live_unsafe in unsafe_contexts:
             with self.subTest(desired_unsafe=desired_unsafe):

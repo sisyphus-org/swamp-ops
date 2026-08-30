@@ -274,7 +274,9 @@ def _description_matches(desired: str, live: Any) -> bool:
         return True
     urls = list(re.finditer(r"https?://[^\s\[\]<>]+", desired))
     if not urls or any(
-        match.group(0).endswith((".", ",", ";", ":", "!", "?", ")", "]", "}"))
+        match.group(0).endswith(
+            (".", ",", ";", ":", "!", "?", ")", "]", "}", "'", '"')
+        )
         for match in urls
     ):
         return False
