@@ -28,24 +28,13 @@ OPERATIONS = {
     "create_issue",
     "converge_hierarchy",
 }
-SAFE_STATES = {"Backlog", "Todo", "Research", "In Progress", "In Review"}
 OWNER_CONTROLLED_STATES = {"Done", "Canceled", "Duplicate"}
 PRIORITIES = {"High": 2, "Medium": 3, "Low": 4}
-RESERVED_COMMENT_MARKER = "<!-- linear-command:v2"
-RESERVED_CREATE_MARKER = "<!-- linear-command:create:v2"
 MAX_COMMENT_LENGTH = 4000
 MAX_TITLE_LENGTH = 200
 MAX_DESCRIPTION_LENGTH = 10000
 API_URL = "https://api.linear.app/graphql"
 COMMAND_ROOT = Path(__file__).parents[2] / "commands" / "linear"
-CREDENTIAL_SHAPES = (
-    re.compile(r"Authorization:\s*(?:Bearer|Basic)\s+\S+", re.IGNORECASE),
-    re.compile(r"\b(?:ghp_|github_pat_)[A-Za-z0-9_]{20,}\b"),
-    re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b"),
-    re.compile(r"\blin_api_[A-Za-z0-9_-]{16,}\b"),
-    re.compile(r"\bxox[bap]-[A-Za-z0-9-]{10,}\b"),
-    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
-)
 ISSUE_QUERY = """
 query LaneIssue($id: String!) {
   issue(id: $id) {
@@ -175,23 +164,38 @@ class ContractError(RuntimeError):
     """The command or live state violates the bounded lane contract."""
 
 
-def _load_hierarchy() -> Any:
-    """Load the bundled hierarchy module in package and standalone contexts."""
+def _load_bundled_module(filename: str, name: str) -> Any:
+    """Load one bundled module consistently in package and standalone contexts."""
     import sys
 
-    name = "project_manager_linear_hierarchy"
     existing = sys.modules.get(name)
     if existing is not None:
         return existing
     spec = importlib.util.spec_from_file_location(
-        name, Path(__file__).with_name("hierarchy.py")
+        name, Path(__file__).with_name(filename)
     )
     if spec is None or spec.loader is None:
-        raise ContractError("bundled hierarchy module could not be loaded")
+        raise ContractError(f"bundled {filename} module could not be loaded")
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def _load_validation() -> Any:
+    return _load_bundled_module("validation.py", "project_manager_linear_validation")
+
+
+def _load_hierarchy() -> Any:
+    """Load the bundled hierarchy module in package and standalone contexts."""
+    return _load_bundled_module("hierarchy.py", "project_manager_linear_hierarchy")
+
+
+_VALIDATION = _load_validation()
+SAFE_STATES = _VALIDATION.SAFE_STATES
+CREDENTIAL_SHAPES = _VALIDATION.CREDENTIAL_SHAPES
+RESERVED_COMMENT_MARKER = _VALIDATION.RESERVED_COMMENT_MARKER
+RESERVED_CREATE_MARKER = _VALIDATION.RESERVED_CREATE_MARKER
 
 
 class LinearClient:
@@ -367,6 +371,7 @@ class LinearClient:
         project_id: str,
         milestone_id: str,
         title: str,
+        state_id: str | None = None,
         **optional: Any,
     ) -> None:
         payload = {
@@ -377,6 +382,8 @@ class LinearClient:
             "title": title,
             **optional,
         }
+        if state_id is not None:
+            payload["stateId"] = state_id
         result = self.execute(PROJECT_ISSUE_CREATE, {"input": payload})["issueCreate"]
         if result.get("success") is not True:
             raise ContractError("Linear hierarchy issue creation did not succeed")

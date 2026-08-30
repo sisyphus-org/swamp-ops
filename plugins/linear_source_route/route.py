@@ -29,6 +29,7 @@ CREDENTIAL_SHAPES = (
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
 )
 SAFE_STATES = {"Backlog", "Todo", "Research", "In Progress", "In Review"}
+RESERVED_MARKER = "<!-- linear-command"
 MAX_HIERARCHY_BYTES = 24_576
 
 
@@ -108,6 +109,8 @@ def _validate_clean_text(
         raise RouteError(f"{path} must be non-empty")
     if any(ord(char) < 32 and char not in "\n\t" for char in value):
         raise RouteError(f"{path} contains control characters")
+    if RESERVED_MARKER in value:
+        raise RouteError(f"{path} contains the reserved marker")
     if any(pattern.search(value) for pattern in CREDENTIAL_SHAPES):
         raise RouteError(f"{path} contains credential-shaped data")
 
@@ -180,7 +183,7 @@ def parse_linear_request(
                 r"SIS-[1-9][0-9]*", identifier
             ):
                 raise RouteError("target must be an exact SIS-N identifier")
-            if state not in {"Backlog", "Todo", "Research", "In Progress", "In Review"}:
+            if state not in SAFE_STATES:
                 raise RouteError("state is not in the safe-state allowlist")
             target = {"type": "issue", "identifier": identifier}
             change = {"state": state}
@@ -208,7 +211,7 @@ def parse_linear_request(
                 raise RouteError("create request contains credential-shaped data")
             if not isinstance(parent, str) or not re.fullmatch(r"SIS-[1-9][0-9]*", parent):
                 raise RouteError("parent must be an exact SIS-N identifier")
-            if state not in {"Backlog", "Todo", "Research", "In Progress", "In Review"}:
+            if state not in SAFE_STATES:
                 raise RouteError("state is not in the safe-state allowlist")
             if priority not in {"High", "Medium", "Low"}:
                 raise RouteError("priority is not in the bounded allowlist")
@@ -325,14 +328,18 @@ def _verified_replay(
         "change",
         "policy",
     }
+    id_fields = ("command_id", "correlation_id")
     try:
-        command_ids = [uuid.UUID(str(persisted[field])) for field in ("command_id", "correlation_id")]
+        command_ids = {
+            field: uuid.UUID(str(persisted[field]))
+            for field in id_fields
+        }
     except (KeyError, ValueError, AttributeError, TypeError) as exc:
         raise RouteError("completed replay has an invalid persisted command") from exc
     if (
         set(persisted) != expected_command_fields
-        or any(value.version != 4 for value in command_ids)
-        or any(str(value) != persisted[field] for value, field in zip(command_ids, ("command_id", "correlation_id")))
+        or any(value.version != 4 for value in command_ids.values())
+        or any(str(value) != persisted[field] for field, value in command_ids.items())
     ):
         raise RouteError("completed replay has an invalid persisted command")
     semantic_fields = ("schema_version", "idempotency_key", "source_profile", "operation", "target", "change", "policy")

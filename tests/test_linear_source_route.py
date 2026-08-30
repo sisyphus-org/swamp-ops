@@ -3,6 +3,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 MODULE = Path(__file__).parents[1] / "plugins" / "linear_source_route" / "route.py"
@@ -109,6 +110,38 @@ class ParseTests(unittest.TestCase):
             {key: value for key, value in request.items() if key != "operation"},
         )
 
+    def test_hierarchy_reserved_markers_fail_before_task_creation(self):
+        base = {
+            "operation": "converge_hierarchy",
+            "project": {"name": "health", "description": "project detail"},
+            "milestone": {"name": "Подолог", "description": "milestone detail"},
+            "issue": {
+                "title": "Сходить в Solomia и записаться",
+                "description": "https://solomia.in.ua",
+            },
+        }
+        fields = (
+            ("project", "name"),
+            ("project", "description"),
+            ("milestone", "name"),
+            ("milestone", "description"),
+            ("issue", "title"),
+            ("issue", "description"),
+        )
+        for kind, field in fields:
+            with self.subTest(kind=kind, field=field):
+                request = json.loads(json.dumps(base, ensure_ascii=False))
+                request[kind][field] = "<!-- linear-command:v2 reserved -->"
+                board = FakeBoard()
+                with self.assertRaisesRegex(route.RouteError, "reserved marker"):
+                    route.route_request(
+                        request,
+                        source=source_context(),
+                        board=board,
+                        uuid_factory=uuid_factory(),
+                    )
+                self.assertEqual(board.calls, [])
+
     def test_hierarchy_replay_key_ignores_random_command_ids_and_changes_with_semantics(self):
         request = {
             "operation": "converge_hierarchy",
@@ -151,6 +184,33 @@ class ParseTests(unittest.TestCase):
 
         self.assertEqual(default["idempotency_key"], ideas["idempotency_key"])
         self.assertNotEqual(default["source_profile"], ideas["source_profile"])
+
+    def test_all_structured_state_operations_share_safe_state_allowlist(self):
+        extended = set(route.SAFE_STATES) | {"Review Canary"}
+        requests = [
+            {
+                "operation": "change_state",
+                "identifier": "SIS-68",
+                "state": "Review Canary",
+            },
+            {
+                "operation": "create_issue",
+                "title": "Shared state allowlist proof",
+                "description": "",
+                "parent_identifier": "SIS-68",
+                "state": "Review Canary",
+                "priority": "Low",
+            },
+        ]
+        with mock.patch.object(route, "SAFE_STATES", extended):
+            for request in requests:
+                with self.subTest(operation=request["operation"]):
+                    parsed = route.parse_linear_request(
+                        request,
+                        source_profile="default",
+                        uuid_factory=uuid_factory(),
+                    )
+                    self.assertEqual(parsed.command["change"]["state"], "Review Canary")
 
     def test_exact_comment_request_becomes_bounded_command(self):
         parsed = route.parse_linear_request(
