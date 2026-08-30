@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -20,12 +21,18 @@ from typing import Any
 ISSUE_IDENTIFIER = re.compile(r"^SIS-[1-9][0-9]*$")
 PROFILE_NAME = re.compile(r"^[a-z][a-z0-9-]{1,30}$")
 IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:._/-]{7,199}$")
-OPERATIONS = {"read_issue", "change_state", "add_comment", "create_issue"}
+OPERATIONS = {
+    "read_issue",
+    "change_state",
+    "add_comment",
+    "create_issue",
+    "converge_hierarchy",
+}
 SAFE_STATES = {"Backlog", "Todo", "Research", "In Progress", "In Review"}
 OWNER_CONTROLLED_STATES = {"Done", "Canceled", "Duplicate"}
 PRIORITIES = {"High": 2, "Medium": 3, "Low": 4}
-RESERVED_COMMENT_MARKER = "<!-- linear-command:v1"
-RESERVED_CREATE_MARKER = "<!-- linear-command:create:v1"
+RESERVED_COMMENT_MARKER = "<!-- linear-command:v2"
+RESERVED_CREATE_MARKER = "<!-- linear-command:create:v2"
 MAX_COMMENT_LENGTH = 4000
 MAX_TITLE_LENGTH = 200
 MAX_DESCRIPTION_LENGTH = 10000
@@ -93,6 +100,64 @@ mutation LaneCreateIssue($input: IssueCreateInput!) {
   issueCreate(input: $input) { success issue { id identifier } }
 }
 """
+TEAMS_QUERY = """
+query LaneTeams {
+  teams(first: 100) {
+    nodes { id key name }
+    pageInfo { hasNextPage }
+  }
+}
+"""
+TEAM_PROJECTS_QUERY = """
+query LaneTeamProjects($teamId: String!) {
+  team(id: $teamId) {
+    projects(first: 100, includeArchived: false) {
+      nodes { id name description teams { nodes { id } } }
+      pageInfo { hasNextPage }
+    }
+  }
+}
+"""
+PROJECT_MILESTONES_QUERY = """
+query LaneProjectMilestones($projectId: String!) {
+  project(id: $projectId) {
+    projectMilestones(first: 100) {
+      nodes { id name description project { id } }
+      pageInfo { hasNextPage }
+    }
+  }
+}
+"""
+PROJECT_ISSUES_QUERY = """
+query LaneProjectIssues($projectId: ID!) {
+  issues(first: 100, filter: { project: { id: { eq: $projectId } } }) {
+    nodes {
+      id identifier title url description
+      team { id key }
+      project { id }
+      projectMilestone { id }
+      state { id name }
+      parent { id }
+    }
+    pageInfo { hasNextPage }
+  }
+}
+"""
+PROJECT_CREATE = """
+mutation LaneCreateProject($input: ProjectCreateInput!) {
+  projectCreate(input: $input) { success project { id } }
+}
+"""
+PROJECT_MILESTONE_CREATE = """
+mutation LaneCreateProjectMilestone($input: ProjectMilestoneCreateInput!) {
+  projectMilestoneCreate(input: $input) { success projectMilestone { id } }
+}
+"""
+PROJECT_ISSUE_CREATE = """
+mutation LaneCreateProjectIssue($input: IssueCreateInput!) {
+  issueCreate(input: $input) { success issue { id identifier } }
+}
+"""
 ROOT_FIELDS = {
     "schema_version",
     "command_id",
@@ -108,6 +173,25 @@ ROOT_FIELDS = {
 
 class ContractError(RuntimeError):
     """The command or live state violates the bounded lane contract."""
+
+
+def _load_hierarchy() -> Any:
+    """Load the bundled hierarchy module in package and standalone contexts."""
+    import sys
+
+    name = "project_manager_linear_hierarchy"
+    existing = sys.modules.get(name)
+    if existing is not None:
+        return existing
+    spec = importlib.util.spec_from_file_location(
+        name, Path(__file__).with_name("hierarchy.py")
+    )
+    if spec is None or spec.loader is None:
+        raise ContractError("bundled hierarchy module could not be loaded")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 class LinearClient:
@@ -227,13 +311,83 @@ class LinearClient:
         if result.get("success") is not True:
             raise ContractError("Linear issue creation did not succeed")
 
+    @staticmethod
+    def _bounded_connection(connection: Any, label: str) -> list[dict[str, Any]]:
+        if not isinstance(connection, dict):
+            raise ContractError(f"{label} payload is invalid")
+        if connection.get("pageInfo", {}).get("hasNextPage"):
+            raise ContractError(f"{label} exceeds the supported 100-item limit")
+        nodes = connection.get("nodes")
+        if not isinstance(nodes, list) or len(nodes) > 100:
+            raise ContractError(f"{label} payload is invalid")
+        return nodes
+
+    def list_teams(self) -> list[dict[str, Any]]:
+        return self._bounded_connection(self.execute(TEAMS_QUERY).get("teams"), "workspace teams")
+
+    def list_team_projects(self, team_id: str) -> list[dict[str, Any]]:
+        team = self.execute(TEAM_PROJECTS_QUERY, {"teamId": team_id}).get("team")
+        if not isinstance(team, dict):
+            raise ContractError("exact preflighted SIS team disappeared")
+        return self._bounded_connection(team.get("projects"), "SIS team projects")
+
+    def list_project_milestones(self, project_id: str) -> list[dict[str, Any]]:
+        project = self.execute(PROJECT_MILESTONES_QUERY, {"projectId": project_id}).get("project")
+        if not isinstance(project, dict):
+            raise ContractError("exact preflighted project disappeared")
+        return self._bounded_connection(project.get("projectMilestones"), "project milestones")
+
+    def list_project_issues(self, project_id: str) -> list[dict[str, Any]]:
+        return self._bounded_connection(
+            self.execute(PROJECT_ISSUES_QUERY, {"projectId": project_id}).get("issues"),
+            "project issues",
+        )
+
+    def create_project(self, *, project_id: str, team_id: str, name: str, **optional: Any) -> None:
+        payload = {"id": project_id, "teamIds": [team_id], "name": name, **optional}
+        result = self.execute(PROJECT_CREATE, {"input": payload})["projectCreate"]
+        if result.get("success") is not True:
+            raise ContractError("Linear project creation did not succeed")
+
+    def create_project_milestone(
+        self, *, milestone_id: str, project_id: str, name: str, **optional: Any
+    ) -> None:
+        payload = {"id": milestone_id, "projectId": project_id, "name": name, **optional}
+        result = self.execute(PROJECT_MILESTONE_CREATE, {"input": payload})[
+            "projectMilestoneCreate"
+        ]
+        if result.get("success") is not True:
+            raise ContractError("Linear milestone creation did not succeed")
+
+    def create_project_issue(
+        self,
+        *,
+        issue_id: str,
+        team_id: str,
+        project_id: str,
+        milestone_id: str,
+        title: str,
+        **optional: Any,
+    ) -> None:
+        payload = {
+            "id": issue_id,
+            "teamId": team_id,
+            "projectId": project_id,
+            "projectMilestoneId": milestone_id,
+            "title": title,
+            **optional,
+        }
+        result = self.execute(PROJECT_ISSUE_CREATE, {"input": payload})["issueCreate"]
+        if result.get("success") is not True:
+            raise ContractError("Linear hierarchy issue creation did not succeed")
+
 
 def validate_command(raw: Any) -> dict[str, Any]:
-    """Validate the exact linear-command.v1 envelope and return it unchanged."""
+    """Validate the exact linear-command.v2 envelope and return it unchanged."""
     if not isinstance(raw, dict) or set(raw) != ROOT_FIELDS:
-        raise ContractError("command must contain exactly the linear-command.v1 fields")
-    if raw["schema_version"] != "linear-command.v1":
-        raise ContractError("schema_version must equal linear-command.v1")
+        raise ContractError("command must contain exactly the linear-command.v2 fields")
+    if raw["schema_version"] != "linear-command.v2":
+        raise ContractError("schema_version must equal linear-command.v2")
     for field in ("command_id", "correlation_id"):
         try:
             value = uuid.UUID(str(raw[field]))
@@ -254,9 +408,9 @@ def validate_command(raw: Any) -> dict[str, Any]:
     target = raw["target"]
     if not isinstance(target, dict) or set(target) != {"type", "identifier"}:
         raise ContractError("target must contain exactly type and identifier")
-    if operation == "create_issue":
+    if operation in {"create_issue", "converge_hierarchy"}:
         if target != {"type": "team", "identifier": "SIS"}:
-            raise ContractError("create_issue target must be the exact SIS team")
+            raise ContractError(f"{operation} target must be the exact SIS team")
     elif target["type"] != "issue" or not ISSUE_IDENTIFIER.fullmatch(
         str(target["identifier"])
     ):
@@ -321,6 +475,8 @@ def validate_command(raw: Any) -> dict[str, Any]:
             for pattern in CREDENTIAL_SHAPES
         ):
             raise ContractError("create_issue fields contain credential-shaped data")
+    elif operation == "converge_hierarchy":
+        _load_hierarchy().validate_change(change, ContractError)
     if raw["policy"] != {"mode": "standard"}:
         raise ContractError("policy must be the standard fail-closed lane")
     return raw
@@ -344,9 +500,9 @@ def issue_snapshot(issue: dict[str, Any]) -> dict[str, Any]:
 
 
 def result_base(command: dict[str, Any], issue: dict[str, Any], mode: str) -> dict[str, Any]:
-    """Build the common linear-result.v1 envelope without raw API payloads."""
+    """Build the common linear-result.v2 envelope without raw API payloads."""
     return {
-        "schema_version": "linear-result.v1",
+        "schema_version": "linear-result.v2",
         "command_id": command["command_id"],
         "correlation_id": command["correlation_id"],
         "idempotency_key": command["idempotency_key"],
@@ -365,13 +521,13 @@ def command_fingerprint(command: dict[str, Any]) -> tuple[str, str, str]:
     """Return key hash, request hash, and deterministic invisible comment ID."""
     semantic = {
         field: command[field]
-        for field in ("source_profile", "operation", "target", "change", "policy")
+        for field in ("operation", "target", "change", "policy")
     }
     key_hash = hashlib.sha256(command["idempotency_key"].encode()).hexdigest()
     request_hash = hashlib.sha256(
         json.dumps(semantic, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
-    comment_id = deterministic_uuid4("linear-command:comment:v1", key_hash)
+    comment_id = deterministic_uuid4("linear-command:comment:v2", key_hash)
     return key_hash, request_hash, comment_id
 
 
@@ -467,6 +623,16 @@ def execute_command(
             write_journal(journal_path, journal)
         return result
 
+    if command["operation"] == "converge_hierarchy":
+        return finish(
+            _load_hierarchy().execute(
+                client,
+                command,
+                mode=mode,
+                error_cls=ContractError,
+            )
+        )
+
     if command["operation"] == "create_issue":
         change = command["change"]
         parent_identifier = change["parent_identifier"]
@@ -489,7 +655,7 @@ def execute_command(
         if len(states) != 1:
             raise ContractError(f"exact workflow state not found: {change['state']}")
         key_hash, _, _ = command_fingerprint(command)
-        issue_id = deterministic_uuid4("linear-command:issue:v1", key_hash)
+        issue_id = deterministic_uuid4("linear-command:issue:v2", key_hash)
         description = change["description"]
 
         def verified_create_snapshot(issue: dict[str, Any]) -> dict[str, Any]:
@@ -573,7 +739,7 @@ def execute_command(
         }
         plan = [{"action": "create_issue", **desired}]
         team_base = {
-            "schema_version": "linear-result.v1",
+            "schema_version": "linear-result.v2",
             "command_id": command["command_id"],
             "correlation_id": command["correlation_id"],
             "idempotency_key": command["idempotency_key"],
@@ -795,7 +961,7 @@ def emit(payload: dict[str, Any]) -> None:
 
 
 def main() -> int:
-    """Run one command in plan or apply mode and emit linear-result.v1."""
+    """Run one command in plan or apply mode and emit linear-result.v2."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--command", required=True, type=Path)
     parser.add_argument("--mode", choices=["plan", "apply"], default="plan")
@@ -824,7 +990,7 @@ def main() -> int:
     except ContractError as exc:
         emit(
             {
-                "schema_version": "linear-result.v1",
+                "schema_version": "linear-result.v2",
                 "mode": args.mode,
                 "result": "error",
                 "verified": False,
@@ -835,7 +1001,7 @@ def main() -> int:
     except Exception as exc:
         emit(
             {
-                "schema_version": "linear-result.v1",
+                "schema_version": "linear-result.v2",
                 "mode": args.mode,
                 "result": "error",
                 "verified": False,

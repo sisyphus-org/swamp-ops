@@ -1,9 +1,12 @@
+import contextlib
 import importlib.util
+import io
 import json
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "linear_project_standard.py"
@@ -77,6 +80,35 @@ def team():
 
 
 class ManifestTests(unittest.TestCase):
+    def test_cli_apply_rejects_before_manifest_token_client_or_network_access(self):
+        output = io.StringIO()
+        argv = ["linear_project_standard.py", "--manifest", "missing.json", "--mode", "apply"]
+        with mock.patch.object(sys, "argv", argv), mock.patch.object(
+            standard, "load_manifest"
+        ) as load_manifest, mock.patch.object(
+            standard, "LinearClient"
+        ) as client_cls, contextlib.redirect_stdout(output):
+            code = standard.main()
+
+        self.assertEqual(code, 1)
+        load_manifest.assert_not_called()
+        client_cls.assert_not_called()
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["mode"], "apply")
+        self.assertEqual(payload["result"], "error")
+        self.assertIn("Project Manager", payload["issues"][0])
+
+    def test_swamp_workflow_exposes_only_a_fixed_plan_entry_point(self):
+        workflow = (
+            Path(__file__).parents[1]
+            / "workflows"
+            / "workflow-linear-project-standard.yaml"
+        ).read_text()
+        self.assertNotIn("inputs.mode", workflow)
+        self.assertNotIn("  mode:\n", workflow)
+        self.assertNotIn("--mode apply", workflow)
+        self.assertIn("--mode plan", workflow)
+
     def test_valid_manifest_loads_from_json(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "manifest.json"
@@ -377,183 +409,46 @@ class PlanningTests(unittest.TestCase):
             standard.resolve_state(team(), "In Progress")
 
 
-class ApplyTests(unittest.TestCase):
-    class FakeClient:
-        def __init__(self):
-            self.inputs = []
-            self.issue_number = 0
-
-        def execute(self, query, variables=None):
-            variables = variables or {}
-            self.inputs.append((query, variables))
-            if query == standard.PROJECT_CREATE:
-                return {
-                    "projectCreate": {
-                        "success": True,
-                        "project": {"id": "project-1", "name": "Example"},
-                    }
-                }
-            if query == standard.MILESTONE_CREATE:
-                return {
-                    "projectMilestoneCreate": {
-                        "success": True,
-                        "projectMilestone": {"id": "milestone-1", "name": "Discovery"},
-                    }
-                }
-            if query == standard.ISSUE_CREATE:
-                self.issue_number += 1
-                issue_input = variables["input"]
-                return {
-                    "issueCreate": {
-                        "success": True,
-                        "issue": {
-                            "id": f"issue-{self.issue_number}",
-                            "identifier": f"ENG-{self.issue_number}",
-                            "title": issue_input["title"],
-                        },
-                    }
-                }
-            if query == standard.ISSUE_UPDATE:
-                return {
-                    "issueUpdate": {
-                        "success": True,
-                        "issue": {
-                            "id": variables["id"],
-                            "identifier": "ENG-1",
-                            "title": "Research",
-                            "parent": None,
-                            "projectMilestone": {
-                                "id": variables["input"]["projectMilestoneId"],
-                                "name": "Discovery",
-                            },
-                        },
-                    }
-                }
-            raise AssertionError("unexpected query")
-
-    def test_apply_creates_project_milestone_issue_and_linked_sub_issue(self):
-        client = self.FakeClient()
-        live = standard.LiveContext(team=team(), project=None, milestones=[], issues=[])
-        applied = standard.apply_manifest(client, manifest(), live)
-        self.assertEqual(
-            [item["action"] for item in applied],
-            ["created_project", "created_milestone", "created_issue", "created_sub_issue"],
-        )
-        issue_inputs = [
-            variables["input"]
-            for query, variables in client.inputs
-            if query == standard.ISSUE_CREATE
-        ]
-        self.assertNotIn("parentId", issue_inputs[0])
-        self.assertEqual(issue_inputs[1]["parentId"], "issue-1")
-        self.assertEqual(issue_inputs[0]["projectMilestoneId"], "milestone-1")
-        self.assertNotIn("projectMilestoneId", issue_inputs[1])
-
-
-    def test_apply_uses_parent_in_declared_milestone(self):
-        client = self.FakeClient()
-        live = standard.LiveContext(
-            team=team(),
-            project={"id": "project-1", "name": "Example"},
-            milestones=[{"id": "milestone-1", "name": "Discovery"}],
-            issues=[
-                {
-                    "id": "wrong-parent",
-                    "identifier": "ENG-8",
-                    "title": "Other research",
-                    "parent": None,
-                    "projectMilestone": {"id": "other-milestone", "name": "Other"},
-                },
-                {
-                    "id": "correct-parent",
-                    "identifier": "ENG-9",
-                    "title": "Research",
-                    "parent": None,
-                    "projectMilestone": {"id": "milestone-1", "name": "Discovery"},
-                },
-            ],
-        )
-        applied = standard.apply_manifest(client, manifest(), live)
-        self.assertEqual([item["action"] for item in applied], ["created_sub_issue"])
-        issue_input = next(
-            variables["input"]
-            for query, variables in client.inputs
-            if query == standard.ISSUE_CREATE
-        )
-        self.assertEqual(issue_input["parentId"], "correct-parent")
-
-    def test_apply_assigns_identified_issue_with_no_unintended_fields(self):
-        client = self.FakeClient()
-        applied = standard.apply_manifest(client, identified_manifest(), identified_live())
-        self.assertEqual(applied[0]["action"], "assigned_issue_milestone")
-        updates = [
-            variables
-            for query, variables in client.inputs
-            if query == standard.ISSUE_UPDATE
-        ]
-        self.assertEqual(
-            updates,
-            [
-                {
-                    "id": "issue-1",
-                    "input": {"projectMilestoneId": "milestone-1"},
-                }
-            ],
-        )
-        self.assertNotIn("stateId", updates[0]["input"])
-        self.assertNotIn("projectId", updates[0]["input"])
-        self.assertNotIn("parentId", updates[0]["input"])
-
-    def test_apply_reassigns_identified_issue(self):
-        client = self.FakeClient()
-        live = identified_live(
-            milestone={"id": "milestone-old", "name": "Old"}
-        )
-        applied = standard.apply_manifest(client, identified_manifest(), live)
-        self.assertEqual(applied[0]["action"], "reassigned_issue_milestone")
-        self.assertEqual(applied[0]["from"], "Old")
-
-    def test_apply_rejects_wrong_id_title_and_parent_before_writes(self):
-        cases = [
-            (identified_manifest(identifier="ENG-2"), identified_live()),
-            (identified_manifest(title="Wrong"), identified_live()),
-            (identified_manifest(), identified_live(parent={"id": "parent-1"})),
-        ]
-        for raw, live in cases:
-            with self.subTest(raw=raw, parent=live.issues[0]["parent"]):
-                client = self.FakeClient()
-                with self.assertRaises(standard.ContractError):
-                    standard.apply_manifest(client, raw, live)
-                self.assertEqual(client.inputs, [])
-
-    def test_apply_rejects_direct_milestone_on_existing_child(self):
-        client = self.FakeClient()
-        live = standard.LiveContext(
-            team=team(),
-            project={"id": "project-1", "name": "Example"},
-            milestones=[{"id": "milestone-1", "name": "Discovery"}],
-            issues=[
-                {
-                    "id": "parent",
-                    "identifier": "ENG-1",
-                    "title": "Research",
-                    "parent": None,
-                    "projectMilestone": {"id": "milestone-1", "name": "Discovery"},
-                },
-                {
-                    "id": "child",
-                    "identifier": "ENG-2",
-                    "title": "Interview users",
-                    "parent": {"id": "parent"},
-                    "projectMilestone": {"id": "milestone-1", "name": "Discovery"},
-                },
-            ],
-        )
-        with self.assertRaisesRegex(standard.ContractError, "different hierarchy"):
-            standard.apply_manifest(client, manifest(), live)
-
-
 class ClientTests(unittest.TestCase):
+    def test_module_exports_no_legacy_mutation_surface(self):
+        forbidden = {
+            "PROJECT_CREATE",
+            "MILESTONE_CREATE",
+            "ISSUE_CREATE",
+            "ISSUE_UPDATE",
+            "create_project",
+            "create_milestone",
+            "create_issue",
+            "update_issue_milestone",
+            "apply_manifest",
+        }
+        self.assertEqual(forbidden.intersection(vars(standard)), set())
+
+    def test_client_rejects_arbitrary_mutation_before_request_or_network(self):
+        client = standard.LinearClient("lin_api_fixture", endpoint="https://example.invalid")
+        mutation = "mutation Arbitrary { issueDelete(id: \"fixture\") { success } }"
+        with mock.patch.object(standard.urllib.request, "Request") as request_cls, mock.patch.object(
+            standard.urllib.request, "urlopen"
+        ) as urlopen:
+            with self.assertRaisesRegex(standard.ContractError, "fixed read query"):
+                client.execute(mutation)
+        request_cls.assert_not_called()
+        urlopen.assert_not_called()
+
+    def test_client_read_allowlist_is_exact_and_fixed(self):
+        self.assertEqual(
+            standard.READ_QUERIES,
+            frozenset(
+                {
+                    standard.TEAMS_QUERY,
+                    standard.TEAM_STATES_QUERY,
+                    standard.PROJECTS_QUERY,
+                    standard.MILESTONES_QUERY,
+                    standard.ISSUES_QUERY,
+                }
+            ),
+        )
+
     def test_authorization_header_is_preserved_for_api_keys_and_oauth(self):
         raw = standard.LinearClient("lin_api_fixture", endpoint="https://example.invalid")
         bearer = standard.LinearClient("Bearer fixture", endpoint="https://example.invalid")
@@ -567,3 +462,4 @@ class ClientTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

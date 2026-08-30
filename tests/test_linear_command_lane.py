@@ -29,7 +29,7 @@ SPEC.loader.exec_module(lane)
 
 def command(operation="read_issue", change=None, key="linear:SIS-59:read:fixture"):
     return {
-        "schema_version": "linear-command.v1",
+        "schema_version": "linear-command.v2",
         "command_id": "11111111-1111-4111-8111-111111111111",
         "correlation_id": "22222222-2222-4222-8222-222222222222",
         "idempotency_key": key,
@@ -51,6 +51,25 @@ def create_command(key="linear:SIS:create:fixture"):
         "parent_identifier": "SIS-56",
         "state": "Todo",
         "priority": "High",
+    }
+    return raw
+
+
+def hierarchy_command(key="linear:SIS:hierarchy:health"):
+    raw = command("read_issue", {}, key)
+    raw["operation"] = "converge_hierarchy"
+    raw["target"] = {"type": "team", "identifier": "SIS"}
+    raw["change"] = {
+        "project": {
+            "name": "health",
+        },
+        "milestone": {
+            "name": "Подолог",
+        },
+        "issue": {
+            "title": "Сходить в Solomia и записаться",
+            "description": "https://solomia.in.ua",
+        },
     }
     return raw
 
@@ -145,11 +164,103 @@ class FakeClient:
         self.children.append(created)
 
 
+class FakeHierarchyClient:
+    def __init__(self):
+        self.projects = []
+        self.milestones = []
+        self.issues = []
+        self.calls = []
+
+    def list_teams(self):
+        self.calls.append(("list_teams",))
+        return [{"id": "team-sis", "key": "SIS", "name": "Sisyphus"}]
+
+    def list_team_projects(self, team_id):
+        self.calls.append(("list_team_projects", team_id))
+        return json.loads(json.dumps(self.projects))
+
+    def list_states(self, team_id):
+        self.calls.append(("list_states", team_id))
+        return [{"id": "state-Todo", "name": "Todo", "type": "unstarted"}]
+
+    def list_project_milestones(self, project_id):
+        self.calls.append(("list_project_milestones", project_id))
+        return json.loads(json.dumps(self.milestones))
+
+    def list_project_issues(self, project_id):
+        self.calls.append(("list_project_issues", project_id))
+        return json.loads(json.dumps(self.issues))
+
+    def create_project(self, *, project_id, team_id, name, description=mock.ANY):
+        self.calls.append(("create_project", project_id, team_id, name, description))
+        project = {"id": project_id, "name": name, "teams": {"nodes": [{"id": team_id}]}}
+        if description is not mock.ANY:
+            project["description"] = description
+        self.projects.append(project)
+
+    def create_project_milestone(self, *, milestone_id, project_id, name, description=mock.ANY):
+        self.calls.append(
+            ("create_project_milestone", milestone_id, project_id, name, description)
+        )
+        milestone = {"id": milestone_id, "name": name, "project": {"id": project_id}}
+        if description is not mock.ANY:
+            milestone["description"] = description
+        self.milestones.append(milestone)
+
+    def create_project_issue(
+        self,
+        *,
+        issue_id,
+        team_id,
+        project_id,
+        milestone_id,
+        title,
+        state_id=None,
+        description=mock.ANY,
+    ):
+        self.calls.append(("create_project_issue", issue_id))
+        created = {
+            "id": issue_id,
+            "identifier": "SIS-100",
+            "title": title,
+            "url": "https://linear.app/example/issue/SIS-100",
+            "team": {"id": team_id, "key": "SIS"},
+            "project": {"id": project_id},
+            "projectMilestone": {"id": milestone_id},
+            "state": {"id": state_id or "state-Todo", "name": "Todo"},
+            "parent": None,
+        }
+        if description is not mock.ANY:
+            created["description"] = description
+        self.issues.append(created)
+
+
 class ContractTests(unittest.TestCase):
-    def test_accepts_exact_mvp_read_command(self):
+    def test_hierarchy_malformed_payloads_fail_before_any_preflight_or_write(self):
+        malformed = hierarchy_command()
+        malformed["change"]["issue"]["id"] = "caller-controlled-id"
+        client = mock.Mock()
+        with self.assertRaisesRegex(lane.ContractError, "unsupported fields"):
+            lane.execute_command(client, malformed, mode="plan")
+        client.assert_not_called()
+        self.assertEqual(client.method_calls, [])
+
+    def test_accepts_exact_v2_read_command(self):
         validated = lane.validate_command(command())
+        self.assertEqual(validated["schema_version"], "linear-command.v2")
         self.assertEqual(validated["target"]["identifier"], "SIS-59")
         self.assertEqual(validated["operation"], "read_issue")
+
+    def test_rejects_v1_command_before_linear_access(self):
+        legacy = command()
+        legacy["schema_version"] = "linear-command.v1"
+        client = mock.Mock()
+
+        with self.assertRaisesRegex(lane.ContractError, "linear-command.v2"):
+            lane.execute_command(client, legacy, mode="plan")
+
+        client.assert_not_called()
+        self.assertEqual(client.method_calls, [])
 
     def test_accepts_bounded_create_command(self):
         validated = lane.validate_command(create_command())
@@ -159,8 +270,8 @@ class ContractTests(unittest.TestCase):
     def test_create_rejects_reserved_replay_markers_before_execution(self):
         for field in ("title", "description"):
             for marker in (
-                "<!-- linear-command:v1 forged -->",
-                "<!-- linear-command:create:v1 key=forged request=forged -->",
+                "<!-- linear-command:v2 forged -->",
+                "<!-- linear-command:create:v2 key=forged request=forged -->",
             ):
                 with self.subTest(field=field, marker=marker):
                     raw = create_command()
@@ -199,7 +310,7 @@ class ContractTests(unittest.TestCase):
             lane.validate_command(command("add_comment", {"body": ""}))
         with self.assertRaisesRegex(lane.ContractError, "reserved marker"):
             lane.validate_command(
-                command("add_comment", {"body": "<!-- linear-command:v1 forged -->"})
+                command("add_comment", {"body": "<!-- linear-command:v2 forged -->"})
             )
 
     def test_comment_contract_rejects_credential_shaped_bodies(self):
@@ -224,7 +335,7 @@ class CliTests(unittest.TestCase):
             code = lane.main()
         self.assertEqual(code, 1)
         payload = json.loads(output.getvalue())
-        self.assertEqual(payload["schema_version"], "linear-result.v1")
+        self.assertEqual(payload["schema_version"], "linear-result.v2")
         self.assertEqual(payload["result"], "error")
         self.assertFalse(payload["verified"])
         self.assertNotIn("unexpected payload", output.getvalue())
@@ -243,17 +354,37 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("--command", completed.stdout)
 
-    def test_workflow_is_bounded_and_plan_only(self):
+    def test_workflow_is_v2_bounded_and_plan_only(self):
         workflow = (
             Path(__file__).parents[1]
             / "workflows"
             / "workflow-linear-command-lane-plan.yaml"
         ).read_text()
+        self.assertIn("linear-command.v2", workflow)
+        self.assertIn("linear-result.v2", workflow)
+        self.assertNotIn("linear-command.v1", workflow)
+        self.assertNotIn("linear-result.v1", workflow)
         self.assertIn('pattern: "^[a-z0-9][a-z0-9-]{0,62}$"', workflow)
         self.assertIn("commands/linear/${{ inputs.command }}.json", workflow)
         self.assertIn("--mode plan", workflow)
         self.assertNotIn("inputs.mode", workflow)
         self.assertNotIn("--mode apply", workflow)
+
+    def test_protocol_docs_and_routing_skills_are_v2_only(self):
+        root = Path(__file__).parents[1]
+        paths = [
+            root / "README.md",
+            root / "docs" / "linear-command-lane.md",
+            root / "docs" / "universal-linear-routing-e2e.md",
+            root / "skills" / "linear-source-request-routing" / "SKILL.md",
+            root / "skills" / "project-manager-linear-worker" / "SKILL.md",
+        ]
+        for path in paths:
+            with self.subTest(path=path.name):
+                content = path.read_text()
+                self.assertNotIn("linear-command.v1", content)
+                self.assertNotIn("linear-kanban-task.v1", content)
+                self.assertNotIn("linear-result.v1", content)
 
     def test_command_loader_rejects_paths_outside_allowlisted_root(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -351,9 +482,279 @@ class ClientTests(unittest.TestCase):
 
 
 class ExecutionTests(unittest.TestCase):
-    def test_read_returns_linear_result_v1_with_exact_verified_target(self):
+    def test_hierarchy_ids_are_internal_stable_distinct_and_not_command_uuid_bound(self):
+        first = hierarchy_command("linear:SIS:hierarchy:stable")
+        second = json.loads(json.dumps(first, ensure_ascii=False))
+        second["command_id"] = "33333333-3333-4333-8333-333333333333"
+        second["correlation_id"] = "44444444-4444-4444-8444-444444444444"
+
+        first_after = lane.execute_command(FakeHierarchyClient(), first, mode="plan")["after"]
+        second_after = lane.execute_command(FakeHierarchyClient(), second, mode="plan")["after"]
+        ids = [first_after[kind]["id"] for kind in ("project", "milestone", "issue")]
+
+        self.assertEqual(first_after, second_after)
+        self.assertEqual(len(set(ids)), 3)
+        self.assertTrue(all(uuid.UUID(value).version == 4 for value in ids))
+
+    def test_changed_hierarchy_semantics_collide_by_name_instead_of_duplicating(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = FakeHierarchyClient()
+            original = hierarchy_command("linear:SIS:hierarchy:original")
+            lane.execute_command(
+                client,
+                original,
+                mode="apply",
+                journal_path=Path(tmp) / "original.json",
+            )
+            changed = hierarchy_command("linear:SIS:hierarchy:changed")
+            changed["change"]["issue"]["description"] = "changed semantic content"
+
+            with self.assertRaisesRegex(lane.ContractError, "project name already exists"):
+                lane.execute_command(
+                    client,
+                    changed,
+                    mode="apply",
+                    journal_path=Path(tmp) / "changed.json",
+                )
+            self.assertEqual((len(client.projects), len(client.milestones), len(client.issues)), (1, 1, 1))
+
+    def test_hierarchy_results_have_typed_before_after_without_description_leaks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = FakeHierarchyClient()
+            raw = hierarchy_command()
+            raw["change"]["project"]["description"] = "hidden project description"
+            raw["change"]["milestone"]["description"] = "hidden milestone description"
+            raw["change"]["issue"]["state"] = "Todo"
+
+            planned = lane.execute_command(client, raw, mode="plan")
+            self.assertEqual(planned["before"], {"project": None, "milestone": None, "issue": None})
+            self.assertFalse(planned["verified"])
+            self.assertEqual(planned["after"]["project"]["name"], "health")
+            self.assertEqual(planned["after"]["project"]["description"], "hidden project description")
+            self.assertEqual(planned["after"]["milestone"]["project_id"], planned["after"]["project"]["id"])
+            self.assertEqual(planned["after"]["issue"]["project_id"], planned["after"]["project"]["id"])
+            self.assertEqual(planned["after"]["issue"]["milestone_id"], planned["after"]["milestone"]["id"])
+            self.assertEqual(planned["after"]["issue"]["team_key"], "SIS")
+            self.assertIsNone(planned["after"]["issue"]["parent_id"])
+            self.assertEqual(planned["after"]["issue"]["state"], "Todo")
+            plan_log = json.dumps(planned["plan"], ensure_ascii=False)
+            self.assertNotIn("hidden project description", plan_log)
+            self.assertNotIn("hidden milestone description", plan_log)
+            self.assertNotIn("https://solomia.in.ua", plan_log)
+
+            applied = lane.execute_command(
+                client, raw, mode="apply", journal_path=Path(tmp) / "journal.json"
+            )
+            self.assertEqual(applied["before"], planned["before"])
+            self.assertTrue(applied["verified"])
+            self.assertEqual(applied["after"]["issue"]["identifier"], "SIS-100")
+            self.assertEqual(
+                applied["after"]["issue"]["url"],
+                "https://linear.app/example/issue/SIS-100",
+            )
+
+            replay = lane.execute_command(
+                client, raw, mode="apply", journal_path=Path(tmp) / "journal.json"
+            )
+            self.assertEqual(replay["result"], "no_op")
+            self.assertEqual(replay["before"], replay["after"])
+            self.assertTrue(replay["verified"])
+
+    def test_hierarchy_omitted_fields_are_not_sent_or_compared(self):
+        class CaptureClient(FakeHierarchyClient):
+            def __init__(self):
+                super().__init__()
+                self.create_kwargs = []
+
+            def create_project(self, **kwargs):
+                self.create_kwargs.append(("project", dict(kwargs)))
+                super().create_project(**kwargs)
+
+            def create_project_milestone(self, **kwargs):
+                self.create_kwargs.append(("milestone", dict(kwargs)))
+                super().create_project_milestone(**kwargs)
+
+            def create_project_issue(self, **kwargs):
+                self.create_kwargs.append(("issue", dict(kwargs)))
+                super().create_project_issue(**kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = CaptureClient()
+            lane.execute_command(
+                client,
+                hierarchy_command(),
+                mode="apply",
+                journal_path=Path(tmp) / "journal.json",
+            )
+            sent = dict(client.create_kwargs)
+            self.assertNotIn("description", sent["project"])
+            self.assertNotIn("description", sent["milestone"])
+            self.assertNotIn("state_id", sent["issue"])
+            client.projects[0]["description"] = "unmanaged project description"
+            client.milestones[0]["description"] = "unmanaged milestone description"
+            replay = lane.execute_command(
+                client,
+                hierarchy_command(),
+                mode="apply",
+                journal_path=Path(tmp) / "journal.json",
+            )
+            self.assertEqual(replay["result"], "no_op")
+
+    def test_hierarchy_recovers_after_mid_composite_crash_without_journal(self):
+        class CrashOnceClient(FakeHierarchyClient):
+            def __init__(self):
+                super().__init__()
+                self.crash = True
+
+            def create_project_milestone(self, **kwargs):
+                super().create_project_milestone(**kwargs)
+                if self.crash:
+                    self.crash = False
+                    raise RuntimeError("simulated crash after milestone create")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Path(tmp) / "journal.json"
+            client = CrashOnceClient()
+            with self.assertRaisesRegex(RuntimeError, "simulated crash"):
+                lane.execute_command(
+                    client, hierarchy_command(), mode="apply", journal_path=journal
+                )
+            self.assertFalse(journal.exists())
+            recovered = lane.execute_command(
+                client, hierarchy_command(), mode="apply", journal_path=journal
+            )
+            self.assertEqual(recovered["result"], "applied")
+            self.assertEqual(len(client.projects), 1)
+            self.assertEqual(len(client.milestones), 1)
+            self.assertEqual(len(client.issues), 1)
+
+    def test_cross_profile_hierarchy_delivery_converges_under_one_global_journal_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Path(tmp) / "journal.json"
+            client = FakeHierarchyClient()
+            first_command = hierarchy_command()
+            second_command = hierarchy_command()
+            second_command.update(
+                {
+                    "source_profile": "ideas",
+                    "command_id": "33333333-3333-4333-8333-333333333333",
+                    "correlation_id": "44444444-4444-4444-8444-444444444444",
+                }
+            )
+
+            first = lane.execute_command(
+                client, first_command, mode="apply", journal_path=journal
+            )
+            writes_after_first = [call for call in client.calls if call[0].startswith("create_")]
+            second = lane.execute_command(
+                client, second_command, mode="apply", journal_path=journal
+            )
+            writes_after_second = [call for call in client.calls if call[0].startswith("create_")]
+
+        self.assertEqual(first["result"], "applied")
+        self.assertEqual(second["result"], "no_op")
+        self.assertEqual(first["idempotency_key"], second["idempotency_key"])
+        self.assertEqual(first["source_profile"], "swe")
+        self.assertEqual(second["source_profile"], "ideas")
+        for entity in ("project", "milestone", "issue"):
+            self.assertEqual(first["after"][entity]["id"], second["after"][entity]["id"])
+            self.assertEqual(uuid.UUID(first["after"][entity]["id"]).version, 4)
+        self.assertEqual(writes_after_second, writes_after_first)
+
+    def test_concurrent_hierarchy_replay_creates_each_entity_once(self):
+        class SlowClient(FakeHierarchyClient):
+            def list_team_projects(self, team_id):
+                snapshot = super().list_team_projects(team_id)
+                if not snapshot:
+                    time.sleep(0.05)
+                return snapshot
+
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Path(tmp) / "journal.json"
+            client = SlowClient()
+            raw = hierarchy_command()
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(
+                    pool.map(
+                        lambda _: lane.execute_command(
+                            client, raw, mode="apply", journal_path=journal
+                        ),
+                        range(2),
+                    )
+                )
+            self.assertEqual(
+                sorted(item["result"] for item in results), ["applied", "no_op"]
+            )
+            self.assertEqual(len(client.projects), 1)
+            self.assertEqual(len(client.milestones), 1)
+            self.assertEqual(len(client.issues), 1)
+
+    def test_hierarchy_stops_after_tampered_intermediate_read_back(self):
+        class TamperedProjectClient(FakeHierarchyClient):
+            def create_project(self, **kwargs):
+                super().create_project(**kwargs)
+                self.projects[0]["name"] = "tampered"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = TamperedProjectClient()
+            with self.assertRaisesRegex(lane.ContractError, "project"):
+                lane.execute_command(
+                    client,
+                    hierarchy_command(),
+                    mode="apply",
+                    journal_path=Path(tmp) / "journal.json",
+                )
+            self.assertEqual(len(client.projects), 1)
+            self.assertEqual(client.milestones, [])
+            self.assertEqual(client.issues, [])
+
+    def test_hierarchy_tracer_plans_applies_reads_back_and_replays(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Path(tmp) / "journal.json"
+            client = FakeHierarchyClient()
+            raw = hierarchy_command()
+
+            planned = lane.execute_command(client, raw, mode="plan")
+            self.assertEqual(
+                [item["action"] for item in planned["plan"]],
+                ["create_project", "create_milestone", "create_issue"],
+            )
+            self.assertEqual(client.calls, [
+                ("list_teams",),
+                ("list_team_projects", "team-sis"),
+            ])
+
+            client.calls.clear()
+            applied = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+            self.assertEqual(applied["result"], "applied")
+            self.assertTrue(applied["verified"])
+            self.assertEqual(applied["target"]["identifier"], "health")
+            self.assertEqual(client.issues[0]["description"], "https://solomia.in.ua")
+            first_write = next(
+                index for index, call in enumerate(client.calls) if call[0].startswith("create_")
+            )
+            self.assertEqual(
+                client.calls[:first_write],
+                [
+                    ("list_teams",),
+                    ("list_team_projects", "team-sis"),
+                ],
+            )
+
+            journal.unlink()
+            replay = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+            self.assertEqual(replay["result"], "no_op")
+            self.assertEqual(len(client.projects), 1)
+            self.assertEqual(len(client.milestones), 1)
+            self.assertEqual(len(client.issues), 1)
+
+    def test_read_returns_linear_result_v2_with_exact_verified_target(self):
         result = lane.execute_command(FakeClient(), command(), mode="plan")
-        self.assertEqual(result["schema_version"], "linear-result.v1")
+        self.assertEqual(result["schema_version"], "linear-result.v2")
         self.assertEqual(result["result"], "read")
         self.assertEqual(result["target"]["identifier"], "SIS-59")
         self.assertEqual(result["after"]["state"], "In Progress")
@@ -465,7 +866,7 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(applied["result"], "applied")
             self.assertTrue(applied["verified"])
             self.assertEqual(client.writes[0][3], raw["change"]["body"])
-            self.assertNotIn("<!-- linear-command:v1", client.writes[0][3])
+            self.assertNotIn("<!-- linear-command:v2", client.writes[0][3])
             self.assertEqual(client.writes[0][2], lane.command_fingerprint(raw)[2])
             self.assertEqual(uuid.UUID(client.writes[0][2]).version, 4)
             replay = lane.execute_command(

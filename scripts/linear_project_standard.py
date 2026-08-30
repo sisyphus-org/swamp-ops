@@ -5,11 +5,9 @@ Contract: Project -> Milestones -> Issues -> Sub-issues.
 Milestones are assigned to top-level issues. Sub-issues inherit the grouping
 through their parent and intentionally receive no direct milestone assignment.
 
-Plan mode performs live reads only. Apply mode creates missing objects and may
-assign or reassign an explicitly identified existing top-level issue to a
-declared milestone. It never changes existing issue status, project, parent, or
-other fields, and never archives or deletes objects. Ambiguous or inconsistent
-matches fail closed rather than producing duplicates.
+The operational CLI is plan-only and performs live reads only. Reusable
+validation, discovery, and planning functions remain available. All Linear
+writes are owned by the trusted Project Manager lane.
 """
 
 from __future__ import annotations
@@ -165,6 +163,8 @@ class LinearClient:
         self.authorization = token
 
     def execute(self, query: str, variables: dict[str, Any] | None = None) -> dict[str, Any]:
+        if query not in READ_QUERIES:
+            raise ContractError("LinearClient accepts only an explicit fixed read query")
         body = json.dumps({"query": query, "variables": variables or {}}).encode()
         request = urllib.request.Request(
             self.endpoint,
@@ -252,47 +252,9 @@ query ProjectIssues($projectId: ID!) {
 }
 """
 
-PROJECT_CREATE = """
-mutation CreateProject($input: ProjectCreateInput!) {
-  projectCreate(input: $input) {
-    success
-    project { id name }
-  }
-}
-"""
-
-MILESTONE_CREATE = """
-mutation CreateMilestone($input: ProjectMilestoneCreateInput!) {
-  projectMilestoneCreate(input: $input) {
-    success
-    projectMilestone { id name }
-  }
-}
-"""
-
-ISSUE_CREATE = """
-mutation CreateIssue($input: IssueCreateInput!) {
-  issueCreate(input: $input) {
-    success
-    issue { id identifier title }
-  }
-}
-"""
-
-ISSUE_UPDATE = """
-mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) {
-  issueUpdate(id: $id, input: $input) {
-    success
-    issue {
-      id
-      identifier
-      title
-      parent { id }
-      projectMilestone { id name }
-    }
-  }
-}
-"""
+READ_QUERIES = frozenset(
+    {TEAMS_QUERY, TEAM_STATES_QUERY, PROJECTS_QUERY, MILESTONES_QUERY, ISSUES_QUERY}
+)
 
 
 class LiveContext:
@@ -516,180 +478,22 @@ def build_plan(manifest: dict[str, Any], live: LiveContext) -> list[dict[str, st
     return actions
 
 
-def create_project(client: LinearClient, manifest: dict[str, Any], team_id: str) -> dict[str, Any]:
-    project_input: dict[str, Any] = {
-        "name": manifest["project"]["name"],
-        "teamIds": [team_id],
-    }
-    if manifest["project"].get("description"):
-        project_input["description"] = manifest["project"]["description"]
-    payload = client.execute(PROJECT_CREATE, {"input": project_input})["projectCreate"]
-    if not payload["success"] or payload["project"] is None:
-        raise ContractError("Linear did not create the project")
-    return payload["project"]
-
-
-def create_milestone(client: LinearClient, project_id: str, spec: dict[str, Any]) -> dict[str, Any]:
-    milestone_input: dict[str, Any] = {"name": spec["name"], "projectId": project_id}
-    if spec.get("description"):
-        milestone_input["description"] = spec["description"]
-    payload = client.execute(MILESTONE_CREATE, {"input": milestone_input})["projectMilestoneCreate"]
-    if not payload["success"] or payload["projectMilestone"] is None:
-        raise ContractError(f"Linear did not create milestone {spec['name']}")
-    return payload["projectMilestone"]
-
-
-def create_issue(
-    client: LinearClient,
-    *,
-    team: dict[str, Any],
-    project_id: str,
-    milestone_id: str,
-    spec: dict[str, Any],
-    parent_id: str | None = None,
-) -> dict[str, Any]:
-    issue_input: dict[str, Any] = {
-        "title": spec["title"],
-        "teamId": team["id"],
-        "projectId": project_id,
-        "stateId": resolve_state(team, spec.get("state")),
-    }
-    if parent_id is None:
-        issue_input["projectMilestoneId"] = milestone_id
-    if spec.get("description"):
-        issue_input["description"] = spec["description"]
-    if parent_id is not None:
-        issue_input["parentId"] = parent_id
-    payload = client.execute(ISSUE_CREATE, {"input": issue_input})["issueCreate"]
-    if not payload["success"] or payload["issue"] is None:
-        raise ContractError(f"Linear did not create issue {spec['title']}")
-    return payload["issue"]
-
-
-def update_issue_milestone(
-    client: LinearClient, *, issue: dict[str, Any], milestone: dict[str, Any]
-) -> dict[str, Any]:
-    """Change only the milestone of a verified existing top-level issue."""
-    payload = client.execute(
-        ISSUE_UPDATE,
-        {
-            "id": issue["id"],
-            "input": {"projectMilestoneId": milestone["id"]},
-        },
-    )["issueUpdate"]
-    updated = payload["issue"]
-    if not payload["success"] or updated is None:
-        raise ContractError(f"Linear did not update issue {issue['identifier']}")
-    if (
-        updated["id"] != issue["id"]
-        or updated["identifier"] != issue["identifier"]
-        or updated["title"] != issue["title"]
-        or updated["parent"] is not None
-        or updated["projectMilestone"] is None
-        or updated["projectMilestone"]["id"] != milestone["id"]
-    ):
-        raise ContractError(
-            f"Linear returned an inconsistent milestone update for {issue['identifier']}"
-        )
-    return updated
-
-
-def apply_manifest(client: LinearClient, manifest: dict[str, Any], live: LiveContext) -> list[dict[str, str]]:
-    # Re-run the complete read-only reconciliation first so every identifier,
-    # title, parent, milestone, and collision is validated before the first write.
-    build_plan(manifest, live)
-    applied: list[dict[str, str]] = []
-    project = live.project
-    if project is None:
-        project = create_project(client, manifest, live.team["id"])
-        applied.append({"action": "created_project", "name": project["name"], "id": project["id"]})
-    milestone_by_name = {item["name"]: item for item in live.milestones}
-    parent_by_scope: dict[tuple[str, str], dict[str, Any]] = {}
-    for item in live.issues:
-        if item["parent"] is not None or item["projectMilestone"] is None:
-            continue
-        key = (item["projectMilestone"]["id"], item["title"])
-        if key in parent_by_scope:
-            raise ContractError(
-                f"ambiguous top-level issue in milestone {item['projectMilestone']['name']}: {item['title']}"
-            )
-        parent_by_scope[key] = item
-    for milestone_spec in manifest["milestones"]:
-        milestone = milestone_by_name.get(milestone_spec["name"])
-        if milestone is None:
-            milestone = create_milestone(client, project["id"], milestone_spec)
-            milestone_by_name[milestone["name"]] = milestone
-            applied.append({"action": "created_milestone", "name": milestone["name"], "id": milestone["id"]})
-        for issue_spec in milestone_spec["issues"]:
-            if "identifier" in issue_spec:
-                parent = resolve_identified_issue(live, issue_spec)
-                current = parent["projectMilestone"]
-                if current is None or current["id"] != milestone["id"]:
-                    action = "assigned_issue_milestone" if current is None else "reassigned_issue_milestone"
-                    previous = current["name"] if current is not None else None
-                    parent = update_issue_milestone(
-                        client, issue=parent, milestone=milestone
-                    )
-                    result = {
-                        "action": action,
-                        "id": parent["identifier"],
-                        "title": parent["title"],
-                        "milestone": milestone["name"],
-                    }
-                    if previous is not None:
-                        result["from"] = previous
-                    applied.append(result)
-            else:
-                parent_key = (milestone["id"], issue_spec["title"])
-                parent = parent_by_scope.get(parent_key)
-                if parent is None:
-                    parent = create_issue(
-                        client,
-                        team=live.team,
-                        project_id=project["id"],
-                        milestone_id=milestone["id"],
-                        spec=issue_spec,
-                    )
-                    parent_by_scope[parent_key] = parent
-                    applied.append({"action": "created_issue", "title": parent["title"], "id": parent["identifier"]})
-            for child_spec in issue_spec.get("subIssues", []):
-                existing_child = next(
-                    (
-                        item
-                        for item in live.issues
-                        if item["title"] == child_spec["title"]
-                        and item["parent"] is not None
-                        and item["parent"]["id"] == parent["id"]
-                        and item["projectMilestone"] is None
-                    ),
-                    None,
-                )
-                if existing_child is not None:
-                    continue
-                collisions = [
-                    item for item in live.issues if item["title"] == child_spec["title"]
-                ]
-                if collisions:
-                    raise ContractError(
-                        f"sub-issue title already exists in a different hierarchy: {child_spec['title']}"
-                    )
-                child = create_issue(
-                    client,
-                    team=live.team,
-                    project_id=project["id"],
-                    milestone_id=milestone["id"],
-                    spec=child_spec,
-                    parent_id=parent["id"],
-                )
-                applied.append({"action": "created_sub_issue", "title": child["title"], "id": child["identifier"], "parent": parent["title"]})
-    return applied
-
-
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", required=True, type=Path)
     parser.add_argument("--mode", choices=["plan", "apply"], default="plan")
     args = parser.parse_args()
+    if args.mode == "apply":
+        emit(
+            {
+                "mode": "apply",
+                "result": "error",
+                "issues": [
+                    "standalone apply is unavailable; Project Manager is the only Linear writer"
+                ],
+            }
+        )
+        return 1
     try:
         manifest = load_manifest(args.manifest.resolve())
         token = os.environ.get("LINEAR_TOKEN", "")
@@ -697,30 +501,12 @@ def main() -> int:
         live = fetch_context(client, manifest)
         validate_live_references(manifest, live)
         plan = build_plan(manifest, live)
-        if args.mode == "plan":
-            emit({
-                "mode": "plan",
-                "result": "converged" if not plan else "changes_required",
-                "contract": "Project -> Milestones -> Issues -> Sub-issues",
-                "project": manifest["project"]["name"],
-                "actions": plan,
-            })
-            return 0
-        if not plan:
-            emit({"mode": "apply", "result": "converged", "project": manifest["project"]["name"], "applied": []})
-            return 0
-        applied = apply_manifest(client, manifest, live)
-        verified = fetch_context(client, manifest)
-        remaining = build_plan(manifest, verified)
-        if remaining:
-            raise ContractError(f"verification failed; remaining actions: {remaining}")
         emit({
-            "mode": "apply",
-            "result": "applied",
+            "mode": "plan",
+            "result": "converged" if not plan else "changes_required",
             "contract": "Project -> Milestones -> Issues -> Sub-issues",
             "project": manifest["project"]["name"],
-            "applied": applied,
-            "verified": True,
+            "actions": plan,
         })
         return 0
     except (ContractError, json.JSONDecodeError) as exc:
@@ -730,3 +516,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+

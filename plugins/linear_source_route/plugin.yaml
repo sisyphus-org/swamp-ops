@@ -1,7 +1,7 @@
 name: linear-source-route
-version: 0.2.0
+version: 0.4.0
 description: >-
-  Exact-session ingress for bounded Linear commands from any user-facing profile.
+  Exact-session ingress for bounded Linear issue and hierarchy commands.
 author: sisyphus-org
 kind: backend
 provides_tools:

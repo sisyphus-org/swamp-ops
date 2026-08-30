@@ -12,9 +12,10 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
     "description": (
         "Route one bounded Linear request from an allowed user-facing profile "
         "through the project-manager Kanban lane. Accepts an exact comment text, "
-        "a structured change_state request, or a structured create_issue request. "
-        "The calling profile never mutates Linear directly; the tool creates or "
-        "replays one audited wake-only task and returns its state."
+        "a structured change_state/create_issue request, or one bounded "
+        "converge_hierarchy project→milestone→issue request. The calling profile "
+        "never mutates Linear directly; the tool creates or replays one audited "
+        "wake-only task and returns its state."
     ),
     "parameters": {
         "type": "object",
@@ -26,7 +27,10 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                 "maxLength": 4200,
                 "description": "Exact bounded comment request text.",
             },
-            "operation": {"type": "string", "enum": ["change_state", "create_issue"]},
+            "operation": {
+                "type": "string",
+                "enum": ["change_state", "create_issue", "converge_hierarchy"],
+            },
             "identifier": {
                 "type": "string",
                 "pattern": "^SIS-[1-9][0-9]*$",
@@ -42,10 +46,44 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                 "pattern": "^SIS-[1-9][0-9]*$",
             },
             "priority": {"type": "string", "enum": ["High", "Medium", "Low"]},
+            "project": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "name": {"type": "string", "minLength": 1, "maxLength": 200},
+                    "description": {"type": "string", "maxLength": 10000},
+                },
+                "required": ["name"],
+            },
+            "milestone": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "name": {"type": "string", "minLength": 1, "maxLength": 200},
+                    "description": {"type": "string", "maxLength": 10000},
+                },
+                "required": ["name"],
+            },
+            "issue": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "title": {"type": "string", "minLength": 1, "maxLength": 200},
+                    "description": {"type": "string", "maxLength": 10000},
+                    "state": {
+                        "type": "string",
+                        "enum": ["Backlog", "Todo", "Research", "In Progress", "In Review"],
+                    },
+                },
+                "required": ["title"],
+            },
         },
         "oneOf": [
             {"required": ["request"]},
-            {"required": ["operation", "identifier", "state"]},
+            {
+                "required": ["operation", "identifier", "state"],
+                "properties": {"operation": {"const": "change_state"}},
+            },
             {
                 "required": [
                     "operation",
@@ -54,7 +92,12 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                     "parent_identifier",
                     "state",
                     "priority",
-                ]
+                ],
+                "properties": {"operation": {"const": "create_issue"}},
+            },
+            {
+                "required": ["operation", "project", "milestone", "issue"],
+                "properties": {"operation": {"const": "converge_hierarchy"}},
             },
         ],
     },
@@ -64,7 +107,7 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
 def _task_dict(task: Any) -> dict[str, Any]:
     if isinstance(task, dict):
         return dict(task)
-    fields = ("id", "status", "session_id", "idempotency_key", "result")
+    fields = ("id", "status", "session_id", "idempotency_key", "body", "result")
     return {field: getattr(task, field, None) for field in fields}
 
 
@@ -93,39 +136,38 @@ class HermesKanbanBoard:
     def _connect(self):
         return self.kb.connect(board=self.board)
 
-    def find_task(self, idempotency_key: str) -> dict[str, Any] | None:
+    def get_or_create_task(
+        self, delivery_key: str, **kwargs: Any
+    ) -> tuple[dict[str, Any], bool]:
+        """Atomically return the active delivery task or create it once."""
+        if kwargs.get("idempotency_key") != delivery_key:
+            raise RouteError("delivery key does not match task idempotency key")
         conn = self._connect()
         try:
-            rows = conn.execute(
-                "SELECT id FROM tasks WHERE idempotency_key = ? "
-                "AND status != 'archived' ORDER BY created_at DESC",
-                (idempotency_key,),
-            ).fetchall()
-            if len(rows) > 1:
-                raise RouteError("duplicate active tasks share the idempotency key")
-            if not rows:
-                return None
-            task = self.kb.get_task(conn, rows[0]["id"])
-            if task is None:
-                raise RouteError("idempotency lookup returned a missing task")
-            return _task_dict(task)
-        finally:
-            conn.close()
-
-    def create_task(self, **kwargs: Any) -> dict[str, Any]:
-        conn = self._connect()
-        try:
-            task_id = self.kb.create_task(
-                conn,
-                created_by=self.source_profile,
-                workspace_kind="scratch",
-                board=self.board,
-                **kwargs,
-            )
-            task = self.kb.get_task(conn, task_id)
-            if task is None:
-                raise RouteError("Kanban create returned a missing task")
-            return _task_dict(task)
+            with self.kb.write_txn(conn):
+                rows = conn.execute(
+                    "SELECT id FROM tasks WHERE idempotency_key = ? "
+                    "AND status != 'archived' ORDER BY created_at DESC",
+                    (delivery_key,),
+                ).fetchall()
+                if len(rows) > 1:
+                    raise RouteError("duplicate active tasks share the delivery key")
+                if rows:
+                    task = self.kb.get_task(conn, rows[0]["id"])
+                    if task is None:
+                        raise RouteError("delivery lookup returned a missing task")
+                    return _task_dict(task), False
+                task_id = self.kb.create_task(
+                    conn,
+                    created_by=self.source_profile,
+                    workspace_kind="scratch",
+                    board=self.board,
+                    **kwargs,
+                )
+                task = self.kb.get_task(conn, task_id)
+                if task is None:
+                    raise RouteError("Kanban create returned a missing task")
+                return _task_dict(task), True
         finally:
             conn.close()
 
@@ -165,6 +207,8 @@ class HermesKanbanBoard:
             if task is None:
                 raise RouteError("Kanban release target is missing")
             status = getattr(task, "status", None)
+            if status == "ready":
+                return
             if status == "triage":
                 ok = self.kb.specify_triage_task(
                     conn,
@@ -251,6 +295,8 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
             "state",
             "priority",
         }:
+            request = dict(args)
+        elif set(args) == {"operation", "project", "milestone", "issue"}:
             request = dict(args)
         else:
             raise RouteError("tool input does not match a bounded request shape")

@@ -1,7 +1,7 @@
 id: a8a4a21f-bcd7-4a7a-891f-b5f793b92cea
 name: linear-command-lane-plan
 description: >-
-  Read and validate one exact linear-command.v1 envelope, resolve its exact SIS-N
+  Read and validate one exact linear-command.v2 envelope, resolve its exact SIS-N
   target, record current state and produce a before/after plan. This workflow is
   deliberately plan-only; reviewed apply runs use the same deterministic script.
 tags:
@@ -19,7 +19,7 @@ jobs:
     description: Validate and plan one bounded Linear command.
     steps:
       - name: plan
-        description: Read exact current state and emit linear-result.v1 without writes.
+        description: Read exact current state and emit linear-result.v2 without writes.
         task:
           type: model_method
           modelIdOrName: linear-command-lane-plan

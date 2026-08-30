@@ -1,4 +1,7 @@
+import concurrent.futures
+import contextlib
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -16,11 +19,63 @@ from plugins.linear_source_route import (  # noqa: E402
     _default_runtime_profile_getter,
     handle_linear_source_request,
 )
+from plugins.linear_source_route.route import SourceContext, route_request  # noqa: E402
 
 
 class FakeTask:
     def __init__(self, **values):
         self.__dict__.update(values)
+
+
+def set_existing_task(board, task):
+    def get_or_create(delivery_key, **kwargs):
+        envelope = json.loads(kwargs["body"])
+        command = envelope["command"]
+        operation = command["operation"]
+        if operation == "converge_hierarchy":
+            target = {
+                "type": "project",
+                "identifier": command["change"]["project"]["name"],
+            }
+            after = {}
+        elif operation == "create_issue":
+            target = {
+                "type": "issue",
+                "identifier": "SIS-999",
+                "url": "https://linear.app/example/SIS-999",
+            }
+            after = {"identifier": target["identifier"], "url": target["url"]}
+        else:
+            target = {
+                "type": command["target"]["type"],
+                "identifier": command["target"]["identifier"],
+                "url": f"https://linear.app/example/{command['target']['identifier']}",
+            }
+            after = {}
+        result = {
+            "schema_version": "linear-result.v2",
+            "command_id": command["command_id"],
+            "correlation_id": command["correlation_id"],
+            "idempotency_key": command["idempotency_key"],
+            "source_profile": command["source_profile"],
+            "operation": operation,
+            "mode": "apply",
+            "target": target,
+            "result": "applied",
+            "before": {},
+            "after": after,
+            "plan": [],
+            "no_op": False,
+            "verified": True,
+        }
+        return {
+            **task,
+            "idempotency_key": delivery_key,
+            "body": kwargs["body"],
+            "result": json.dumps(result),
+        }, False
+
+    board.get_or_create_task.side_effect = get_or_create
 
 
 class FakeConnection:
@@ -51,6 +106,11 @@ class FakeKanban:
     def connect(self, *, board):
         self.calls.append(("connect", board))
         return FakeConnection(self)
+
+    @contextlib.contextmanager
+    def write_txn(self, conn):
+        self.calls.append(("write_txn",))
+        yield conn
 
     def get_task(self, conn, task_id):
         self.calls.append(("get", task_id))
@@ -88,6 +148,47 @@ class FakeKanban:
 
 
 class AdapterTests(unittest.TestCase):
+    def test_atomic_get_or_create_race_persists_one_task_and_one_wake_subscription(self):
+        from hermes_cli import kanban_db as kb
+
+        source = SourceContext(
+            session_id="20260828_120000_abcdef12",
+            profile="default",
+            platform="telegram",
+            chat_id="442308262",
+            user_id="442308262",
+            chat_type="dm",
+            thread_id="448864",
+        )
+        request = "Добавь к SIS-61 комментарий: Atomic delivery proof."
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "kanban.db"
+            with mock.patch.dict(os.environ, {"HERMES_KANBAN_DB": str(db_path)}):
+                kb.init_db(db_path=db_path)
+
+                def dispatch():
+                    board = HermesKanbanBoard(
+                        board="default", source_profile="default", kb=kb
+                    )
+                    return route_request(request, source=source, board=board)
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                    results = list(pool.map(lambda _index: dispatch(), range(2)))
+
+                conn = kb.connect(db_path=db_path)
+                try:
+                    task_count = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+                    sub_count = conn.execute(
+                        "SELECT COUNT(*) FROM kanban_notify_subs"
+                    ).fetchone()[0]
+                finally:
+                    conn.close()
+
+        self.assertEqual(task_count, 1)
+        self.assertEqual(sub_count, 1)
+        self.assertEqual(len({item["task_id"] for item in results}), 1)
+        self.assertEqual(len({item["delivery_key"] for item in results}), 1)
+
     def test_adapter_persists_exact_session_thread_wake_route(self):
         kb = FakeKanban()
         audits = []
@@ -97,15 +198,18 @@ class AdapterTests(unittest.TestCase):
             return {"result": "pass", "pending_terminal_events": [], "mismatches": {}}
 
         board = HermesKanbanBoard(board="default", kb=kb, audit_func=audit)
-        created = board.create_task(
+        delivery_key = "linear-delivery:v2:" + "a" * 32
+        created, was_created = board.get_or_create_task(
+            delivery_key,
             title="Linear add_comment SIS-61",
             body="{}",
             assignee="project-manager",
             triage=True,
-            idempotency_key="linear:v1:" + "a" * 32,
+            idempotency_key=delivery_key,
             session_id="20260828_120000_abcdef12",
             max_runtime_seconds=300,
         )
+        self.assertTrue(was_created)
         self.assertEqual(created["session_id"], "20260828_120000_abcdef12")
 
         from plugins.linear_source_route.route import SourceContext
@@ -144,15 +248,18 @@ class AdapterTests(unittest.TestCase):
                 "mismatches": {},
             },
         )
-        created = board.create_task(
+        delivery_key = "linear-delivery:v2:" + "a" * 32
+        created, was_created = board.get_or_create_task(
+            delivery_key,
             title="Linear add_comment SIS-61",
             body="{}",
             assignee="project-manager",
             triage=True,
-            idempotency_key="linear:v1:" + "a" * 32,
+            idempotency_key=delivery_key,
             session_id="20260828_120000_abcdef12",
             max_runtime_seconds=300,
         )
+        self.assertTrue(was_created)
         create = next(call[1] for call in kb.calls if call[0] == "create")
         self.assertEqual(create["created_by"], "books")
 
@@ -177,7 +284,7 @@ class AdapterTests(unittest.TestCase):
             id="t_1234abcd",
             status="triage",
             session_id="20260828_120000_abcdef12",
-            idempotency_key="linear:v1:" + "a" * 32,
+            idempotency_key="linear:v2:" + "a" * 32,
             result=None,
         )
         kb.by_id[task.id] = task
@@ -220,20 +327,35 @@ class PluginTests(unittest.TestCase):
                 "description",
                 "parent_identifier",
                 "priority",
+                "project",
+                "milestone",
+                "issue",
             },
         )
         self.assertFalse(parameters["additionalProperties"])
-        self.assertEqual(len(parameters["oneOf"]), 3)
+        self.assertEqual(len(parameters["oneOf"]), 4)
+        self.assertEqual(
+            parameters["properties"]["operation"]["enum"],
+            ["change_state", "create_issue", "converge_hierarchy"],
+        )
+        self.assertEqual(
+            [branch.get("properties", {}).get("operation", {}).get("const") for branch in parameters["oneOf"]],
+            [None, "change_state", "create_issue", "converge_hierarchy"],
+        )
+        for entity in ("project", "milestone", "issue"):
+            entity_schema = parameters["properties"][entity]
+            self.assertNotIn("id", entity_schema["properties"])
+            self.assertNotIn("id", entity_schema["required"])
 
     def test_handler_uses_request_scoped_gateway_identity(self):
         fake_board = mock.Mock()
-        fake_board.find_task.return_value = {
+        existing = {
             "id": "t_1234abcd",
             "status": "done",
             "session_id": "20260828_120000_abcdef12",
             "result": json.dumps(
                 {
-                    "schema_version": "linear-result.v1",
+                    "schema_version": "linear-result.v2",
                     "verified": True,
                     "result": "applied",
                     "target": {
@@ -243,6 +365,7 @@ class PluginTests(unittest.TestCase):
                 }
             ),
         }
+        set_existing_task(fake_board, existing)
         session_values = {
             "HERMES_SESSION_PROFILE": "",
             "HERMES_SESSION_PLATFORM": "telegram",
@@ -264,17 +387,17 @@ class PluginTests(unittest.TestCase):
         )
 
         self.assertEqual(result["status"], "verified_no_op")
-        fake_board.find_task.assert_called_once()
+        fake_board.get_or_create_task.assert_called_once()
 
     def test_handler_accepts_any_allowlisted_runtime_profile(self):
         fake_board = mock.Mock()
-        fake_board.find_task.return_value = {
+        existing = {
             "id": "t_1234abcd",
             "status": "done",
             "session_id": "20260828_120000_abcdef12",
             "result": json.dumps(
                 {
-                    "schema_version": "linear-result.v1",
+                    "schema_version": "linear-result.v2",
                     "verified": True,
                     "result": "applied",
                     "target": {
@@ -284,6 +407,7 @@ class PluginTests(unittest.TestCase):
                 }
             ),
         }
+        set_existing_task(fake_board, existing)
         session_values = {
             "HERMES_SESSION_PROFILE": "books",
             "HERMES_SESSION_PLATFORM": "telegram",
@@ -313,13 +437,13 @@ class PluginTests(unittest.TestCase):
 
     def test_handler_accepts_structured_safe_state_request(self):
         fake_board = mock.Mock()
-        fake_board.find_task.return_value = {
+        existing = {
             "id": "t_1234abcd",
             "status": "done",
             "session_id": "20260828_120000_abcdef12",
             "result": json.dumps(
                 {
-                    "schema_version": "linear-result.v1",
+                    "schema_version": "linear-result.v2",
                     "verified": True,
                     "result": "applied",
                     "target": {
@@ -329,6 +453,7 @@ class PluginTests(unittest.TestCase):
                 }
             ),
         }
+        set_existing_task(fake_board, existing)
         session_values = {
             "HERMES_SESSION_PROFILE": "default",
             "HERMES_SESSION_PLATFORM": "telegram",
@@ -351,6 +476,19 @@ class PluginTests(unittest.TestCase):
                 "parent_identifier": "SIS-56",
                 "state": "Todo",
                 "priority": "High",
+            },
+            {
+                "operation": "converge_hierarchy",
+                "project": {
+                    "name": "health",
+                },
+                "milestone": {
+                    "name": "Подолог",
+                },
+                "issue": {
+                    "title": "Сходить в Solomia и записаться",
+                    "description": "https://solomia.in.ua",
+                },
             },
         ]
         for request in requests:
@@ -388,7 +526,7 @@ class PluginTests(unittest.TestCase):
         )
         self.assertEqual(result["status"], "rejected")
         self.assertIn("session", result["error"])
-        fake_board.find_task.assert_not_called()
+        fake_board.get_or_create_task.assert_not_called()
 
     def test_handler_rejects_contextual_profile_conflicting_with_runtime(self):
         fake_board = mock.Mock()
@@ -412,7 +550,7 @@ class PluginTests(unittest.TestCase):
         )
         self.assertEqual(result["status"], "rejected")
         self.assertIn("profile", result["error"])
-        fake_board.find_task.assert_not_called()
+        fake_board.get_or_create_task.assert_not_called()
 
     def test_handler_rejects_contextual_swe_without_runtime_binding(self):
         fake_board = mock.Mock()
@@ -436,7 +574,7 @@ class PluginTests(unittest.TestCase):
         )
         self.assertEqual(result["status"], "rejected")
         self.assertIn("runtime profile", result["error"])
-        fake_board.find_task.assert_not_called()
+        fake_board.get_or_create_task.assert_not_called()
 
 
 if __name__ == "__main__":
