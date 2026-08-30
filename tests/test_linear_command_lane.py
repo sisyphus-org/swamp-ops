@@ -730,6 +730,93 @@ class ExecutionTests(unittest.TestCase):
                 updates,
             )
 
+    def test_hierarchy_accepts_linear_canonical_inline_url_description_readback(self):
+        desired = (
+            "Купить набор столовых приборов Sambonet Taste 24 предмета: "
+            "https://www.sambonet.com/en-it/cutlery-set%2C-24-pieces-/"
+            "52553-81_vg.html\n\n"
+            "Выбрать и купить подходящую скатерть JYSK: "
+            "https://jysk.ua/dlya-domu/tekstil-dlya-kukhni/skatertini-na-stil"
+        )
+        observed = (
+            "Купить набор столовых приборов Sambonet Taste 24 предмета: "
+            "[https://www.sambonet.com/en-it/cutlery-set%2C-24-pieces-/"
+            "52553-81_vg.html](<https://www.sambonet.com/en-it/"
+            "cutlery-set%2C-24-pieces-/52553-81_vg.html>)\n\n"
+            "Выбрать и купить подходящую скатерть JYSK: "
+            "[https://jysk.ua/dlya-domu/tekstil-dlya-kukhni/skatertini-na-stil]"
+            "(<https://jysk.ua/dlya-domu/tekstil-dlya-kukhni/skatertini-na-stil>)"
+        )
+
+        class CanonicalizingClient(FakeHierarchyClient):
+            def __init__(self):
+                super().__init__()
+                self.created_description = None
+
+            def create_project_issue(self, **kwargs):
+                self.created_description = kwargs.get("description")
+                super().create_project_issue(**kwargs)
+                self.issues[-1]["description"] = observed
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = CanonicalizingClient()
+            raw = hierarchy_command()
+            raw["change"]["project"]["name"] = "Home Interior"
+            raw["change"]["milestone"]["name"] = "Kitchen"
+            raw["change"]["issue"]["title"] = (
+                "Купить Sambonet Taste и скатерть JYSK"
+            )
+            raw["change"]["issue"]["description"] = desired
+            raw["change"]["issue"]["state"] = "Todo"
+
+            applied = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "create.json",
+            )
+            self.assertEqual(applied["result"], "applied")
+            self.assertEqual(client.created_description, desired)
+            self.assertEqual(applied["after"]["issue"]["description"], observed)
+
+            mutations = [
+                call
+                for call in client.calls
+                if call[0]
+                in {
+                    "create_project",
+                    "create_project_milestone",
+                    "create_project_issue",
+                    "update_project_issue",
+                }
+            ]
+            replay = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "replay.json",
+            )
+            self.assertEqual(replay["result"], "no_op")
+            replay_mutations = [
+                call
+                for call in client.calls
+                if call[0]
+                in {
+                    "create_project",
+                    "create_project_milestone",
+                    "create_project_issue",
+                    "update_project_issue",
+                }
+            ]
+            self.assertEqual(replay_mutations, mutations)
+            self.assertEqual(len(client.projects), 1)
+            self.assertEqual(len(client.milestones), 1)
+            self.assertEqual(len(client.issues), 1)
+            self.assertEqual(
+                sum(1 for call in client.calls if call[0] == "create_project_issue"),
+                1,
+            )
+
     def test_hierarchy_url_canonicalization_is_exact_and_narrow(self):
         hierarchy = lane._load_hierarchy()
         desired = "https://solomia.in.ua"
@@ -753,6 +840,53 @@ class ExecutionTests(unittest.TestCase):
                 "[Visit https://solomia.in.ua](<Visit https://solomia.in.ua>)",
             )
         )
+        inline = "Visit https://a.example/x\nThen https://b.example/y"
+        canonical = (
+            "Visit [https://a.example/x](<https://a.example/x>)\n"
+            "Then [https://b.example/y](<https://b.example/y>)"
+        )
+        self.assertTrue(hierarchy._description_matches(inline, canonical))
+        for live in (
+            "Visit [https://a.example/x](<https://a.example/x>)\nThen https://b.example/y",
+            "Visit [A](<https://a.example/x>)\nThen [https://b.example/y](<https://b.example/y>)",
+            canonical + " ",
+        ):
+            with self.subTest(inline_live=live):
+                self.assertFalse(hierarchy._description_matches(inline, live))
+        unsafe_contexts = (
+            (
+                "See [A](https://a.example/x) and https://b.example/y",
+                "See [A]([https://a.example/x)](<https://a.example/x)>) and "
+                "[https://b.example/y](<https://b.example/y>)",
+            ),
+            (
+                "Run `https://a.example/x` then https://b.example/y",
+                "Run `[https://a.example/x](<https://a.example/x>)` then "
+                "[https://b.example/y](<https://b.example/y>)",
+            ),
+            (
+                "See *https://a.example/x* and https://b.example/y",
+                "See *[https://a.example/x*](<https://a.example/x*>) and "
+                "[https://b.example/y](<https://b.example/y>)",
+            ),
+            (
+                "Visit https://a.example/x.",
+                "Visit [https://a.example/x.](<https://a.example/x.>)",
+            ),
+            (
+                "Visit https://a.example/x\"",
+                "Visit [https://a.example/x\"](<https://a.example/x\">)",
+            ),
+            (
+                "Visit https://a.example/x'",
+                "Visit [https://a.example/x'](<https://a.example/x'>)",
+            ),
+        )
+        for desired_unsafe, live_unsafe in unsafe_contexts:
+            with self.subTest(desired_unsafe=desired_unsafe):
+                self.assertFalse(
+                    hierarchy._description_matches(desired_unsafe, live_unsafe)
+                )
 
     def test_hierarchy_omitted_fields_are_not_sent_or_compared(self):
         class CaptureClient(FakeHierarchyClient):

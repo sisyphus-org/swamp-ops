@@ -264,17 +264,37 @@ def preflight(client: Any, change: dict[str, Any], error_cls: type[Exception]) -
 
 
 def _description_matches(desired: str, live: Any) -> bool:
-    """Match exact bytes or Linear's sole bare-URL read-back serialization.
+    """Match exact bytes or Linear's deterministic plain-URL autolinking.
 
-    Mutation payloads remain unchanged; this only recognizes the deterministic
-    Markdown representation that Linear returns after storing one pure HTTP(S)
-    URL.
+    Mutation payloads remain unchanged. Linear serializes each plain HTTP(S)
+    URL in stored Markdown as ``[url](<url>)``. Accept only the exact result of
+    applying that deterministic transformation to the desired text.
     """
     if live == desired:
         return True
-    if re.fullmatch(r"https?://[^\s\[\]<>]+", desired) is None:
+    urls = list(re.finditer(r"https?://[^\s\[\]<>]+", desired))
+    if not urls or any(
+        match.group(0).endswith(
+            (".", ",", ";", ":", "!", "?", ")", "]", "}", "'", '"')
+        )
+        for match in urls
+    ):
         return False
-    return live == f"[{desired}](<{desired}>)"
+    plain_context = "".join(
+        desired[end : match.start()]
+        for end, match in zip(
+            [0, *(item.end() for item in urls[:-1])],
+            urls,
+        )
+    ) + desired[urls[-1].end() :]
+    if re.search(r"[\[\]()<>`*_~|{}#\\]", plain_context):
+        return False
+    canonical = re.sub(
+        r"https?://[^\s\[\]<>]+",
+        lambda match: f"[{match.group(0)}](<{match.group(0)}>)",
+        desired,
+    )
+    return live == canonical
 
 
 def _issue_drift(change: dict[str, Any], live: LiveHierarchy) -> list[str]:
