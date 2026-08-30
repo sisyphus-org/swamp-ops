@@ -371,8 +371,19 @@ def command_fingerprint(command: dict[str, Any]) -> tuple[str, str, str]:
     request_hash = hashlib.sha256(
         json.dumps(semantic, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
-    comment_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"linear-command:v1:{key_hash}"))
+    comment_id = deterministic_uuid4("linear-command:comment:v1", key_hash)
     return key_hash, request_hash, comment_id
+
+
+def deterministic_uuid4(domain: str, value: str) -> str:
+    """Derive a stable RFC 4122 UUIDv4-shaped identifier from hashed input."""
+    raw = bytearray(hashlib.sha256(f"{domain}:{value}".encode()).digest()[:16])
+    raw[6] = (raw[6] & 0x0F) | 0x40
+    raw[8] = (raw[8] & 0x3F) | 0x80
+    result = str(uuid.UUID(bytes=bytes(raw)))
+    if uuid.UUID(result).version != 4:
+        raise ContractError("deterministic identifier is not UUIDv4")
+    return result
 
 
 def load_journal(path: Path) -> dict[str, str]:
@@ -478,8 +489,8 @@ def execute_command(
         if len(states) != 1:
             raise ContractError(f"exact workflow state not found: {change['state']}")
         key_hash, _, _ = command_fingerprint(command)
-        issue_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"linear-command:create:v1:{key_hash}"))
-        description = change["description"].strip()
+        issue_id = deterministic_uuid4("linear-command:issue:v1", key_hash)
+        description = change["description"]
 
         def verified_create_snapshot(issue: dict[str, Any]) -> dict[str, Any]:
             """Validate every bounded create field at the deterministic issue ID."""
@@ -660,7 +671,7 @@ def execute_command(
             "verified": True,
         })
     if command["operation"] == "add_comment":
-        body = command["change"]["body"].strip()
+        body = command["change"]["body"]
         body_hash = hashlib.sha256(body.encode()).hexdigest()
         key_hash, _, comment_id = command_fingerprint(command)
         comments = client.list_comments(issue["id"])

@@ -8,6 +8,7 @@ import sys
 import tempfile
 import time
 import unittest
+import uuid
 from unittest import mock
 from pathlib import Path
 
@@ -466,11 +467,36 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(client.writes[0][3], raw["change"]["body"])
             self.assertNotIn("<!-- linear-command:v1", client.writes[0][3])
             self.assertEqual(client.writes[0][2], lane.command_fingerprint(raw)[2])
+            self.assertEqual(uuid.UUID(client.writes[0][2]).version, 4)
             replay = lane.execute_command(
                 client, raw, mode="apply", journal_path=journal
             )
             self.assertEqual(replay["result"], "no_op")
             self.assertEqual(len(client.writes), 1)
+
+    def test_user_authored_whitespace_is_preserved_byte_for_byte(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            comment_client = FakeClient()
+            comment = command("add_comment", {"body": "  indented\ntrailing  "})
+            lane.execute_command(
+                comment_client,
+                comment,
+                mode="apply",
+                journal_path=Path(tmp) / "comment-journal.json",
+            )
+            self.assertEqual(comment_client.comments[0]["body"], "  indented\ntrailing  ")
+
+            issue_client = FakeClient()
+            create = create_command()
+            create["change"]["description"] = "  indented\ntrailing  "
+            lane.execute_command(
+                issue_client,
+                create,
+                mode="apply",
+                journal_path=Path(tmp) / "issue-journal.json",
+            )
+            self.assertEqual(issue_client.children[0]["description"], "  indented\ntrailing  ")
+            self.assertEqual(uuid.UUID(issue_client.children[0]["id"]).version, 4)
 
     def test_comment_apply_fails_when_deterministic_id_is_not_read_back(self):
         class MissingCommentClient(FakeClient):

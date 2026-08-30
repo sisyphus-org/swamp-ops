@@ -135,8 +135,8 @@ class ParseTests(unittest.TestCase):
         parsed = route.parse_linear_request(
             {
                 "operation": "create_issue",
-                "title": "Universal routing tracer bullet",
-                "description": "Bounded verification issue.",
+                "title": "  Universal routing tracer bullet  ",
+                "description": "  Bounded verification issue.  ",
                 "parent_identifier": "SIS-56",
                 "state": "Todo",
                 "priority": "High",
@@ -149,6 +149,8 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(parsed.command["target"], {"type": "team", "identifier": "SIS"})
         self.assertEqual(parsed.command["change"]["parent_identifier"], "SIS-56")
         self.assertEqual(parsed.command["change"]["priority"], "High")
+        self.assertEqual(parsed.command["change"]["title"], "  Universal routing tracer bullet  ")
+        self.assertEqual(parsed.command["change"]["description"], "  Bounded verification issue.  ")
 
     def test_malformed_missing_or_credential_shaped_input_fails_before_dispatch(self):
         cases = (
