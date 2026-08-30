@@ -605,6 +605,46 @@ class ExecutionTests(unittest.TestCase):
             )
             self.assertEqual(len(client.comments), 1)
 
+    def test_malformed_child_nodes_fail_closed_before_issue_creation(self):
+        for malformed in (None, "not-an-object", {"title": "missing id"}):
+            with self.subTest(malformed=malformed), tempfile.TemporaryDirectory() as tmp:
+                class MalformedChildrenClient(FakeClient):
+                    def list_child_issues(self, parent_id, value=malformed):
+                        return [value]
+
+                client = MalformedChildrenClient()
+                with self.assertRaisesRegex(
+                    lane.ContractError, "malformed child node"
+                ):
+                    lane.execute_command(
+                        client,
+                        create_command(),
+                        mode="apply",
+                        journal_path=Path(tmp) / "journal.json",
+                    )
+                self.assertEqual(client.writes, [])
+
+    def test_missing_deterministic_issue_does_not_query_absent_entity(self):
+        class LinearMissingIssueLookupClient(FakeClient):
+            def get_issue(self, identifier):
+                found = super().get_issue(identifier)
+                if found is None:
+                    raise lane.ContractError(
+                        "Linear GraphQL error: Entity not found: Issue"
+                    )
+                return found
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = LinearMissingIssueLookupClient()
+            result = lane.execute_command(
+                client,
+                create_command(),
+                mode="apply",
+                journal_path=Path(tmp) / "journal.json",
+            )
+            self.assertEqual(result["result"], "applied")
+            self.assertEqual(len(client.children), 1)
+
     def test_create_issue_plan_apply_read_back_and_replay_are_idempotent(self):
         with tempfile.TemporaryDirectory() as tmp:
             journal = Path(tmp) / "journal.json"
