@@ -626,12 +626,17 @@ class ExecutionTests(unittest.TestCase):
             def __init__(self):
                 super().__init__()
                 self.crash = True
+                self.issue_state_ids = []
 
             def create_project_milestone(self, **kwargs):
                 super().create_project_milestone(**kwargs)
                 if self.crash:
                     self.crash = False
                     raise RuntimeError("simulated crash after milestone create")
+
+            def create_project_issue(self, **kwargs):
+                self.issue_state_ids.append(kwargs.get("state_id"))
+                super().create_project_issue(**kwargs)
 
         with tempfile.TemporaryDirectory() as tmp:
             journal = Path(tmp) / "journal.json"
@@ -643,6 +648,7 @@ class ExecutionTests(unittest.TestCase):
             self.assertFalse(journal.exists())
             recovered = lane.execute_command(client, raw, mode="apply", journal_path=journal)
             self.assertEqual(recovered["result"], "applied")
+            self.assertEqual(client.issue_state_ids, ["state-Todo"])
             self.assertEqual(recovered["after"]["issue"]["state"], "Todo")
             self.assertEqual(len(client.projects), 1)
             self.assertEqual(len(client.milestones), 1)
