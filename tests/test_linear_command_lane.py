@@ -385,6 +385,8 @@ class WorkflowContractTests(unittest.TestCase):
             f"linear-kanban-task.v{1}",
             f"linear-result.v{1}",
             f"linear:v{1}:",
+            f"linear-command:v{1}",
+            f"linear-command:create:v{1}",
         )
         contents = []
         for path in paths:
