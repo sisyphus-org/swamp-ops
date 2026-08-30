@@ -9,7 +9,7 @@ import sys
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 MAX_NAME = 200
 MAX_DESCRIPTION = 10_000
@@ -48,7 +48,7 @@ class LiveHierarchy:
     state: dict[str, Any] | None
 
 
-def _fail(error_cls: type[Exception], message: str) -> None:
+def _fail(error_cls: type[Exception], message: str) -> NoReturn:
     raise error_cls(message)
 
 

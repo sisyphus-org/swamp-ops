@@ -110,6 +110,38 @@ class ParseTests(unittest.TestCase):
             {key: value for key, value in request.items() if key != "operation"},
         )
 
+    def test_hierarchy_reserved_markers_fail_before_task_creation(self):
+        base = {
+            "operation": "converge_hierarchy",
+            "project": {"name": "health", "description": "project detail"},
+            "milestone": {"name": "Подолог", "description": "milestone detail"},
+            "issue": {
+                "title": "Сходить в Solomia и записаться",
+                "description": "https://solomia.in.ua",
+            },
+        }
+        fields = (
+            ("project", "name"),
+            ("project", "description"),
+            ("milestone", "name"),
+            ("milestone", "description"),
+            ("issue", "title"),
+            ("issue", "description"),
+        )
+        for kind, field in fields:
+            with self.subTest(kind=kind, field=field):
+                request = json.loads(json.dumps(base, ensure_ascii=False))
+                request[kind][field] = "<!-- linear-command:v2 reserved -->"
+                board = FakeBoard()
+                with self.assertRaisesRegex(route.RouteError, "reserved marker"):
+                    route.route_request(
+                        request,
+                        source=source_context(),
+                        board=board,
+                        uuid_factory=uuid_factory(),
+                    )
+                self.assertEqual(board.calls, [])
+
     def test_hierarchy_replay_key_ignores_random_command_ids_and_changes_with_semantics(self):
         request = {
             "operation": "converge_hierarchy",

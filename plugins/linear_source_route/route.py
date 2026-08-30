@@ -29,6 +29,7 @@ CREDENTIAL_SHAPES = (
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
 )
 SAFE_STATES = {"Backlog", "Todo", "Research", "In Progress", "In Review"}
+RESERVED_MARKER = "<!-- linear-command"
 MAX_HIERARCHY_BYTES = 24_576
 
 
@@ -108,6 +109,8 @@ def _validate_clean_text(
         raise RouteError(f"{path} must be non-empty")
     if any(ord(char) < 32 and char not in "\n\t" for char in value):
         raise RouteError(f"{path} contains control characters")
+    if RESERVED_MARKER in value:
+        raise RouteError(f"{path} contains the reserved marker")
     if any(pattern.search(value) for pattern in CREDENTIAL_SHAPES):
         raise RouteError(f"{path} contains credential-shaped data")
 
