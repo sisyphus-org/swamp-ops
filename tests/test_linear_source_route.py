@@ -597,7 +597,7 @@ class DispatchTests(unittest.TestCase):
                 uuid_factory=uuid_factory(),
             )
 
-    def test_completed_v1_result_is_rejected_fail_closed(self):
+    def test_completed_noncurrent_result_is_rejected_fail_closed(self):
         board = FakeBoard(
             existing={
                 "id": "t_1234abcd",
@@ -605,7 +605,7 @@ class DispatchTests(unittest.TestCase):
                 "session_id": source_context().session_id,
                 "result": json.dumps(
                     {
-                        "schema_version": "linear-result.v1",
+                        "schema_version": "linear-result.unsupported",
                         "result": "applied",
                         "verified": True,
                     }
@@ -622,35 +622,6 @@ class DispatchTests(unittest.TestCase):
             )
 
         self.assertEqual([call[0] for call in board.calls], ["get_or_create"])
-
-    def test_v2_delivery_key_does_not_lookup_completed_v1_task(self):
-        old_task = {
-            "id": "t_oldv1aaa",
-            "status": "done",
-            "session_id": source_context().session_id,
-            "result": json.dumps(
-                {"schema_version": "linear-result.v1", "verified": True}
-            ),
-        }
-
-        class VersionedBoard(FakeBoard):
-            def get_or_create_task(self, delivery_key, **kwargs):
-                if delivery_key.startswith("linear-delivery:v1:"):
-                    self.calls.append(("get_or_create", delivery_key, kwargs))
-                    return old_task, False
-                return super().get_or_create_task(delivery_key, **kwargs)
-
-        board = VersionedBoard()
-        result = route.route_request(
-            "Добавь к SIS-61 комментарий: SIS-61 E2E proof A.",
-            source=source_context(),
-            board=board,
-            uuid_factory=uuid_factory(),
-        )
-
-        self.assertEqual(result["status"], "queued")
-        self.assertTrue(result["delivery_key"].startswith("linear-delivery:v2:"))
-        self.assertNotEqual(result["task_id"], old_task["id"])
 
     def test_existing_task_from_other_source_session_fails_closed(self):
         board = FakeBoard(

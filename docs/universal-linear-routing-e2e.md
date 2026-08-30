@@ -17,7 +17,7 @@ exact source Telegram session
 
 `broker` and `project-manager` are special profiles and must never receive the ordinary source ingress baseline.
 
-SIS-77 cuts this path over without compatibility: the source emits only `linear-command.v2` in `linear-kanban-task.v2`, Project Manager emits and validates only `linear-result.v2`, and both sides reject legacy protocol objects. The global mutation payload and exact delivery payload are unchanged, but their namespaces are now `linear:v2` and `linear-delivery:v2`. Consequently a new dispatch cannot look up a completed task from the retired delivery namespace. There is no migration or fallback path.
+SIS-77 uses one current contract: the source emits only `linear-command.v2` in `linear-kanban-task.v2`, and Project Manager emits and validates only `linear-result.v2`. The global mutation payload and exact delivery payload use `linear:v2` and `linear-delivery:v2`. Any other schema fails closed before mutation or lifecycle writes; no alternate source-side Linear route exists.
 
 ## Source plugin
 
@@ -33,9 +33,10 @@ The plugin:
 - derives a separate delivery key from that mutation key plus the exact source profile/platform/chat/user/thread/session;
 - atomically gets or creates one PM-assigned Kanban task by delivery key inside one Kanban write transaction;
 - installs exactly one source-owned `wake` subscription and audits it before triage release;
+- returns only public status and user-relevant target facts to the source model; task/run IDs, routing/idempotency keys, schema versions, worker state, route audits, hashes, UUIDs, internal entity IDs and raw PM payloads never cross the tool-result boundary;
 - imports no Linear client and reads no Linear credential.
 
-The paired `linear-source-request-routing` skill forbids direct Linear mutation, generic GraphQL, terminal fallback, passive Kanban pings, invented Telegram topics, or another profile's bot.
+The paired `linear-source-request-routing` skill requires short factual replies: `Принято, выполняю.` while queued, then only the final user-visible result and canonical Linear URL. It forbids Kanban inspection after queueing, direct Linear mutation, generic GraphQL, terminal fallback, passive lifecycle narration, invented Telegram topics, or another profile's bot.
 
 ## Project Manager lane
 

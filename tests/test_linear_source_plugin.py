@@ -17,9 +17,14 @@ from plugins.linear_source_route import (  # noqa: E402
     LINEAR_SOURCE_REQUEST_SCHEMA,
     HermesKanbanBoard,
     _default_runtime_profile_getter,
+    _public_result,
     handle_linear_source_request,
 )
-from plugins.linear_source_route.route import SourceContext, route_request  # noqa: E402
+from plugins.linear_source_route.route import (  # noqa: E402
+    RouteError,
+    SourceContext,
+    route_request,
+)
 
 
 class FakeTask:
@@ -37,21 +42,49 @@ def set_existing_task(board, task):
                 "type": "project",
                 "identifier": command["change"]["project"]["name"],
             }
-            after = {}
+            after = {
+                "project": {"id": "project-internal", "name": "health"},
+                "milestone": {
+                    "id": "milestone-internal",
+                    "name": "Подолог",
+                    "project_id": "project-internal",
+                },
+                "issue": {
+                    "id": "issue-internal",
+                    "identifier": "SIS-999",
+                    "url": "https://linear.app/example/issue/SIS-999/fixture",
+                    "title": "Сходить в Solomia и записаться",
+                    "state": "Todo",
+                    "project_id": "project-internal",
+                    "milestone_id": "milestone-internal",
+                },
+            }
         elif operation == "create_issue":
             target = {
                 "type": "issue",
                 "identifier": "SIS-999",
-                "url": "https://linear.app/example/SIS-999",
+                "url": "https://linear.app/example/issue/SIS-999/fixture",
             }
-            after = {"identifier": target["identifier"], "url": target["url"]}
+            after = {
+                "identifier": target["identifier"],
+                "url": target["url"],
+                "title": command["change"]["title"],
+                "state": command["change"]["state"],
+            }
         else:
             target = {
                 "type": command["target"]["type"],
                 "identifier": command["target"]["identifier"],
-                "url": f"https://linear.app/example/{command['target']['identifier']}",
+                "url": (
+                    "https://linear.app/example/issue/"
+                    f"{command['target']['identifier']}/fixture"
+                ),
             }
-            after = {}
+            after = (
+                {"state": command["change"]["state"]}
+                if operation == "change_state"
+                else {}
+            )
         result = {
             "schema_version": "linear-result.v2",
             "command_id": command["command_id"],
@@ -360,7 +393,7 @@ class PluginTests(unittest.TestCase):
                     "result": "applied",
                     "target": {
                         "identifier": "SIS-61",
-                        "url": "https://linear.app/example/SIS-61",
+                        "url": "https://linear.app/example/issue/SIS-61/fixture",
                     },
                 }
             ),
@@ -386,7 +419,21 @@ class PluginTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(result["status"], "verified_no_op")
+        self.assertEqual(
+            result,
+            {
+                "status": "completed",
+                "changed": True,
+                "target": {
+                    "type": "issue",
+                    "identifier": "SIS-61",
+                    "url": "https://linear.app/example/issue/SIS-61/fixture",
+                },
+            },
+        )
+        self.assertNotIn("task_id", json.dumps(result))
+        self.assertNotIn("idempotency", json.dumps(result))
+        self.assertNotIn("delivery_key", json.dumps(result))
         fake_board.get_or_create_task.assert_called_once()
 
     def test_handler_accepts_any_allowlisted_runtime_profile(self):
@@ -402,7 +449,7 @@ class PluginTests(unittest.TestCase):
                     "result": "applied",
                     "target": {
                         "identifier": "SIS-61",
-                        "url": "https://linear.app/example/SIS-61",
+                        "url": "https://linear.app/example/issue/SIS-61/fixture",
                     },
                 }
             ),
@@ -432,7 +479,7 @@ class PluginTests(unittest.TestCase):
                 runtime_profile_getter=lambda: "books",
             )
         )
-        self.assertEqual(result["status"], "verified_no_op")
+        self.assertEqual(result["status"], "completed")
         self.assertEqual(captured, {"source_profile": "books"})
 
     def test_handler_accepts_structured_safe_state_request(self):
@@ -448,7 +495,7 @@ class PluginTests(unittest.TestCase):
                     "result": "applied",
                     "target": {
                         "identifier": "SIS-68",
-                        "url": "https://linear.app/example/SIS-68",
+                        "url": "https://linear.app/example/issue/SIS-68/fixture",
                     },
                 }
             ),
@@ -502,7 +549,281 @@ class PluginTests(unittest.TestCase):
                         runtime_profile_getter=lambda: "default",
                     )
                 )
-                self.assertEqual(result["status"], "verified_no_op")
+                self.assertEqual(result["status"], "completed")
+                serialized = json.dumps(result)
+                for forbidden in (
+                    "task_id",
+                    "idempotency",
+                    "delivery_key",
+                    "command_id",
+                    "correlation_id",
+                    "project_id",
+                    "milestone_id",
+                    "issue-internal",
+                ):
+                    self.assertNotIn(forbidden, serialized)
+                if request["operation"] == "converge_hierarchy":
+                    self.assertEqual(
+                        result,
+                        {
+                            "status": "completed",
+                            "changed": True,
+                            "target": {
+                                "type": "issue",
+                                "identifier": "SIS-999",
+                                "url": "https://linear.app/example/issue/SIS-999/fixture",
+                                "title": "Сходить в Solomia и записаться",
+                                "state": "Todo",
+                            },
+                            "context": {
+                                "project": "health",
+                                "milestone": "Подолог",
+                            },
+                        },
+                    )
+
+    def test_public_completion_preserves_applied_outcome(self):
+        result = _public_result(
+            {
+                "status": "verified_no_op",
+                "linear_result": {
+                    "verified": True,
+                    "result": "applied",
+                    "operation": "change_state",
+                    "target": {
+                        "type": "issue",
+                        "identifier": "SIS-68",
+                        "url": "https://linear.app/example/issue/SIS-68/fixture",
+                    },
+                    "after": {"state": "In Review"},
+                },
+            }
+        )
+        self.assertTrue(result["changed"])
+        self.assertEqual(result["target"]["state"], "In Review")
+
+    def test_public_hierarchy_completion_allows_omitted_optional_state(self):
+        result = _public_result(
+            {
+                "status": "verified_no_op",
+                "linear_result": {
+                    "verified": True,
+                    "result": "applied",
+                    "operation": "converge_hierarchy",
+                    "target": {"type": "project", "identifier": "health"},
+                    "after": {
+                        "project": {"name": "health"},
+                        "milestone": {"name": "Подолог"},
+                        "issue": {
+                            "identifier": "SIS-999",
+                            "url": "https://linear.app/example/issue/SIS-999/fixture",
+                            "title": "Сходить в Solomia и записаться",
+                        },
+                    },
+                },
+            }
+        )
+        self.assertEqual(result["status"], "completed")
+        self.assertTrue(result["changed"])
+        self.assertNotIn("state", result["target"])
+
+    def test_public_completion_rejects_uuid_or_protocol_marker_in_text(self):
+        for title in (
+            "Internal 123e4567-e89b-42d3-a456-426614174000",
+            "Internal linear-command.v2",
+            "Internal linear-delivery:v2:deadbeef",
+        ):
+            with self.subTest(title=title):
+                payload = {
+                    "status": "verified_no_op",
+                    "linear_result": {
+                        "verified": True,
+                        "result": "applied",
+                        "operation": "create_issue",
+                        "target": {
+                            "type": "issue",
+                            "identifier": "SIS-999",
+                            "url": "https://linear.app/example/issue/SIS-999/fixture",
+                        },
+                        "after": {
+                            "identifier": "SIS-999",
+                            "url": "https://linear.app/example/issue/SIS-999/fixture",
+                            "title": title,
+                            "state": "Todo",
+                        },
+                    },
+                }
+                with self.assertRaises(RouteError):
+                    _public_result(payload)
+
+    def test_public_completion_rejects_injected_or_missing_target_facts(self):
+        base = {
+            "status": "verified_no_op",
+            "linear_result": {
+                "verified": True,
+                "result": "no_op",
+                "operation": "change_state",
+                "target": {
+                    "type": "issue",
+                    "identifier": "SIS-68",
+                    "url": "https://linear.app/example/issue/SIS-68/fixture",
+                },
+                "after": {"state": "In Review"},
+            },
+        }
+        cases = []
+        injected = json.loads(json.dumps(base))
+        injected["linear_result"]["target"]["url"] += "\ntask_id=t_deadbeef"
+        cases.append(injected)
+        internal_identifier = json.loads(json.dumps(base))
+        internal_identifier["linear_result"]["target"]["identifier"] = (
+            "bff72327-9104-4f49-a314-6d27b9c2a9bd"
+        )
+        cases.append(internal_identifier)
+        missing_state = json.loads(json.dumps(base))
+        missing_state["linear_result"]["after"] = {}
+        cases.append(missing_state)
+        missing_hierarchy_issue = json.loads(json.dumps(base))
+        missing_hierarchy_issue["linear_result"].update(
+            {
+                "operation": "converge_hierarchy",
+                "target": {"type": "project", "identifier": "health"},
+                "after": {
+                    "project": {"name": "health"},
+                    "milestone": {"name": "Подолог"},
+                    "issue": {"identifier": "SIS-999", "state": "Todo"},
+                },
+            }
+        )
+        cases.append(missing_hierarchy_issue)
+        for payload in cases:
+            with self.subTest(payload=payload):
+                with self.assertRaises(RouteError):
+                    _public_result(payload)
+
+    def test_handler_hides_internal_route_error(self):
+        fake_board = mock.Mock()
+        fake_board.get_or_create_task.side_effect = RouteError(
+            "delivery key mismatch for t_deadbeef"
+        )
+        session_values = {
+            "HERMES_SESSION_PROFILE": "ideas",
+            "HERMES_SESSION_PLATFORM": "telegram",
+            "HERMES_SESSION_CHAT_ID": "442308262",
+            "HERMES_SESSION_USER_ID": "442308262",
+            "HERMES_SESSION_CHAT_TYPE": "dm",
+            "HERMES_SESSION_THREAD_ID": "449189",
+            "HERMES_SESSION_ID": "20260828_120000_abcdef12",
+        }
+        result = json.loads(
+            handle_linear_source_request(
+                {
+                    "operation": "change_state",
+                    "identifier": "SIS-68",
+                    "state": "In Review",
+                },
+                session_id="20260828_120000_abcdef12",
+                board_factory=lambda **_kwargs: fake_board,
+                session_getter=lambda name, default="": session_values.get(name, default),
+                runtime_profile_getter=lambda: "ideas",
+            )
+        )
+        self.assertEqual(
+            result,
+            {
+                "status": "rejected",
+                "message": "Не удалось безопасно обработать запрос.",
+            },
+        )
+        self.assertNotIn("delivery", json.dumps(result))
+        self.assertNotIn("t_deadbeef", json.dumps(result))
+
+    def test_handler_hides_internal_metadata_for_queued_request(self):
+        fake_board = mock.Mock()
+
+        def get_or_create(delivery_key, **kwargs):
+            return {
+                "id": "t_1234abcd",
+                "status": "triage",
+                "session_id": kwargs["session_id"],
+                "idempotency_key": delivery_key,
+            }, True
+
+        fake_board.get_or_create_task.side_effect = get_or_create
+        fake_board.audit_route.return_value = {
+            "result": "pass",
+            "task_id": "t_1234abcd",
+            "mismatches": {},
+            "pending_terminal_events": [],
+        }
+        session_values = {
+            "HERMES_SESSION_PROFILE": "ideas",
+            "HERMES_SESSION_PLATFORM": "telegram",
+            "HERMES_SESSION_CHAT_ID": "442308262",
+            "HERMES_SESSION_USER_ID": "442308262",
+            "HERMES_SESSION_CHAT_TYPE": "dm",
+            "HERMES_SESSION_THREAD_ID": "449189",
+            "HERMES_SESSION_ID": "20260828_120000_abcdef12",
+        }
+        result = json.loads(
+            handle_linear_source_request(
+                {
+                    "operation": "change_state",
+                    "identifier": "SIS-68",
+                    "state": "In Review",
+                },
+                session_id="20260828_120000_abcdef12",
+                board_factory=lambda **_kwargs: fake_board,
+                session_getter=lambda name, default="": session_values.get(name, default),
+                runtime_profile_getter=lambda: "ideas",
+            )
+        )
+        self.assertEqual(result, {"status": "queued"})
+        self.assertNotIn("task", json.dumps(result))
+        self.assertNotIn("idempotency", json.dumps(result))
+        self.assertNotIn("delivery", json.dumps(result))
+
+    def test_handler_hides_internal_metadata_for_blocked_request(self):
+        fake_board = mock.Mock()
+
+        def get_or_create(delivery_key, **kwargs):
+            return {
+                "id": "t_1234abcd",
+                "status": "blocked",
+                "session_id": kwargs["session_id"],
+                "idempotency_key": delivery_key,
+            }, False
+
+        fake_board.get_or_create_task.side_effect = get_or_create
+        session_values = {
+            "HERMES_SESSION_PROFILE": "ideas",
+            "HERMES_SESSION_PLATFORM": "telegram",
+            "HERMES_SESSION_CHAT_ID": "442308262",
+            "HERMES_SESSION_USER_ID": "442308262",
+            "HERMES_SESSION_CHAT_TYPE": "dm",
+            "HERMES_SESSION_THREAD_ID": "449189",
+            "HERMES_SESSION_ID": "20260828_120000_abcdef12",
+        }
+        result = json.loads(
+            handle_linear_source_request(
+                {
+                    "operation": "change_state",
+                    "identifier": "SIS-68",
+                    "state": "In Review",
+                },
+                session_id="20260828_120000_abcdef12",
+                board_factory=lambda **_kwargs: fake_board,
+                session_getter=lambda name, default="": session_values.get(name, default),
+                runtime_profile_getter=lambda: "ideas",
+            )
+        )
+        self.assertEqual(
+            result,
+            {
+                "status": "blocked",
+                "message": "Не удалось выполнить запрос. Проверьте исходные данные.",
+            },
+        )
 
     def test_handler_rejects_session_id_mismatch_before_board_access(self):
         fake_board = mock.Mock()
@@ -524,8 +845,13 @@ class PluginTests(unittest.TestCase):
                 runtime_profile_getter=lambda: "swe",
             )
         )
-        self.assertEqual(result["status"], "rejected")
-        self.assertIn("session", result["error"])
+        self.assertEqual(
+            result,
+            {
+                "status": "rejected",
+                "message": "Не удалось безопасно обработать запрос.",
+            },
+        )
         fake_board.get_or_create_task.assert_not_called()
 
     def test_handler_rejects_contextual_profile_conflicting_with_runtime(self):
@@ -548,8 +874,13 @@ class PluginTests(unittest.TestCase):
                 runtime_profile_getter=lambda: "swe",
             )
         )
-        self.assertEqual(result["status"], "rejected")
-        self.assertIn("profile", result["error"])
+        self.assertEqual(
+            result,
+            {
+                "status": "rejected",
+                "message": "Не удалось безопасно обработать запрос.",
+            },
+        )
         fake_board.get_or_create_task.assert_not_called()
 
     def test_handler_rejects_contextual_swe_without_runtime_binding(self):
@@ -572,8 +903,13 @@ class PluginTests(unittest.TestCase):
                 runtime_profile_getter=lambda: "",
             )
         )
-        self.assertEqual(result["status"], "rejected")
-        self.assertIn("runtime profile", result["error"])
+        self.assertEqual(
+            result,
+            {
+                "status": "rejected",
+                "message": "Не удалось безопасно обработать запрос.",
+            },
+        )
         fake_board.get_or_create_task.assert_not_called()
 
 

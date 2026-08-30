@@ -251,13 +251,13 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(validated["target"]["identifier"], "SIS-59")
         self.assertEqual(validated["operation"], "read_issue")
 
-    def test_rejects_v1_command_before_linear_access(self):
-        legacy = command()
-        legacy["schema_version"] = "linear-command.v1"
+    def test_rejects_noncurrent_command_schema_before_linear_access(self):
+        unsupported = command()
+        unsupported["schema_version"] = "linear-command.unsupported"
         client = mock.Mock()
 
         with self.assertRaisesRegex(lane.ContractError, "linear-command.v2"):
-            lane.execute_command(client, legacy, mode="plan")
+            lane.execute_command(client, unsupported, mode="plan")
 
         client.assert_not_called()
         self.assertEqual(client.method_calls, [])
@@ -362,15 +362,13 @@ class WorkflowContractTests(unittest.TestCase):
         ).read_text()
         self.assertIn("linear-command.v2", workflow)
         self.assertIn("linear-result.v2", workflow)
-        self.assertNotIn("linear-command.v1", workflow)
-        self.assertNotIn("linear-result.v1", workflow)
         self.assertIn('pattern: "^[a-z0-9][a-z0-9-]{0,62}$"', workflow)
         self.assertIn("commands/linear/${{ inputs.command }}.json", workflow)
         self.assertIn("--mode plan", workflow)
         self.assertNotIn("inputs.mode", workflow)
         self.assertNotIn("--mode apply", workflow)
 
-    def test_protocol_docs_and_routing_skills_are_v2_only(self):
+    def test_active_protocol_artifacts_contain_only_current_contract(self):
         root = Path(__file__).parents[1]
         paths = [
             root / "README.md",
@@ -378,13 +376,25 @@ class WorkflowContractTests(unittest.TestCase):
             root / "docs" / "universal-linear-routing-e2e.md",
             root / "skills" / "linear-source-request-routing" / "SKILL.md",
             root / "skills" / "project-manager-linear-worker" / "SKILL.md",
+            root / "plugins" / "linear_source_route" / "__init__.py",
+            root / "plugins" / "linear_source_route" / "route.py",
+            root / "plugins" / "project_manager_linear" / "__init__.py",
         ]
+        forbidden = (
+            f"linear-command.v{1}",
+            f"linear-kanban-task.v{1}",
+            f"linear-result.v{1}",
+            f"linear:v{1}:",
+        )
+        contents = []
         for path in paths:
             with self.subTest(path=path.name):
                 content = path.read_text()
-                self.assertNotIn("linear-command.v1", content)
-                self.assertNotIn("linear-kanban-task.v1", content)
-                self.assertNotIn("linear-result.v1", content)
+                contents.append(content)
+                for token in forbidden:
+                    self.assertNotIn(token, content)
+        self.assertTrue(any("linear-command.v2" in content for content in contents))
+        self.assertTrue(any("linear-result.v2" in content for content in contents))
 
     def test_command_loader_rejects_paths_outside_allowlisted_root(self):
         with tempfile.TemporaryDirectory() as tmp:

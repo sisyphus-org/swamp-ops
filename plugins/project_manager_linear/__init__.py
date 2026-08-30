@@ -9,6 +9,10 @@ from typing import Any, Callable
 
 
 TASK_ID = re.compile(r"^t_[a-f0-9]{8,}$")
+SUMMARY_LINEAR_URL = re.compile(
+    r"^https://linear\.app/[A-Za-z0-9_-]+/issue/(SIS-[1-9][0-9]*)/"
+    r"[A-Za-z0-9][A-Za-z0-9_-]*$"
+)
 CREDENTIAL_PATTERNS = (
     re.compile(r"Authorization:\s*(?:Bearer|Basic)\s+\S+", re.IGNORECASE),
     re.compile(r"\b(?:ghp_|github_pat_)[A-Za-z0-9_]{16,}\b"),
@@ -110,20 +114,19 @@ def _command_from_task(task: Any) -> dict[str, Any]:
         "worker_contract",
     }:
         raise RuntimeError("current Kanban task envelope is invalid")
-    if envelope.get("schema_version") == "linear-kanban-task.v1":
+    if envelope.get("schema_version") != "linear-kanban-task.v2":
         raise ProtocolVersionError(
-            "linear-kanban-task.v1 is rejected; expected linear-kanban-task.v2"
+            "unsupported task schema; expected linear-kanban-task.v2"
         )
     if (
-        envelope.get("schema_version") != "linear-kanban-task.v2"
-        or envelope.get("worker_contract") != EXPECTED_WORKER_CONTRACT
+        envelope.get("worker_contract") != EXPECTED_WORKER_CONTRACT
         or not isinstance(envelope.get("command"), dict)
     ):
         raise RuntimeError("current Kanban task envelope is invalid")
     command = envelope["command"]
-    if command.get("schema_version") == "linear-command.v1":
+    if command.get("schema_version") != "linear-command.v2":
         raise ProtocolVersionError(
-            "linear-command.v1 is rejected; expected linear-command.v2"
+            "unsupported command schema; expected linear-command.v2"
         )
     return command
 
@@ -145,7 +148,7 @@ def execute_pm_command(
     )
     if not isinstance(plan, dict) or plan.get("schema_version") != "linear-result.v2":
         raise ProtocolVersionError(
-            "Linear plan did not return linear-result.v2; legacy results are rejected"
+            "Linear plan returned an unsupported schema; expected linear-result.v2"
         )
     result = lane.execute_command(
         client,
@@ -158,9 +161,9 @@ def execute_pm_command(
         or result.get("schema_version") != "linear-result.v2"
         or result.get("verified") is not True
     ):
-        if isinstance(result, dict) and result.get("schema_version") == "linear-result.v1":
+        if isinstance(result, dict) and result.get("schema_version") != "linear-result.v2":
             raise ProtocolVersionError(
-                "Linear apply returned rejected linear-result.v1; expected linear-result.v2"
+                "Linear apply returned an unsupported schema; expected linear-result.v2"
             )
         raise RuntimeError("Linear apply did not return a verified linear-result.v2")
     return {"plan": plan, "result": result}
@@ -169,20 +172,27 @@ def execute_pm_command(
 def human_summary(result: dict[str, Any]) -> str:
     """Render the concise source-agent handoff without internal task IDs."""
     target = result.get("target") if isinstance(result, dict) else None
-    url = target.get("url") if isinstance(target, dict) else ""
+    identifier = target.get("identifier") if isinstance(target, dict) else ""
+    candidate_url = target.get("url") if isinstance(target, dict) else ""
+    match = SUMMARY_LINEAR_URL.fullmatch(candidate_url) if isinstance(candidate_url, str) else None
+    url = (
+        candidate_url
+        if match is not None and isinstance(identifier, str) and match.group(1) == identifier
+        else ""
+    )
     operation = result.get("operation")
     if operation == "read_issue":
-        lead = "Задача Linear прочитана. Результат verified."
+        lead = "Задача Linear прочитана."
     elif result.get("result") == "no_op" or result.get("no_op") is True:
-        lead = "Запрос уже выполнен; повторная мутация не потребовалась. Изменение verified."
+        lead = "Запрос уже выполнен; повторных изменений не потребовалось."
     elif operation == "create_issue":
-        lead = "Задача Linear создана и прочитана обратно. Изменение verified."
+        lead = "Задача Linear создана."
     elif operation == "converge_hierarchy":
-        lead = "Иерархия Linear создана или уже сходилась; точное чтение обратно verified."
+        lead = "Иерархия Linear готова."
     elif operation == "change_state":
-        lead = "Статус Linear изменён и прочитан обратно. Изменение verified."
+        lead = "Статус Linear изменён."
     else:
-        lead = "Комментарий добавлен и прочитан обратно. Изменение verified."
+        lead = "Комментарий добавлен."
     return f"{lead}\n{url}" if url else lead
 
 
