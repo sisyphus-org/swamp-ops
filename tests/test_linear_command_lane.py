@@ -668,6 +668,80 @@ class ExecutionTests(unittest.TestCase):
                 updates,
             )
 
+    def test_hierarchy_accepts_linear_canonical_bare_url_description_readback(self):
+        class CanonicalizingClient(FakeHierarchyClient):
+            def update_project_issue(self, issue_id, *, description=None, state_id=None):
+                self.calls.append(("update_project_issue", issue_id, description, state_id))
+                current = next(item for item in self.issues if item["id"] == issue_id)
+                if description is not None:
+                    current["description"] = f"[{description}](<{description}>)"
+                if state_id is not None:
+                    current["state"] = {
+                        "id": state_id,
+                        "name": state_id.removeprefix("state-"),
+                    }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = CanonicalizingClient()
+            raw = hierarchy_command()
+            raw["change"]["issue"]["state"] = "Todo"
+            lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "create.json",
+            )
+            client.issues[0]["description"] = "stale"
+
+            reconciled = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "reconcile.json",
+            )
+            self.assertEqual(reconciled["result"], "applied")
+            self.assertEqual(
+                reconciled["after"]["issue"]["description"],
+                "[https://solomia.in.ua](<https://solomia.in.ua>)",
+            )
+
+            updates = [call for call in client.calls if call[0] == "update_project_issue"]
+            replay = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "replay.json",
+            )
+            self.assertEqual(replay["result"], "no_op")
+            self.assertEqual(
+                [call for call in client.calls if call[0] == "update_project_issue"],
+                updates,
+            )
+
+    def test_hierarchy_url_canonicalization_is_exact_and_narrow(self):
+        hierarchy = lane._load_hierarchy()
+        desired = "https://solomia.in.ua"
+        self.assertTrue(hierarchy._description_matches(desired, desired))
+        self.assertTrue(
+            hierarchy._description_matches(
+                desired, "[https://solomia.in.ua](<https://solomia.in.ua>)"
+            )
+        )
+        for live in (
+            "[https://solomia.in.ua](https://solomia.in.ua)",
+            "[Solomia](<https://solomia.in.ua>)",
+            "[https://solomia.in.ua/](<https://solomia.in.ua/>)",
+            "https://solomia.in.ua/",
+        ):
+            with self.subTest(live=live):
+                self.assertFalse(hierarchy._description_matches(desired, live))
+        self.assertFalse(
+            hierarchy._description_matches(
+                "Visit https://solomia.in.ua",
+                "[Visit https://solomia.in.ua](<Visit https://solomia.in.ua>)",
+            )
+        )
+
     def test_hierarchy_omitted_fields_are_not_sent_or_compared(self):
         class CaptureClient(FakeHierarchyClient):
             def __init__(self):
