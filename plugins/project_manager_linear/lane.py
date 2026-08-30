@@ -522,7 +522,22 @@ def execute_command(
             )
             return snapshot
 
-        existing = client.get_issue(issue_id)
+        children = client.list_child_issues(parent_identifier)
+        existing_child = next(
+            (item for item in children if item.get("id") == issue_id),
+            None,
+        )
+        existing = (
+            {
+                **existing_child,
+                "parent": {
+                    "id": parent["id"],
+                    "identifier": parent_identifier,
+                },
+            }
+            if existing_child is not None
+            else None
+        )
         if existing is not None:
             try:
                 snapshot = verified_create_snapshot(existing)
