@@ -621,7 +621,7 @@ class ExecutionTests(unittest.TestCase):
             )
             self.assertEqual(replay["result"], "no_op")
 
-    def test_hierarchy_recovers_after_mid_composite_crash_without_journal(self):
+    def test_hierarchy_state_request_recovers_after_mid_composite_crash_without_journal(self):
         class CrashOnceClient(FakeHierarchyClient):
             def __init__(self):
                 super().__init__()
@@ -636,15 +636,14 @@ class ExecutionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             journal = Path(tmp) / "journal.json"
             client = CrashOnceClient()
+            raw = hierarchy_command()
+            raw["change"]["issue"]["state"] = "Todo"
             with self.assertRaisesRegex(RuntimeError, "simulated crash"):
-                lane.execute_command(
-                    client, hierarchy_command(), mode="apply", journal_path=journal
-                )
+                lane.execute_command(client, raw, mode="apply", journal_path=journal)
             self.assertFalse(journal.exists())
-            recovered = lane.execute_command(
-                client, hierarchy_command(), mode="apply", journal_path=journal
-            )
+            recovered = lane.execute_command(client, raw, mode="apply", journal_path=journal)
             self.assertEqual(recovered["result"], "applied")
+            self.assertEqual(recovered["after"]["issue"]["state"], "Todo")
             self.assertEqual(len(client.projects), 1)
             self.assertEqual(len(client.milestones), 1)
             self.assertEqual(len(client.issues), 1)
