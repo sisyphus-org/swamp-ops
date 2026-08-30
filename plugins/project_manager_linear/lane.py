@@ -523,8 +523,15 @@ def execute_command(
             return snapshot
 
         children = client.list_child_issues(parent_identifier)
+        for child in children:
+            if (
+                not isinstance(child, dict)
+                or not isinstance(child.get("id"), str)
+                or not child["id"].strip()
+            ):
+                raise ContractError("Linear child payload contains malformed child node")
         existing_child = next(
-            (item for item in children if item.get("id") == issue_id),
+            (item for item in children if item["id"] == issue_id),
             None,
         )
         existing = (
