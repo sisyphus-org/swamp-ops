@@ -3,9 +3,10 @@ name: chunked-qwen-stt
 description: >-
   Read-only rollout plan and bounded real-audio smoke test for local chunked
   Qwen3-ASR. Plan inspects the fixed Telegram-enabled Hermes profile roster and
-  reports exact future deployment/config actions. Smoke resolves only a bounded
-  sample slug under ignored Swamp runtime data, calls localhost Qwen STT, and
-  returns hashes and metrics without transcript content.
+  reports exact future deployment/config actions, including the numeric prompt.
+  Smoke resolves only bounded fixed sample slugs under ignored Swamp runtime
+  data, calls localhost Qwen STT, and returns hashes and metrics without
+  transcript content. Numeric smoke verifies digit formatting.
 tags:
   domain: hermes-platform
   safety: read-only-plan-and-bounded-smoke
@@ -13,7 +14,7 @@ tags:
 inputs:
   mode:
     type: string
-    enum: [plan, smoke]
+    enum: [plan, smoke, numeric-smoke]
     default: plan
     description: Read-only configuration plan or bounded local STT smoke test.
 jobs:
@@ -27,7 +28,7 @@ jobs:
           modelIdOrName: chunked-qwen-stt
           methodName: execute
           inputs:
-            run: python3 scripts/chunked_stt_ops.py --mode '${{ inputs.mode }}' --sample books-7m
+            run: python3 scripts/chunked_stt_ops.py --mode '${{ inputs.mode }}' --sample books-7m --numeric-sample sis69-numbers
             workingDir: .
             timeout: 900000
             ignoreExitCode: false
@@ -36,4 +37,4 @@ jobs:
         allowFailure: false
     dependsOn: []
     weight: 1
-version: 1
+version: 2

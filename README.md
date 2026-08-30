@@ -85,7 +85,7 @@ LINEAR_TOKEN=... swamp workflow validate linear-command-lane-plan
 LINEAR_TOKEN=... swamp workflow run linear-command-lane-plan --input command=<slug>
 ```
 
-MVP operations are exact read, safe workflow-state change, one bounded comment, and bounded issue creation in the `SIS` team under an exact parent. Bulk/fuzzy targeting, `Done`, `Canceled`, `Duplicate`, archive/delete and unrestricted structural writes fail closed. Apply uses external marker-based replay protection, a hash-only idempotency journal and exact read-back verification. Contract and evidence: [`docs/linear-command-lane.md`](docs/linear-command-lane.md).
+MVP operations are exact read, safe workflow-state change, one bounded comment, and bounded issue creation in the `SIS` team under an exact parent. Bulk/fuzzy targeting, `Done`, `Canceled`, `Duplicate`, archive/delete and unrestricted structural writes fail closed. Comment and issue bodies remain exactly user-authored: replay protection uses deterministic caller-supplied Linear entity IDs, a hash-only idempotency journal and exact read-back verification rather than visible markers. Contract and evidence: [`docs/linear-command-lane.md`](docs/linear-command-lane.md).
 
 ## `linear-source-route` + `project-manager-linear`
 

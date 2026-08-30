@@ -216,7 +216,68 @@ class TranscriptMergeTests(unittest.TestCase):
         )
 
 
+class RussianNumberNormalizationTests(unittest.TestCase):
+    def test_paragraph_boundaries_prevent_cross_chunk_number_merging(self):
+        self.assertEqual(
+            chunked.normalize_russian_numbers("стоит двадцать\n\nпять человек"),
+            "стоит 20\n\n5 человек",
+        )
+
+    def test_contextual_rewrites_never_cross_paragraph_boundaries(self):
+        cases = (
+            ("три целых\n\nпять десятых", "3 целых\n\n5 десятых"),
+            ("минус\n\nсемь", "минус\n\n7"),
+            ("двенадцать\n\nпроцентов", "12\n\nпроцентов"),
+            (
+                "четырнадцать часов\n\nтридцать минут",
+                "14 часов\n\n30 минут",
+            ),
+            ("версия три\n\nточка два", "версия 3\n\nточка 2"),
+        )
+        for source, expected in cases:
+            with self.subTest(source=source):
+                self.assertEqual(chunked.normalize_russian_numbers(source), expected)
+
+    def test_spoken_numbers_are_rendered_in_contextual_digit_formats(self):
+        source = (
+            "В заказе двадцать пять деталей. Температура минус семь градусов. "
+            "Расход три целых пять десятых литра. Скидка двенадцать процентов. "
+            "Встреча двадцать восьмого августа две тысячи двадцать шестого года "
+            "в четырнадцать часов тридцать минут. Версия три точка два. "
+            "Сумма одна тысяча двести рублей."
+        )
+        self.assertEqual(
+            chunked.normalize_russian_numbers(source),
+            "В заказе 25 деталей. Температура -7 градусов. "
+            "Расход 3,5 литра. Скидка 12%. "
+            "Встреча 28 августа 2026 года в 14:30. Версия 3.2. "
+            "Сумма 1200 рублей.",
+        )
+
+    def test_non_numeric_text_is_preserved(self):
+        source = "Обычная фраза без чисел и без специальных преобразований."
+        self.assertEqual(chunked.normalize_russian_numbers(source), source)
+
+
 class RuntimeTests(unittest.TestCase):
+    def test_normalization_failure_writes_raw_transcript(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "transcript.txt"
+            with mock.patch.object(
+                chunked,
+                "normalize_russian_numbers",
+                side_effect=RuntimeError("vendor unavailable"),
+            ):
+                result = chunked.run_to_output(
+                    Path("short.ogg"),
+                    output,
+                    duration_seconds=10.0,
+                    transcribe=lambda path: "двадцать пять деталей",
+                    render_chunk=lambda *args: None,
+                )
+            self.assertEqual(result.text, "двадцать пять деталей")
+            self.assertEqual(output.read_text(), "двадцать пять деталей")
+
     def test_short_audio_calls_qwen_once_without_rendering_chunks(self):
         rendered = []
         transcribed = []

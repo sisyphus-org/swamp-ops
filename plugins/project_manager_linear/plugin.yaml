@@ -1,5 +1,5 @@
 name: project-manager-linear
-version: 0.2.0
+version: 0.2.1
 description: >-
   Deterministic Project Manager Linear plan, apply, read-back, and Kanban handoff.
 author: sisyphus-org

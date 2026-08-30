@@ -85,7 +85,7 @@ class FakeClient:
                 (
                     json.loads(json.dumps(item))
                     for item in self.children
-                    if item["identifier"] == identifier
+                    if item["identifier"] == identifier or item["id"] == identifier
                 ),
                 None,
             )
@@ -105,18 +105,22 @@ class FakeClient:
     def list_comments(self, issue_id):
         return list(self.comments)
 
-    def create_comment(self, issue_id, body):
-        self.writes.append(("comment", issue_id, body))
-        self.comments.append({"id": f"comment-{len(self.comments) + 1}", "body": body})
+    def get_comment(self, comment_id):
+        return next((item for item in self.comments if item["id"] == comment_id), None)
+
+    def create_comment(self, issue_id, comment_id, body):
+        self.writes.append(("comment", issue_id, comment_id, body))
+        self.comments.append({"id": comment_id, "issueId": issue_id, "body": body})
 
     def list_child_issues(self, parent_id):
         self.assert_parent_id = parent_id
         return json.loads(json.dumps(self.children))
 
-    def create_issue(self, *, team_id, state_id, parent_id, title, description, priority):
+    def create_issue(self, *, issue_id, team_id, state_id, parent_id, title, description, priority):
         self.writes.append(
             (
                 "create_issue",
+                issue_id,
                 team_id,
                 state_id,
                 parent_id,
@@ -128,12 +132,13 @@ class FakeClient:
         created = issue(state_id.removeprefix("state-"))
         created.update(
             {
-                "id": "created-uuid",
+                "id": issue_id,
                 "identifier": "SIS-99",
                 "title": title,
                 "url": "https://linear.app/example/issue/SIS-99",
                 "description": description,
                 "priority": priority,
+                "parent": {"id": parent_id, "identifier": "SIS-56"},
             }
         )
         self.children.append(created)
@@ -280,11 +285,14 @@ class ClientTests(unittest.TestCase):
                 return {"team": {"states": {"nodes": [{"id": "s", "name": "Todo", "type": "unstarted"}], "pageInfo": {"hasNextPage": False}}}}
             if query == lane.COMMENTS_QUERY:
                 return {"issue": {"comments": {"nodes": [{"id": "c", "body": "body"}], "pageInfo": {"hasNextPage": False}}}}
+            if query == lane.COMMENT_QUERY:
+                return {"comment": {"id": variables["id"], "issueId": "issue-uuid", "body": "body"}}
             if query == lane.PARENT_CHILDREN_QUERY:
                 return {"issue": {"children": {"nodes": [{**issue(), "description": "marker"}], "pageInfo": {"hasNextPage": False}}}}
-            if query in {lane.ISSUE_UPDATE, lane.COMMENT_CREATE}:
-                name = "issueUpdate" if query == lane.ISSUE_UPDATE else "commentCreate"
-                return {name: {"success": True}}
+            if query == lane.ISSUE_UPDATE:
+                return {"issueUpdate": {"success": True}}
+            if query == lane.COMMENT_CREATE:
+                return {"commentCreate": {"success": True, "comment": variables["input"]}}
             if query == lane.ISSUE_CREATE:
                 return {"issueCreate": {"success": True, "issue": {"id": "new", "identifier": "SIS-99"}}}
             raise AssertionError("unexpected query")
@@ -294,10 +302,12 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(client.get_issue("SIS-59")["identifier"], "SIS-59")
         self.assertEqual(client.list_states("team-uuid")[0]["name"], "Todo")
         self.assertEqual(client.list_comments("issue-uuid")[0]["id"], "c")
+        self.assertEqual(client.get_comment("comment-uuid")["id"], "comment-uuid")
         client.update_issue_state("issue-uuid", "state-uuid")
-        client.create_comment("issue-uuid", "body")
+        client.create_comment("issue-uuid", "comment-uuid", "body")
         self.assertEqual(client.list_child_issues("SIS-56")[0]["description"], "marker")
         client.create_issue(
+            issue_id="created-uuid",
             team_id="team-uuid",
             state_id="state-uuid",
             parent_id="parent-uuid",
@@ -311,12 +321,13 @@ class ClientTests(unittest.TestCase):
         )
         self.assertEqual(
             client.calls[-3][1],
-            {"input": {"issueId": "issue-uuid", "body": "body"}},
+            {"input": {"id": "comment-uuid", "issueId": "issue-uuid", "body": "body"}},
         )
         self.assertEqual(
             client.calls[-1][1],
             {
                 "input": {
+                    "id": "created-uuid",
                     "teamId": "team-uuid",
                     "stateId": "state-uuid",
                     "parentId": "parent-uuid",
@@ -431,7 +442,7 @@ class ExecutionTests(unittest.TestCase):
                     journal_path=Path(tmp) / "journal.json",
                 )
 
-    def test_comment_plan_apply_and_marker_replay_are_idempotent(self):
+    def test_comment_plan_apply_and_invisible_id_replay_are_idempotent(self):
         with tempfile.TemporaryDirectory() as tmp:
             journal = Path(tmp) / "journal.json"
             client = FakeClient()
@@ -452,17 +463,19 @@ class ExecutionTests(unittest.TestCase):
             )
             self.assertEqual(applied["result"], "applied")
             self.assertTrue(applied["verified"])
-            self.assertIn("<!-- linear-command:v1", client.writes[0][2])
+            self.assertEqual(client.writes[0][3], raw["change"]["body"])
+            self.assertNotIn("<!-- linear-command:v1", client.writes[0][3])
+            self.assertEqual(client.writes[0][2], lane.command_fingerprint(raw)[2])
             replay = lane.execute_command(
                 client, raw, mode="apply", journal_path=journal
             )
             self.assertEqual(replay["result"], "no_op")
             self.assertEqual(len(client.writes), 1)
 
-    def test_comment_apply_fails_when_marker_is_not_read_back(self):
+    def test_comment_apply_fails_when_deterministic_id_is_not_read_back(self):
         class MissingCommentClient(FakeClient):
-            def create_comment(self, issue_id, body):
-                self.writes.append(("comment", issue_id, body))
+            def create_comment(self, issue_id, comment_id, body):
+                self.writes.append(("comment", issue_id, comment_id, body))
 
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaisesRegex(lane.ContractError, "comment read-back verification"):
@@ -473,20 +486,21 @@ class ExecutionTests(unittest.TestCase):
                     journal_path=Path(tmp) / "journal.json",
                 )
 
-    def test_comment_marker_rejects_same_key_for_different_request(self):
+    def test_comment_id_rejects_same_key_for_different_request(self):
         client = FakeClient()
         first = command(
             "add_comment",
             {"body": "first"},
             key="linear:SIS-59:comment:conflict",
         )
-        marker = lane.command_fingerprint(first)[2]
-        client.comments = [{"id": "existing", "body": f"first\n\n{marker}"}]
+        comment_id = lane.command_fingerprint(first)[2]
+        client.comments = [{"id": comment_id, "issueId": "issue-uuid", "body": "first"}]
         second = command(
             "add_comment",
             {"body": "different"},
             key="linear:SIS-59:comment:conflict",
         )
+        self.assertEqual(comment_id, lane.command_fingerprint(second)[2])
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaisesRegex(lane.ContractError, "conflicts"):
                 lane.execute_command(
@@ -496,7 +510,23 @@ class ExecutionTests(unittest.TestCase):
                     journal_path=Path(tmp) / "journal.json",
                 )
 
-    def test_concurrent_comment_apply_creates_one_marked_comment(self):
+    def test_comment_replay_survives_lost_local_journal_without_public_marker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Path(tmp) / "journal.json"
+            client = FakeClient()
+            raw = command(
+                "add_comment",
+                {"body": "clean crash-safe comment"},
+                key="linear:SIS-59:comment:crash-window",
+            )
+            lane.execute_command(client, raw, mode="apply", journal_path=journal)
+            journal.unlink()
+            replay = lane.execute_command(client, raw, mode="apply", journal_path=journal)
+            self.assertEqual(replay["result"], "no_op")
+            self.assertEqual(len(client.writes), 1)
+            self.assertEqual(client.comments[0]["body"], "clean crash-safe comment")
+
+    def test_concurrent_comment_apply_creates_one_clean_comment(self):
         class SlowClient(FakeClient):
             def list_comments(self, issue_id):
                 snapshot = super().list_comments(issue_id)
@@ -554,6 +584,24 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(replay["result"], "no_op")
             self.assertEqual(replay["target"]["identifier"], "SIS-99")
             self.assertEqual(len(client.writes), 1)
+            self.assertEqual(client.children[0]["description"], raw["change"]["description"])
+            self.assertNotIn("<!-- linear-command", client.children[0]["description"])
+
+            journal.unlink()
+            crash_replay = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+            self.assertEqual(crash_replay["result"], "no_op")
+            self.assertEqual(len(client.writes), 1)
+
+            conflicting = create_command()
+            conflicting["idempotency_key"] = raw["idempotency_key"]
+            conflicting["change"]["title"] = "Different title"
+            journal.unlink()
+            with self.assertRaisesRegex(lane.ContractError, "idempotency key conflicts"):
+                lane.execute_command(
+                    client, conflicting, mode="apply", journal_path=journal
+                )
 
     def test_create_issue_rejects_tampered_bounded_read_back_before_journal(self):
         for field in ("description", "priority"):
@@ -562,8 +610,7 @@ class ExecutionTests(unittest.TestCase):
                     def create_issue(self, test_field=field, **kwargs):
                         super().create_issue(**kwargs)
                         if test_field == "description":
-                            marker = kwargs["description"].split("\n\n")[-1]
-                            self.children[-1]["description"] = f"tampered\n\n{marker}"
+                            self.children[-1]["description"] = "tampered"
                         else:
                             self.children[-1]["priority"] = 4
 
@@ -587,12 +634,11 @@ class ExecutionTests(unittest.TestCase):
                 raw = create_command()
                 lane.execute_command(client, raw, mode="apply", journal_path=journal)
                 if field == "description":
-                    marker = client.children[0]["description"].split("\n\n")[-1]
-                    client.children[0]["description"] = f"tampered\n\n{marker}"
+                    client.children[0]["description"] = "tampered"
                 else:
                     client.children[0]["priority"] = 4
                 with self.assertRaisesRegex(
-                    lane.ContractError, "bounded field read-back verification"
+                    lane.ContractError, "idempotency key conflicts"
                 ):
                     lane.execute_command(client, raw, mode="apply", journal_path=journal)
                 self.assertEqual(len(client.writes), 1)

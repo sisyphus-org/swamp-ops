@@ -41,10 +41,10 @@ Supported operations:
 
 - `read_issue`;
 - `change_state` to the safe non-terminal allowlist;
-- `add_comment` with marker-backed replay protection;
+- `add_comment` with deterministic-ID replay protection and a clean user-authored body;
 - `create_issue` in the `SIS` team under one exact `SIS-N` parent, with bounded title/description, safe state, and High/Medium/Low priority.
 
-Issue creation stores an internal idempotency marker in the description and searches only the exact parent's bounded child set before writing. A literal replay returns the existing verified issue; a key collision or ambiguous marker fails closed. All writes require exact read-back before `linear-result.v1.verified=true`.
+Comments and created issues use deterministic caller-supplied Linear UUIDs derived from the hashed idempotency key. Their public body/description stays exactly user-authored. A literal replay reads that UUID back and returns the existing verified entity; the same key with different content or target fails closed. All writes require exact ID, target, body and bounded-field read-back before `linear-result.v1.verified=true`.
 
 ## Bootstrap invariant
 
