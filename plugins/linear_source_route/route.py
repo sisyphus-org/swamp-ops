@@ -145,8 +145,8 @@ def parse_linear_request(
                 raise RouteError("priority is not in the bounded allowlist")
             target = {"type": "team", "identifier": "SIS"}
             change = {
-                "title": title.strip(),
-                "description": description.strip(),
+                "title": title,
+                "description": description,
                 "parent_identifier": parent,
                 "state": state,
                 "priority": priority,

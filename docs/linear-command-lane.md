@@ -26,8 +26,8 @@ The validator rejects unknown fields, arbitrary GraphQL or MCP method names, URL
 
 - `read_issue`: `change` must be empty.
 - `change_state`: `change` must contain only `state`; exact allowlist is `Backlog`, `Todo`, `Research`, `In Progress`, `In Review`.
-- `add_comment`: `change` must contain only `body`, 1–4000 characters. The internal idempotency marker is reserved and cannot be supplied by the caller.
-- `create_issue`: `target` is exactly `{"type":"team","identifier":"SIS"}` and `change` contains bounded `title`, `description`, exact `parent_identifier`, safe `state`, and `High|Medium|Low` priority. A create marker is stored in the description and resolved only among the exact parent's first 100 children for replay/read-back.
+- `add_comment`: `change` must contain only `body`, 1–4000 characters. The public comment body remains exactly this user-authored text; legacy internal marker text is reserved and cannot be supplied by the caller.
+- `create_issue`: `target` is exactly `{"type":"team","identifier":"SIS"}` and `change` contains bounded `title`, `description`, exact `parent_identifier`, safe `state`, and `High|Medium|Low` priority. The public issue description remains exactly user-authored.
 
 `Done`, `Canceled`, `Duplicate`, archive, delete, bulk and unrestricted structure changes are unavailable and fail closed. They remain owner-controlled instead of being enabled by an untrusted command field.
 
@@ -65,10 +65,10 @@ The normal journal is `$HERMES_HOME/linear-command-lane/journal.json`. It stores
 
 - A mutation apply requires the hash-only journal. A journal-wide advisory file lock serializes the complete local read/check/mutate/read-back/journal sequence across processes, preventing concurrent same-key comments and lost journal updates.
 - State changes read current state first. Already-converged state is a verified no-op, so replay after a crash cannot duplicate the mutation.
-- Comments receive an internal marker containing hashes of the idempotency key and semantic request. Exact replay is a verified no-op; the same key with a different request fails closed.
-- Issue creation writes the same hash pair as a reserved description marker, checks only the exact parent's bounded child set before writing, and requires exactly one marked child on read-back. Replay after a post-create crash converges without a duplicate issue.
+- Comments use a deterministic Linear UUID derived from the hashed idempotency key. Exact replay reads that UUID and exact issue/body back as a verified no-op; the same key with a different request fails closed without exposing metadata in the comment.
+- Issue creation uses a separate deterministic Linear UUID derived from the same hashed key, then verifies exact parent, title, description, state and priority. Replay after a post-create crash converges without a duplicate issue or visible metadata in the description.
 - A local hash-only journal detects cross-operation or changed-request reuse after a successful verified apply.
-- Apply always reads back the exact `SIS-N` target or marker. Missing/mismatched read-back is an error, never success.
+- Apply always reads back the exact `SIS-N` target or deterministic entity ID. Missing/mismatched read-back is an error, never success.
 
 ## Live SIS-59 evidence
 
@@ -78,8 +78,8 @@ Verified 2026-08-28 against the real SIS-59 issue:
 - the Swamp plan workflow completed successfully;
 - an apply requesting current `In Progress` returned verified `no_op` with no state write;
 - comment plan recorded before/after and body hash without exposing the body in the plan;
-- first comment apply returned `applied`, exact read-back found the marker;
-- replay returned `no_op`; Linear read-back showed exactly one marked comment;
+- first comment apply returned `applied` and exact-ID/body read-back passed;
+- replay returned `no_op`; Linear read-back showed exactly one clean user-authored comment;
 - a real state plan recorded `In Progress → In Review`, apply returned `applied` with exact read-back, and immediate replay returned verified `no_op`.
 
 The final closure to `Done` remains outside the lane and owner/task-workflow controlled.

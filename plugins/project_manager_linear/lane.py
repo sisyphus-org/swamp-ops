@@ -45,6 +45,7 @@ query LaneIssue($id: String!) {
     id identifier title url description priority
     state { id name type }
     team { id key }
+    parent { id identifier }
   }
 }
 """
@@ -62,6 +63,11 @@ query LaneComments($issueId: String!) {
   }
 }
 """
+COMMENT_QUERY = """
+query LaneComment($id: String!) {
+  comment(id: $id) { id body issueId }
+}
+"""
 ISSUE_UPDATE = """
 mutation LaneState($id: String!, $input: IssueUpdateInput!) {
   issueUpdate(id: $id, input: $input) { success }
@@ -69,7 +75,7 @@ mutation LaneState($id: String!, $input: IssueUpdateInput!) {
 """
 COMMENT_CREATE = """
 mutation LaneComment($input: CommentCreateInput!) {
-  commentCreate(input: $input) { success }
+  commentCreate(input: $input) { success comment { id body issueId } }
 }
 """
 PARENT_CHILDREN_QUERY = """
@@ -158,11 +164,15 @@ class LinearClient:
         return connection["nodes"]
 
     def list_comments(self, issue_id: str) -> list[dict[str, Any]]:
-        """Return comments needed for marker-based replay detection."""
+        """Return bounded comments for before/after count evidence."""
         connection = self.execute(COMMENTS_QUERY, {"issueId": issue_id})["issue"]["comments"]
         if connection["pageInfo"]["hasNextPage"]:
-            raise ContractError("issue exceeds the supported 100-comment idempotency limit")
+            raise ContractError("issue exceeds the supported 100-comment evidence limit")
         return connection["nodes"]
+
+    def get_comment(self, comment_id: str) -> dict[str, Any] | None:
+        """Read one deterministic comment ID for invisible replay detection."""
+        return self.execute(COMMENT_QUERY, {"id": comment_id}).get("comment")
 
     def update_issue_state(self, issue_id: str, state_id: str) -> None:
         """Apply only an issue stateId mutation."""
@@ -170,9 +180,12 @@ class LinearClient:
         if result.get("success") is not True:
             raise ContractError("Linear state mutation did not succeed")
 
-    def create_comment(self, issue_id: str, body: str) -> None:
-        """Create one comment with the internally generated replay marker."""
-        result = self.execute(COMMENT_CREATE, {"input": {"issueId": issue_id, "body": body}})["commentCreate"]
+    def create_comment(self, issue_id: str, comment_id: str, body: str) -> None:
+        """Create one clean comment at a deterministic caller-supplied ID."""
+        result = self.execute(
+            COMMENT_CREATE,
+            {"input": {"id": comment_id, "issueId": issue_id, "body": body}},
+        )["commentCreate"]
         if result.get("success") is not True:
             raise ContractError("Linear comment mutation did not succeed")
 
@@ -192,6 +205,7 @@ class LinearClient:
     def create_issue(
         self,
         *,
+        issue_id: str,
         team_id: str,
         state_id: str,
         parent_id: str,
@@ -201,6 +215,7 @@ class LinearClient:
     ) -> None:
         """Create one bounded SIS issue under an exact parent."""
         payload = {
+            "id": issue_id,
             "teamId": team_id,
             "stateId": state_id,
             "parentId": parent_id,
@@ -347,7 +362,7 @@ def result_base(command: dict[str, Any], issue: dict[str, Any], mode: str) -> di
 
 
 def command_fingerprint(command: dict[str, Any]) -> tuple[str, str, str]:
-    """Return key hash, semantic request hash, and durable comment marker."""
+    """Return key hash, request hash, and deterministic invisible comment ID."""
     semantic = {
         field: command[field]
         for field in ("source_profile", "operation", "target", "change", "policy")
@@ -356,8 +371,19 @@ def command_fingerprint(command: dict[str, Any]) -> tuple[str, str, str]:
     request_hash = hashlib.sha256(
         json.dumps(semantic, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
-    marker = f"<!-- linear-command:v1 key={key_hash} request={request_hash} -->"
-    return key_hash, request_hash, marker
+    comment_id = deterministic_uuid4("linear-command:comment:v1", key_hash)
+    return key_hash, request_hash, comment_id
+
+
+def deterministic_uuid4(domain: str, value: str) -> str:
+    """Derive a stable RFC 4122 UUIDv4-shaped identifier from hashed input."""
+    raw = bytearray(hashlib.sha256(f"{domain}:{value}".encode()).digest()[:16])
+    raw[6] = (raw[6] & 0x0F) | 0x40
+    raw[8] = (raw[8] & 0x3F) | 0x80
+    result = str(uuid.UUID(bytes=bytes(raw)))
+    if uuid.UUID(result).version != 4:
+        raise ContractError("deterministic identifier is not UUIDv4")
+    return result
 
 
 def load_journal(path: Path) -> dict[str, str]:
@@ -462,22 +488,27 @@ def execute_command(
         ]
         if len(states) != 1:
             raise ContractError(f"exact workflow state not found: {change['state']}")
-        key_hash, request_hash, _ = command_fingerprint(command)
-        marker = (
-            f"{RESERVED_CREATE_MARKER} key={key_hash} request={request_hash} -->"
-        )
-        key_marker = f"{RESERVED_CREATE_MARKER} key={key_hash} "
-        description = change["description"].strip()
-        marked_description = f"{description}\n\n{marker}" if description else marker
+        key_hash, _, _ = command_fingerprint(command)
+        issue_id = deterministic_uuid4("linear-command:issue:v1", key_hash)
+        description = change["description"]
 
         def verified_create_snapshot(issue: dict[str, Any]) -> dict[str, Any]:
-            """Validate every bounded create field and return a marker-free result."""
+            """Validate every bounded create field at the deterministic issue ID."""
             snapshot = issue_snapshot(issue)
+            issue_parent = issue.get("parent")
+            issue_team = issue.get("team")
             if (
-                snapshot["title"] != change["title"]
+                issue.get("id") != issue_id
+                or snapshot["title"] != change["title"]
                 or snapshot["state"] != change["state"]
-                or issue.get("description") != marked_description
+                or issue.get("description") != description
                 or issue.get("priority") != PRIORITIES[change["priority"]]
+                or not isinstance(issue_team, dict)
+                or issue_team.get("id") != team["id"]
+                or issue_team.get("key") != "SIS"
+                or not isinstance(issue_parent, dict)
+                or issue_parent.get("id") != parent["id"]
+                or issue_parent.get("identifier") != parent_identifier
             ):
                 raise ContractError(
                     "create_issue bounded field read-back verification failed"
@@ -491,20 +522,15 @@ def execute_command(
             )
             return snapshot
 
-        children = client.list_child_issues(parent_identifier)
-        same_key = [
-            item for item in children if key_marker in str(item.get("description") or "")
-        ]
-        exact = [
-            item for item in same_key if marker in str(item.get("description") or "")
-        ]
-        if same_key and not exact:
-            raise ContractError("create_issue idempotency key conflicts with another request")
-        if len(exact) > 1:
-            raise ContractError("create_issue replay marker resolved more than one issue")
-        if exact:
-            created = exact[0]
-            snapshot = verified_create_snapshot(created)
+        existing = client.get_issue(issue_id)
+        if existing is not None:
+            try:
+                snapshot = verified_create_snapshot(existing)
+            except ContractError as exc:
+                raise ContractError(
+                    "create_issue idempotency key conflicts with another request"
+                ) from exc
+            created = existing
             replay_base = result_base(command, created, mode)
             return finish(
                 {
@@ -545,22 +571,17 @@ def execute_command(
                 "verified": False,
             }
         client.create_issue(
+            issue_id=issue_id,
             team_id=team["id"],
             state_id=states[0]["id"],
             parent_id=parent["id"],
             title=change["title"],
-            description=marked_description,
+            description=description,
             priority=PRIORITIES[change["priority"]],
         )
-        verified_children = client.list_child_issues(parent_identifier)
-        verified_exact = [
-            item
-            for item in verified_children
-            if marker in str(item.get("description") or "")
-        ]
-        if len(verified_exact) != 1:
+        created = client.get_issue(issue_id)
+        if not isinstance(created, dict):
             raise ContractError("create_issue read-back verification failed")
-        created = verified_exact[0]
         created_snapshot = verified_create_snapshot(created)
         created_base = result_base(command, created, mode)
         return finish(
@@ -650,13 +671,11 @@ def execute_command(
             "verified": True,
         })
     if command["operation"] == "add_comment":
-        body = command["change"]["body"].strip()
+        body = command["change"]["body"]
         body_hash = hashlib.sha256(body.encode()).hexdigest()
-        key_hash, request_hash, marker = command_fingerprint(command)
+        key_hash, _, comment_id = command_fingerprint(command)
         comments = client.list_comments(issue["id"])
-        key_marker = f"<!-- linear-command:v1 key={key_hash} "
-        same_key = [item for item in comments if key_marker in item.get("body", "")]
-        exact = [item for item in same_key if marker in item.get("body", "")]
+        existing = client.get_comment(comment_id)
         before_with_comments = {**before, "comment_count": len(comments)}
         plan = [
             {
@@ -665,11 +684,13 @@ def execute_command(
                 "body_length": len(body),
             }
         ]
-        if same_key and not exact:
-            raise ContractError(
-                f"idempotency key conflicts with a different request: {request_hash}"
-            )
-        if exact:
+        if existing is not None and (
+            existing.get("id") != comment_id
+            or existing.get("issueId") != issue["id"]
+            or existing.get("body") != body
+        ):
+            raise ContractError("idempotency key conflicts with a different request")
+        if existing is not None:
             return finish({
                 **base,
                 "result": "no_op",
@@ -694,10 +715,16 @@ def execute_command(
                 "no_op": False,
                 "verified": False,
             }
-        client.create_comment(issue["id"], f"{body}\n\n{marker}")
-        verified_comments = client.list_comments(issue["id"])
-        if not any(marker in item.get("body", "") for item in verified_comments):
+        client.create_comment(issue["id"], comment_id, body)
+        verified_comment = client.get_comment(comment_id)
+        if (
+            not isinstance(verified_comment, dict)
+            or verified_comment.get("id") != comment_id
+            or verified_comment.get("issueId") != issue["id"]
+            or verified_comment.get("body") != body
+        ):
             raise ContractError("comment read-back verification failed")
+        verified_comments = client.list_comments(issue["id"])
         return finish({
             **base,
             "result": "applied",
