@@ -259,12 +259,22 @@ def preflight(client: Any, change: dict[str, Any], error_cls: type[Exception]) -
             or issue_milestone.get("id") != milestone["id"]
         ):
             _fail(error_cls, "issue deterministic id conflicts with live hierarchy")
-        _verify_optional(issue_spec, issue, error_cls, "issue")
-        if "state" in issue_spec:
-            issue_state = issue.get("state")
-            if not isinstance(issue_state, dict) or issue_state.get("name") != issue_spec["state"]:
-                _fail(error_cls, "issue supplied state conflicts with live state")
     return LiveHierarchy(sis, project, milestone, issue, state)
+
+
+def _issue_drift(change: dict[str, Any], live: LiveHierarchy) -> list[str]:
+    """Return managed issue fields that differ from the exact desired state."""
+    if live.issue is None:
+        return []
+    spec = change["issue"]
+    fields: list[str] = []
+    if "description" in spec and live.issue.get("description") != spec["description"]:
+        fields.append("description")
+    if "state" in spec:
+        state = live.issue.get("state")
+        if not isinstance(state, dict) or state.get("name") != spec["state"]:
+            fields.append("state")
+    return fields
 
 
 def build_plan(change: dict[str, Any], live: LiveHierarchy) -> list[dict[str, Any]]:
@@ -284,6 +294,10 @@ def build_plan(change: dict[str, Any], live: LiveHierarchy) -> list[dict[str, An
         actions.append(action("milestone", "name"))
     if live.issue is None:
         actions.append(action("issue", "title"))
+    else:
+        fields = _issue_drift(change, live)
+        if fields:
+            actions.append({"action": "update_issue", "fields": fields})
     return actions
 
 
@@ -336,6 +350,13 @@ def _snapshot(
         if "state" in issue_spec:
             issue["state"] = issue_spec["state"]
         if live.issue is not None:
+            if not desired and "description" in issue_spec:
+                issue["description"] = live.issue.get("description")
+            if not desired and "state" in issue_spec:
+                live_state = live.issue.get("state")
+                issue["state"] = (
+                    live_state.get("name") if isinstance(live_state, dict) else None
+                )
             for field in ("identifier", "url"):
                 value = _optional_live_string(live.issue, field, error_cls)
                 if value is not None:
@@ -431,6 +452,19 @@ def execute(
         milestone = live.milestone
         if milestone is None:
             _fail(error_cls, "milestone exact read-back verification failed")
+
+    if live.issue is not None:
+        fields = _issue_drift(change, live)
+        if fields:
+            kwargs = {}
+            if "description" in fields:
+                kwargs["description"] = change["issue"]["description"]
+            if "state" in fields:
+                if live.state is None:
+                    _fail(error_cls, "desired issue state disappeared before update")
+                kwargs["state_id"] = live.state["id"]
+            client.update_project_issue(live.issue["id"], **kwargs)
+            live = preflight(client, change, error_cls)
 
     if live.issue is None:
         kwargs = {

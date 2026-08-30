@@ -485,6 +485,31 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(hierarchy_input["stateId"], "state-uuid")
         self.assertNotIn("state_id", hierarchy_input)
 
+    def test_client_project_issue_update_uses_fixed_managed_graphql_shape(self):
+        client = self.StubClient()
+        client.update_project_issue(
+            "hierarchy-uuid",
+            description="https://solomia.in.ua",
+            state_id="state-uuid",
+        )
+        self.assertEqual(
+            client.calls,
+            [
+                (
+                    lane.ISSUE_UPDATE,
+                    {
+                        "id": "hierarchy-uuid",
+                        "input": {
+                            "description": "https://solomia.in.ua",
+                            "stateId": "state-uuid",
+                        },
+                    },
+                )
+            ],
+        )
+        with self.assertRaisesRegex(lane.ContractError, "no managed fields"):
+            client.update_project_issue("hierarchy-uuid")
+
     def test_hierarchy_and_lane_share_validation_policy_constants(self):
         hierarchy = lane._load_hierarchy()
         self.assertIs(lane.SAFE_STATES, hierarchy.SAFE_STATES)
@@ -581,6 +606,68 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(replay["before"], replay["after"])
             self.assertTrue(replay["verified"])
 
+    def test_hierarchy_reconciles_exact_issue_description_and_state_drift(self):
+        class ReconcilingClient(FakeHierarchyClient):
+            def update_project_issue(self, issue_id, *, description=None, state_id=None):
+                self.calls.append(("update_project_issue", issue_id, description, state_id))
+                current = next(item for item in self.issues if item["id"] == issue_id)
+                if description is not None:
+                    current["description"] = description
+                if state_id is not None:
+                    current["state"] = {
+                        "id": state_id,
+                        "name": state_id.removeprefix("state-"),
+                    }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = ReconcilingClient()
+            raw = hierarchy_command()
+            raw["change"]["issue"]["state"] = "Todo"
+            lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "create.json",
+            )
+            client.issues[0]["description"] = "stale description"
+            client.issues[0]["state"] = {"id": "state-Backlog", "name": "Backlog"}
+
+            reconciled = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "reconcile.json",
+            )
+            self.assertEqual(reconciled["result"], "applied")
+            self.assertEqual(reconciled["before"]["issue"]["description"], "stale description")
+            self.assertEqual(reconciled["before"]["issue"]["state"], "Backlog")
+            self.assertEqual(reconciled["after"]["issue"]["description"], "https://solomia.in.ua")
+            self.assertEqual(reconciled["after"]["issue"]["state"], "Todo")
+            updates = [call for call in client.calls if call[0] == "update_project_issue"]
+            self.assertEqual(
+                updates,
+                [
+                    (
+                        "update_project_issue",
+                        client.issues[0]["id"],
+                        "https://solomia.in.ua",
+                        "state-Todo",
+                    )
+                ],
+            )
+
+            replay = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "replay.json",
+            )
+            self.assertEqual(replay["result"], "no_op")
+            self.assertEqual(
+                [call for call in client.calls if call[0] == "update_project_issue"],
+                updates,
+            )
+
     def test_hierarchy_omitted_fields_are_not_sent_or_compared(self):
         class CaptureClient(FakeHierarchyClient):
             def __init__(self):
@@ -626,12 +713,17 @@ class ExecutionTests(unittest.TestCase):
             def __init__(self):
                 super().__init__()
                 self.crash = True
+                self.issue_state_ids = []
 
             def create_project_milestone(self, **kwargs):
                 super().create_project_milestone(**kwargs)
                 if self.crash:
                     self.crash = False
                     raise RuntimeError("simulated crash after milestone create")
+
+            def create_project_issue(self, **kwargs):
+                self.issue_state_ids.append(kwargs.get("state_id"))
+                super().create_project_issue(**kwargs)
 
         with tempfile.TemporaryDirectory() as tmp:
             journal = Path(tmp) / "journal.json"
@@ -643,6 +735,7 @@ class ExecutionTests(unittest.TestCase):
             self.assertFalse(journal.exists())
             recovered = lane.execute_command(client, raw, mode="apply", journal_path=journal)
             self.assertEqual(recovered["result"], "applied")
+            self.assertEqual(client.issue_state_ids, ["state-Todo"])
             self.assertEqual(recovered["after"]["issue"]["state"], "Todo")
             self.assertEqual(len(client.projects), 1)
             self.assertEqual(len(client.milestones), 1)
