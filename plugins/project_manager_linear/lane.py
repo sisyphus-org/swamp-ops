@@ -675,7 +675,15 @@ def execute_command(
         body_hash = hashlib.sha256(body.encode()).hexdigest()
         key_hash, _, comment_id = command_fingerprint(command)
         comments = client.list_comments(issue["id"])
-        existing = client.get_comment(comment_id)
+        existing_comment = next(
+            (item for item in comments if item.get("id") == comment_id),
+            None,
+        )
+        existing = (
+            {**existing_comment, "issueId": issue["id"]}
+            if existing_comment is not None
+            else None
+        )
         before_with_comments = {**before, "comment_count": len(comments)}
         plan = [
             {
