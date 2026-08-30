@@ -24,13 +24,13 @@ The validator rejects unknown fields, arbitrary GraphQL or MCP method names, URL
 
 For mutations, `idempotency_key` is global: its canonical payload contains only `operation`, `target`, `change`, and `policy`. Source profile/session, command/correlation IDs, and delivery metadata are provenance, not mutation identity. They cannot alter the journal request hash or deterministic entity IDs. `source_profile` is nevertheless preserved in each run's `linear-result.v2` and audit trail.
 
-The SIS-77 cutover is v2-only. The lane accepts only `linear-command.v2` and emits/accepts only `linear-result.v2`; the PM worker accepts only persisted `linear-kanban-task.v2`. Legacy commands, task envelopes, and results fail closed before mutation or lifecycle completion/block writes. No compatibility fallback or migration exists. Source-generated mutation keys are in the global `linear:v2` namespace and exact-source delivery keys are in `linear-delivery:v2`, so completed tasks from the retired namespace are not queried.
+The lane accepts only `linear-command.v2` and emits/accepts only `linear-result.v2`; the PM worker accepts only persisted `linear-kanban-task.v2`. Any other schema fails closed before mutation or lifecycle writes. Source-generated mutation keys are in the global `linear:v2` namespace and exact-source delivery keys are in `linear-delivery:v2`.
 
 ### Allowed operations
 
 - `read_issue`: `change` must be empty.
 - `change_state`: `change` must contain only `state`; exact allowlist is `Backlog`, `Todo`, `Research`, `In Progress`, `In Review`.
-- `add_comment`: `change` must contain only `body`, 1–4000 characters. The public comment body remains exactly this user-authored text; legacy internal marker text is reserved and cannot be supplied by the caller.
+- `add_comment`: `change` must contain only `body`, 1–4000 characters. The public comment body remains exactly this user-authored text; reserved internal marker text cannot be supplied by the caller.
 - `create_issue`: `target` is exactly `{"type":"team","identifier":"SIS"}` and `change` contains bounded `title`, `description`, exact `parent_identifier`, safe `state`, and `High|Medium|Low` priority. The public issue description remains exactly user-authored.
 - `converge_hierarchy`: `target` is exactly `{"type":"team","identifier":"SIS"}` and `change` contains exactly one `project`, one `milestone`, and one top-level `issue`, with no entity UUID fields. Names/titles are 1–200 characters; optional descriptions are at most 10,000 characters; optional issue state uses the safe-state allowlist. The trusted PM lane derives canonical UUIDv4 IDs internally from the semantic idempotency key with separate project/milestone/issue domain strings. Slice 1 is create-only convergence: exact existing entities are verified no-ops, missing entities are created, and supplied-field drift or same-name/title collisions fail closed. Omitted optional fields are neither sent nor compared.
 

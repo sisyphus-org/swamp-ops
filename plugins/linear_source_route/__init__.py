@@ -1,11 +1,27 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Callable
 
 from .audit import audit_route as bundled_audit_route
 from .route import RouteError, SourceContext, is_source_profile, route_request
+
+
+PUBLIC_ISSUE_IDENTIFIER = re.compile(r"^SIS-[1-9][0-9]*$")
+PUBLIC_ISSUE_URL = re.compile(
+    r"^https://linear\.app/[A-Za-z0-9_-]+/issue/(SIS-[1-9][0-9]*)/"
+    r"[A-Za-z0-9][A-Za-z0-9_-]*$"
+)
+PUBLIC_INTERNAL_MARKER = re.compile(
+    r"(?i)(?:\b(?:task_id|run_id|idempotency|delivery_key|command_id|"
+    r"correlation_id)\b|\bt_[a-f0-9]{8,}\b|\blinear(?::|-)"
+    r"(?:delivery:)?v[0-9]+(?:[:.]|\b)|\blinear-(?:command|result|kanban-task)\.v[0-9]+\b|"
+    r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-"
+    r"[0-9a-f]{12}\b)"
+)
+PUBLIC_STATES = {"Backlog", "Todo", "Research", "In Progress", "In Review"}
 
 LINEAR_SOURCE_REQUEST_SCHEMA = {
     "name": "linear_source_request",
@@ -276,6 +292,113 @@ def _source_context(
     )
 
 
+def _public_text(value: Any, label: str, *, maximum: int = 200) -> str:
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or len(value) > maximum
+        or any(ord(char) < 32 for char in value)
+        or PUBLIC_INTERNAL_MARKER.search(value)
+    ):
+        raise RouteError(f"verified result has an invalid public {label}")
+    return value
+
+
+def _public_issue_target(target: Any) -> dict[str, Any]:
+    if not isinstance(target, dict) or target.get("type") != "issue":
+        raise RouteError("verified result lacks a public issue target")
+    identifier = target.get("identifier")
+    url = target.get("url")
+    if not isinstance(identifier, str) or not PUBLIC_ISSUE_IDENTIFIER.fullmatch(identifier):
+        raise RouteError("verified result has an invalid public issue identifier")
+    match = PUBLIC_ISSUE_URL.fullmatch(url) if isinstance(url, str) else None
+    if match is None or match.group(1) != identifier:
+        raise RouteError("verified result has an invalid canonical Linear URL")
+    return {"type": "issue", "identifier": identifier, "url": url}
+
+
+def _public_target(result: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Return only validated user-relevant target facts from one PM result."""
+    operation = result.get("operation")
+    after = result.get("after")
+    if operation == "converge_hierarchy":
+        if not isinstance(after, dict):
+            raise RouteError("verified hierarchy result lacks public completion facts")
+        issue = after.get("issue")
+        project = after.get("project")
+        milestone = after.get("milestone")
+        if (
+            not isinstance(issue, dict)
+            or not isinstance(project, dict)
+            or not isinstance(milestone, dict)
+        ):
+            raise RouteError("verified hierarchy result lacks public completion facts")
+        public_target = _public_issue_target({"type": "issue", **issue})
+        public_target["title"] = _public_text(issue.get("title"), "issue title")
+        state = issue.get("state")
+        if state is not None:
+            if state not in PUBLIC_STATES:
+                raise RouteError("verified hierarchy result has an invalid public state")
+            public_target["state"] = state
+        context = {
+            "project": _public_text(project.get("name"), "project name"),
+            "milestone": _public_text(milestone.get("name"), "milestone name"),
+        }
+        return public_target, context
+
+    public_target = _public_issue_target(result.get("target"))
+    if not isinstance(after, dict):
+        raise RouteError("verified result lacks public completion facts")
+    if operation == "change_state":
+        state = after.get("state")
+        if state not in PUBLIC_STATES:
+            raise RouteError("verified state result lacks a public state")
+        public_target["state"] = state
+    elif operation == "create_issue":
+        if (
+            after.get("identifier") != public_target["identifier"]
+            or after.get("url") != public_target["url"]
+        ):
+            raise RouteError("verified create result conflicts with its public target")
+        public_target["title"] = _public_text(after.get("title"), "issue title")
+        state = after.get("state")
+        if state not in PUBLIC_STATES:
+            raise RouteError("verified create result lacks a public state")
+        public_target["state"] = state
+    elif operation not in {"add_comment", "read_issue"}:
+        raise RouteError("verified result has an unsupported public operation")
+    return public_target, None
+
+
+def _public_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Hide routing/protocol metadata from the user-facing model tool result."""
+    status = result.get("status")
+    if status in {"queued", "already_in_flight"}:
+        return {"status": "queued"}
+    if status == "blocked":
+        return {
+            "status": "blocked",
+            "message": "Не удалось выполнить запрос. Проверьте исходные данные.",
+        }
+    if status == "verified_no_op":
+        verified = result.get("linear_result")
+        if not isinstance(verified, dict) or verified.get("verified") is not True:
+            raise RouteError("completed replay lacks a verified result")
+        outcome = verified.get("result")
+        if outcome not in {"applied", "no_op", "read"}:
+            raise RouteError("completed replay has an invalid public outcome")
+        public: dict[str, Any] = {
+            "status": "completed",
+            "changed": outcome == "applied",
+        }
+        target, context = _public_target(verified)
+        public["target"] = target
+        if context is not None:
+            public["context"] = context
+        return public
+    raise RouteError("routing returned an unsupported public status")
+
+
 def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
     """Validate one live user-facing source route and create or replay its PM task."""
     try:
@@ -311,11 +434,16 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
         )
         board_factory = kwargs.get("board_factory") or HermesKanbanBoard
         board = board_factory(source_profile=source.profile)
-        result = route_request(request, source=source, board=board)
-        return json.dumps(result, ensure_ascii=False, sort_keys=True)
-    except (RouteError, KeyError, TypeError, ValueError, OSError) as exc:
+        internal_result = route_request(request, source=source, board=board)
         return json.dumps(
-            {"status": "rejected", "error": str(exc)},
+            _public_result(internal_result), ensure_ascii=False, sort_keys=True
+        )
+    except (RouteError, KeyError, TypeError, ValueError, OSError):
+        return json.dumps(
+            {
+                "status": "rejected",
+                "message": "Не удалось безопасно обработать запрос.",
+            },
             ensure_ascii=False,
             sort_keys=True,
         )

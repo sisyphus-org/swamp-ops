@@ -126,8 +126,8 @@ class ExecutionTests(unittest.TestCase):
                     journal_path=Path(tmp) / "journal.json",
                 )
 
-    def test_v1_plan_result_is_rejected_before_apply(self):
-        lane = FakeLane(result_schema="linear-result.v1")
+    def test_noncurrent_plan_result_is_rejected_before_apply(self):
+        lane = FakeLane(result_schema="linear-result.unsupported")
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaisesRegex(RuntimeError, "linear-result.v2"):
                 execute_pm_command(
@@ -143,23 +143,49 @@ class ExecutionTests(unittest.TestCase):
         applied = {
             "result": "applied",
             "verified": True,
-            "target": {"identifier": "SIS-61", "url": "https://linear.app/SIS-61"},
+            "target": {"identifier": "SIS-61", "url": "https://linear.app/example/issue/SIS-61/fixture"},
         }
         replay = {**applied, "result": "no_op", "no_op": True}
-        self.assertIn("добавлен и прочитан обратно", human_summary(applied))
-        self.assertIn("https://linear.app/SIS-61", human_summary(applied))
-        self.assertIn("уже выполнен", human_summary(replay))
+        self.assertEqual(
+            human_summary(applied),
+            "Комментарий добавлен.\nhttps://linear.app/example/issue/SIS-61/fixture",
+        )
+        self.assertEqual(
+            human_summary(replay),
+            "Запрос уже выполнен; повторных изменений не потребовалось.\n"
+            "https://linear.app/example/issue/SIS-61/fixture",
+        )
+        for summary in (human_summary(applied), human_summary(replay)):
+            self.assertNotIn("verified", summary)
+            self.assertNotIn("мутац", summary)
+            self.assertNotIn("read-back", summary)
 
     def test_human_summary_distinguishes_create(self):
         created = {
             "operation": "create_issue",
             "result": "applied",
             "verified": True,
-            "target": {"identifier": "SIS-99", "url": "https://linear.app/SIS-99"},
+            "target": {"identifier": "SIS-99", "url": "https://linear.app/example/issue/SIS-99/fixture"},
         }
         summary = human_summary(created)
         self.assertIn("создана", summary)
-        self.assertIn("https://linear.app/SIS-99", summary)
+        self.assertIn("https://linear.app/example/issue/SIS-99/fixture", summary)
+
+    def test_human_summary_drops_noncanonical_or_injected_url(self):
+        for url in (
+            "https://linear.app/example/issue/SIS-99/fixture\ntask_id=t_deadbeef",
+            "https://example.com/issue/SIS-99",
+        ):
+            with self.subTest(url=url):
+                result = {
+                    "operation": "create_issue",
+                    "result": "applied",
+                    "target": {"identifier": "SIS-99", "url": url},
+                }
+                summary = human_summary(result)
+                self.assertEqual(summary, "Задача Linear создана.")
+                self.assertNotIn("task_id", summary)
+                self.assertNotIn("example.com", summary)
 
     def test_human_summary_distinguishes_hierarchy_convergence(self):
         result = {
@@ -168,7 +194,7 @@ class ExecutionTests(unittest.TestCase):
             "verified": True,
             "target": {"type": "project", "identifier": "health"},
         }
-        self.assertIn("Иерархия Linear создана", human_summary(result))
+        self.assertEqual(human_summary(result), "Иерархия Linear готова.")
 
     def test_human_summary_renders_read_before_noop(self):
         read = {
@@ -176,7 +202,7 @@ class ExecutionTests(unittest.TestCase):
             "result": "read",
             "no_op": True,
             "verified": True,
-            "target": {"identifier": "SIS-61", "url": "https://linear.app/SIS-61"},
+            "target": {"identifier": "SIS-61", "url": "https://linear.app/example/issue/SIS-61/fixture"},
         }
         summary = human_summary(read)
         self.assertIn("прочитана", summary)
@@ -212,8 +238,6 @@ class PluginTests(unittest.TestCase):
         self.assertIn("reads the persisted command", skill)
         self.assertIn("linear-kanban-task.v2", skill)
         self.assertIn("linear-result.v2", skill)
-        self.assertNotIn("linear-kanban-task.v1", skill)
-        self.assertNotIn("linear-result.v1", skill)
         self.assertNotIn("with that exact command object", skill)
 
     def test_schema_accepts_no_model_supplied_command(self):
@@ -492,9 +516,9 @@ class PluginTests(unittest.TestCase):
         client_factory.assert_not_called()
         lifecycle_factory.assert_not_called()
 
-    def test_v1_task_envelope_is_rejected_before_linear_or_lifecycle_write(self):
+    def test_noncurrent_task_envelope_is_rejected_before_linear_or_lifecycle_write(self):
         envelope = json.loads(task_record()["body"])
-        envelope["schema_version"] = "linear-kanban-task.v1"
+        envelope["schema_version"] = "linear-kanban-task.unsupported"
         lifecycle_factory = mock.Mock()
         client_factory = mock.Mock()
 
@@ -522,9 +546,9 @@ class PluginTests(unittest.TestCase):
         client_factory.assert_not_called()
         lifecycle_factory.assert_not_called()
 
-    def test_v1_command_is_rejected_before_linear_or_lifecycle_write(self):
+    def test_noncurrent_command_is_rejected_before_linear_or_lifecycle_write(self):
         envelope = json.loads(task_record()["body"])
-        envelope["command"]["schema_version"] = "linear-command.v1"
+        envelope["command"]["schema_version"] = "linear-command.unsupported"
         lifecycle_factory = mock.Mock()
         client_factory = mock.Mock()
 
@@ -553,12 +577,12 @@ class PluginTests(unittest.TestCase):
         client_factory.assert_not_called()
         lifecycle_factory.assert_not_called()
 
-    def test_v1_plan_result_is_rejected_without_lifecycle_write(self):
+    def test_noncurrent_plan_result_is_rejected_without_lifecycle_write(self):
         lifecycle = FakeLifecycle()
         result = json.loads(
             handle_pm_linear_execute(
                 {},
-                lane_loader=lambda: FakeLane(result_schema="linear-result.v1"),
+                lane_loader=lambda: FakeLane(result_schema="linear-result.unsupported"),
                 task_loader=lambda _task_id, _db_path: task_record(),
                 client_factory=lambda _token: object(),
                 lifecycle_factory=lambda _task_id: lifecycle,

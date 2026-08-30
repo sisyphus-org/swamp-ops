@@ -91,7 +91,7 @@ MVP operations are exact read, safe workflow-state change, one bounded comment, 
 
 SIS-68 defines universal routing for every current and future user-facing profile. `linear-source-route` derives a global mutation key from operation/target/change/policy, then a distinct delivery key from the full exact source identity. It atomically gets or creates one typed triage task by delivery key, writes one source-owned `wake` route, requires the route audit, and only then releases the task. Different profiles/sessions therefore get separate wake tasks while Project Manager shares deterministic mutation/entity identity and converges globally. The plugin has no Linear client or credential. Local tests prove this contract; the live universal tracer remains post-deploy.
 
-SIS-77 is a clean v2-only protocol cutover: source commands are `linear-command.v2`, persisted PM envelopes are `linear-kanban-task.v2`, and PM results/replay validation are `linear-result.v2`. Mutation keys use the global `linear:v2` namespace and delivery keys use `linear-delivery:v2` while retaining the same source-independent mutation payload and exact source-identity delivery payload. The PM and source replay path reject legacy protocol objects fail closed. There is no fallback or migration code, and the new delivery namespace means completed legacy tasks are not looked up.
+SIS-77 uses one current protocol only: source commands are `linear-command.v2`, persisted PM envelopes are `linear-kanban-task.v2`, and PM results/replay validation are `linear-result.v2`. Mutation keys use the global `linear:v2` namespace and delivery keys use `linear-delivery:v2`, retaining the same source-independent mutation payload and exact source-identity delivery payload. Any non-current schema fails closed; no alternate Linear mutation route exists.
 
 The default `hermes-profile-bootstrap` role installs/enables the universal plugin and routing skill, configures no Linear MCP/token for the source profile, and reports mandatory source-Gateway/broker restart plus PM read-back/wake/replay gates. Full local verification, reviewed per-profile rollout, future-profile proof and rollback: [`docs/universal-linear-routing-e2e.md`](docs/universal-linear-routing-e2e.md).
 
@@ -105,7 +105,7 @@ Project → Milestones → Issues → Sub-issues
 
 Each project instance is declared in `manifests/linear/<slug>.json`. The manifest contains no credentials and uses neutral structural names: milestones are the grouping layer inside a project, issues are the primary tracked work/entities, and sub-issues are the concrete child work.
 
-The legacy Swamp workflow is a read-only inventory/planning surface:
+The operator-only Swamp workflow is a read-only inventory/planning surface:
 
 ```bash
 # Read-only live reconciliation plan
