@@ -609,8 +609,8 @@ class ExecutionTests(unittest.TestCase):
         for malformed in (None, "not-an-object", {"title": "missing id"}):
             with self.subTest(malformed=malformed), tempfile.TemporaryDirectory() as tmp:
                 class MalformedChildrenClient(FakeClient):
-                    def list_child_issues(self, parent_id):
-                        return [malformed]
+                    def list_child_issues(self, parent_id, value=malformed):
+                        return [value]
 
                 client = MalformedChildrenClient()
                 with self.assertRaisesRegex(
