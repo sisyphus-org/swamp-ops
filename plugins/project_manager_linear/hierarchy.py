@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import re
 import sys
 import uuid
 from dataclasses import dataclass
@@ -262,13 +263,29 @@ def preflight(client: Any, change: dict[str, Any], error_cls: type[Exception]) -
     return LiveHierarchy(sis, project, milestone, issue, state)
 
 
+def _description_matches(desired: str, live: Any) -> bool:
+    """Match exact bytes or Linear's sole bare-URL read-back serialization.
+
+    Mutation payloads remain unchanged; this only recognizes the deterministic
+    Markdown representation that Linear returns after storing one pure HTTP(S)
+    URL.
+    """
+    if live == desired:
+        return True
+    if re.fullmatch(r"https?://[^\s\[\]<>]+", desired) is None:
+        return False
+    return live == f"[{desired}](<{desired}>)"
+
+
 def _issue_drift(change: dict[str, Any], live: LiveHierarchy) -> list[str]:
     """Return managed issue fields that differ from the exact desired state."""
     if live.issue is None:
         return []
     spec = change["issue"]
     fields: list[str] = []
-    if "description" in spec and live.issue.get("description") != spec["description"]:
+    if "description" in spec and not _description_matches(
+        spec["description"], live.issue.get("description")
+    ):
         fields.append("description")
     if "state" in spec:
         state = live.issue.get("state")
