@@ -1,13 +1,13 @@
 # Universal source profile → Project Manager → Linear E2E
 
-SIS-68 generalizes the SIS-61 SWE tracer bullet for every current and future user-facing Hermes profile. Hermes core is unchanged.
+SIS-68 defines the universal form of the SIS-61 SWE route for every current and future user-facing Hermes profile. Hermes core is unchanged. Local tests prove the contract; the live universal tracer remains a post-deploy gate and is not claimed here.
 
 ## Architecture
 
 ```text
 exact source Telegram session
   → linear_source_request
-  → linear-command.v1 in one Kanban task
+  → linear-command.v2 in one exact-delivery Kanban task
   → broker (sole dispatcher, no Linear or Telegram credential)
   → project-manager / pm_linear_execute
   → Linear plan → mutation → exact read-back
@@ -16,6 +16,8 @@ exact source Telegram session
 ```
 
 `broker` and `project-manager` are special profiles and must never receive the ordinary source ingress baseline.
+
+SIS-77 cuts this path over without compatibility: the source emits only `linear-command.v2` in `linear-kanban-task.v2`, Project Manager emits and validates only `linear-result.v2`, and both sides reject legacy protocol objects. The global mutation payload and exact delivery payload are unchanged, but their namespaces are now `linear:v2` and `linear-delivery:v2`. Consequently a new dispatch cannot look up a completed task from the retired delivery namespace. There is no migration or fallback path.
 
 ## Source plugin
 
@@ -26,8 +28,10 @@ The plugin:
 - derives the authoritative source profile from Hermes' resolved runtime home;
 - accepts any syntactically valid user-facing profile name except `broker` and `project-manager`;
 - requires Telegram DM context, exact numeric chat/user/thread IDs, and the persisted exact Hermes session ID;
-- supports bounded comment, safe workflow-state change, and issue creation under an exact `SIS-N` parent;
-- creates or replays one PM-assigned Kanban task using a semantic idempotency key;
+- supports bounded comment, safe workflow-state change, issue creation under an exact `SIS-N` parent, and one create-only `SIS` project → milestone → issue convergence request without caller-controlled entity IDs;
+- derives a global mutation key from only `operation`, `target`, `change`, and `policy`; source profile/session and command/correlation IDs are excluded;
+- derives a separate delivery key from that mutation key plus the exact source profile/platform/chat/user/thread/session;
+- atomically gets or creates one PM-assigned Kanban task by delivery key inside one Kanban write transaction;
 - installs exactly one source-owned `wake` subscription and audits it before triage release;
 - imports no Linear client and reads no Linear credential.
 
@@ -43,8 +47,9 @@ Supported operations:
 - `change_state` to the safe non-terminal allowlist;
 - `add_comment` with deterministic-ID replay protection and a clean user-authored body;
 - `create_issue` in the `SIS` team under one exact `SIS-N` parent, with bounded title/description, safe state, and High/Medium/Low priority.
+- `converge_hierarchy` for exactly one `SIS` project → milestone → top-level issue; it performs complete bounded scoped preflight, create-only apply, exact scoped-list read-back, and crash/concurrent replay convergence under the existing hash-only journal lock.
 
-Comments and created issues use deterministic caller-supplied Linear UUIDs derived from the hashed idempotency key. Their public body/description stays exactly user-authored. A literal replay reads that UUID back and returns the existing verified entity; the same key with different content or target fails closed. All writes require exact ID, target, body and bounded-field read-back before `linear-result.v1.verified=true`.
+Comments, created issues and hierarchy entities use domain-separated deterministic Linear UUIDv4 IDs derived inside Project Manager from the global mutation key. The PM journal request hash uses the same global payload and excludes source profile, command/correlation IDs, session, and delivery metadata. Therefore identical requests from different profiles or sessions receive distinct exact-wake tasks but share the PM mutation key/entity IDs and converge to one global apply plus verified no-ops. `source_profile` remains in each run's result/audit. Public body/description stays exactly user-authored. Changed semantic content derives different IDs and fails closed on the existing name/title rather than creating duplicates. Hierarchy results include typed `before`/`after` snapshots, and no operation sets `linear-result.v2.verified=true` until exact scoped read-back matches every supplied scalar and structural field.
 
 ## Bootstrap invariant
 
@@ -82,7 +87,7 @@ env -u HERMES_DELEGATED_CHILD_CONTEXT \
   scripts/linear_source_local_route_smoke.py
 ```
 
-The local smoke performs no network mutation. Healthy output reports one ready task, one wake subscription, the exact session/thread, and replay without a second task.
+The local smoke performs no network mutation. Healthy output reports one ready task, one wake subscription, the exact session/thread, and replay without a second task. The concurrent temporary-DB test separately races one delivery and proves exactly one task and one subscription.
 
 ## Reviewed rollout for existing profiles
 
@@ -98,8 +103,8 @@ For each of `default`, `ideas`, `swe`, `books`, and `crypto-analyst`, one at a t
 6. Restart the affected source Gateway.
 7. Restart broker after the new source toolset is installed so its long-lived worker resolver sees the current catalog.
 8. Verify new PIDs/readiness, sole dispatcher ownership, and the real PM child toolset.
-9. From the profile's real existing Telegram thread, submit one unique bounded comment command, then the literal replay.
-10. Read back one task, one subscription, one PM run, one Linear mutation, exact source-session wake, and no credential-shaped audit data.
+9. Post-deploy, from the profile's real existing Telegram thread, submit one unique bounded comment command, then the literal replay.
+10. Record the still-required live tracer evidence: one delivery task, one subscription, one PM mutation/no-op sequence, exact source-session wake, and no credential-shaped audit data.
 
 Do not remove the old direct Linear surface from the next profile until the current profile passes the complete gate.
 

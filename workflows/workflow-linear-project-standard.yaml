@@ -1,38 +1,30 @@
 id: b558e0d8-3aaf-4305-9b14-5f5a29ccfb3e
 name: linear-project-standard
 description: >-
-  Reconcile a Linear project to the organization-wide hierarchy Project ->
-  Milestones -> Issues -> Sub-issues from a committed manifest. Plan mode is
-  read-only. Apply creates missing hierarchy objects and may change only the
-  milestone of an explicitly identified, exact-title, top-level existing issue.
-  It fails closed and verifies the hierarchy by reading it back from Linear.
+  Read-only plan for a Linear project hierarchy Project -> Milestones -> Issues
+  -> Sub-issues from a committed manifest. Project Manager is the only writer.
 tags:
   domain: project-management
   integration: linear
-  safety: plan-first-narrow-update
+  safety: plan-only
 inputs:
   manifest:
     type: string
     pattern: "^[a-z][a-z0-9-]{1,62}$"
     description: Manifest slug under manifests/linear/<slug>.json.
-  mode:
-    type: string
-    pattern: "^(plan|apply)$"
-    description: Run a read-only plan or apply the reviewed narrow-write plan.
 jobs:
   - name: main
-    description: Apply the standard Linear hierarchy from a validated manifest.
+    description: Plan the standard Linear hierarchy from a validated manifest.
     steps:
       - name: reconcile
         description: >-
-          Plan or reconcile project hierarchy. Existing issues may only have
-          projectMilestoneId assigned after identifier, title, and parent checks.
+          Read current project hierarchy and emit a bounded reconciliation plan.
         task:
           type: model_method
           modelIdOrName: linear-project-standard
           methodName: execute
           inputs:
-            run: python3 scripts/linear_project_standard.py --manifest 'manifests/linear/${{ inputs.manifest }}.json' --mode '${{ inputs.mode }}'
+            run: python3 scripts/linear_project_standard.py --manifest 'manifests/linear/${{ inputs.manifest }}.json' --mode plan
             workingDir: .
             timeout: 120000
             ignoreExitCode: false

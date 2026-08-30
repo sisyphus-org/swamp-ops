@@ -19,10 +19,10 @@ CREDENTIAL_PATTERNS = (
 PM_LINEAR_EXECUTE_SCHEMA = {
     "name": "pm_linear_execute",
     "description": (
-        "Execute exactly one validated linear-command.v1 from the current "
+        "Execute exactly one validated linear-command.v2 from the current "
         "project-manager Kanban task. The tool performs deterministic plan, "
         "apply, exact read-back, idempotency handling, and then completes or "
-        "blocks the current task with a typed linear-result.v1 handoff."
+        "blocks the current task with a typed linear-result.v2 handoff."
     ),
     "parameters": {
         "type": "object",
@@ -38,6 +38,10 @@ EXPECTED_WORKER_CONTRACT = {
     "mode": "plan_apply_read_back",
     "completion": "tool_completes_current_kanban_task",
 }
+
+
+class ProtocolVersionError(RuntimeError):
+    """A persisted command/task/result uses a rejected protocol generation."""
 
 
 def _load_lane() -> Any:
@@ -100,15 +104,28 @@ def _command_from_task(task: Any) -> dict[str, Any]:
         envelope = json.loads(body)
     except json.JSONDecodeError as exc:
         raise RuntimeError("current Kanban task body is invalid JSON") from exc
+    if not isinstance(envelope, dict) or set(envelope) != {
+        "schema_version",
+        "command",
+        "worker_contract",
+    }:
+        raise RuntimeError("current Kanban task envelope is invalid")
+    if envelope.get("schema_version") == "linear-kanban-task.v1":
+        raise ProtocolVersionError(
+            "linear-kanban-task.v1 is rejected; expected linear-kanban-task.v2"
+        )
     if (
-        not isinstance(envelope, dict)
-        or set(envelope) != {"schema_version", "command", "worker_contract"}
-        or envelope.get("schema_version") != "linear-kanban-task.v1"
+        envelope.get("schema_version") != "linear-kanban-task.v2"
         or envelope.get("worker_contract") != EXPECTED_WORKER_CONTRACT
         or not isinstance(envelope.get("command"), dict)
     ):
         raise RuntimeError("current Kanban task envelope is invalid")
-    return envelope["command"]
+    command = envelope["command"]
+    if command.get("schema_version") == "linear-command.v1":
+        raise ProtocolVersionError(
+            "linear-command.v1 is rejected; expected linear-command.v2"
+        )
+    return command
 
 
 def execute_pm_command(
@@ -126,6 +143,10 @@ def execute_pm_command(
         mode="plan",
         journal_path=journal_path,
     )
+    if not isinstance(plan, dict) or plan.get("schema_version") != "linear-result.v2":
+        raise ProtocolVersionError(
+            "Linear plan did not return linear-result.v2; legacy results are rejected"
+        )
     result = lane.execute_command(
         client,
         validated,
@@ -134,10 +155,14 @@ def execute_pm_command(
     )
     if (
         not isinstance(result, dict)
-        or result.get("schema_version") != "linear-result.v1"
+        or result.get("schema_version") != "linear-result.v2"
         or result.get("verified") is not True
     ):
-        raise RuntimeError("Linear apply did not return a verified linear-result.v1")
+        if isinstance(result, dict) and result.get("schema_version") == "linear-result.v1":
+            raise ProtocolVersionError(
+                "Linear apply returned rejected linear-result.v1; expected linear-result.v2"
+            )
+        raise RuntimeError("Linear apply did not return a verified linear-result.v2")
     return {"plan": plan, "result": result}
 
 
@@ -152,6 +177,8 @@ def human_summary(result: dict[str, Any]) -> str:
         lead = "Запрос уже выполнен; повторная мутация не потребовалась. Изменение verified."
     elif operation == "create_issue":
         lead = "Задача Linear создана и прочитана обратно. Изменение verified."
+    elif operation == "converge_hierarchy":
+        lead = "Иерархия Linear создана или уже сходилась; точное чтение обратно verified."
     elif operation == "change_state":
         lead = "Статус Linear изменён и прочитан обратно. Изменение verified."
     else:
@@ -271,6 +298,23 @@ def handle_pm_linear_execute(args: dict[str, Any], **kwargs: Any) -> str:
             sort_keys=True,
         )
 
+    preflight_error: Exception | None = None
+    command: dict[str, Any] = {}
+    lane: Any = None
+    try:
+        command = _command_from_task(task)
+        lane_loader = kwargs.get("lane_loader") or _load_lane
+        lane = lane_loader()
+        lane.validate_command(command)
+    except ProtocolVersionError as exc:
+        return json.dumps(
+            {"status": "rejected", "error": _sanitize_error(exc)},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    except Exception as exc:
+        preflight_error = exc
+
     run_reserver: Callable[[str, int, Path, str], bool] = (
         kwargs.get("run_reserver") or _reserve_current_run
     )
@@ -296,9 +340,8 @@ def handle_pm_linear_execute(args: dict[str, Any], **kwargs: Any) -> str:
     )
     lifecycle = lifecycle_factory(task_id)
     try:
-        command = _command_from_task(task)
-        lane_loader = kwargs.get("lane_loader") or _load_lane
-        lane = lane_loader()
+        if preflight_error is not None:
+            raise preflight_error
         client_factory = kwargs.get("client_factory") or lane.LinearClient
         token = str(environ.get("LINEAR_TOKEN") or "")
         client = client_factory(token)
@@ -322,6 +365,12 @@ def handle_pm_linear_execute(args: dict[str, Any], **kwargs: Any) -> str:
                 "verified": True,
                 "result": result,
             },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    except ProtocolVersionError as exc:
+        return json.dumps(
+            {"status": "rejected", "error": _sanitize_error(exc)},
             ensure_ascii=False,
             sort_keys=True,
         )

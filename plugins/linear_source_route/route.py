@@ -24,9 +24,12 @@ CREDENTIAL_SHAPES = (
     re.compile(r"Authorization:\s*(?:Bearer|Basic)\s+\S+", re.IGNORECASE),
     re.compile(r"\b(?:ghp_|github_pat_)[A-Za-z0-9_]{20,}\b"),
     re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b"),
+    re.compile(r"\blin_api_[A-Za-z0-9_-]{16,}\b"),
     re.compile(r"\bxox[bap]-[A-Za-z0-9-]{10,}\b"),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
 )
+SAFE_STATES = {"Backlog", "Todo", "Research", "In Progress", "In Review"}
+MAX_HIERARCHY_BYTES = 24_576
 
 
 class RouteError(RuntimeError):
@@ -62,8 +65,7 @@ def _uuid4() -> str:
 
 def _semantic_key(command: dict[str, Any]) -> str:
     semantic = {
-        key: command[key]
-        for key in ("source_profile", "operation", "target", "change", "policy")
+        key: command[key] for key in ("operation", "target", "change", "policy")
     }
     digest = hashlib.sha256(
         json.dumps(
@@ -73,7 +75,74 @@ def _semantic_key(command: dict[str, Any]) -> str:
             separators=(",", ":"),
         ).encode()
     ).hexdigest()
-    return f"linear:v1:{digest[:32]}"
+    return f"linear:v2:{digest[:32]}"
+
+
+def _delivery_key(mutation_key: str, source: SourceContext) -> str:
+    delivery = {
+        "mutation_key": mutation_key,
+        "source_profile": source.profile,
+        "platform": source.platform,
+        "chat_id": source.chat_id,
+        "user_id": source.user_id,
+        "thread_id": source.thread_id,
+        "session_id": source.session_id,
+    }
+    digest = hashlib.sha256(
+        json.dumps(
+            delivery,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    return f"linear-delivery:v2:{digest[:32]}"
+
+
+def _validate_clean_text(
+    value: Any, path: str, *, maximum: int, required: bool
+) -> None:
+    if not isinstance(value, str) or len(value) > maximum:
+        raise RouteError(f"{path} must be a string of at most {maximum} characters")
+    if required and not value.strip():
+        raise RouteError(f"{path} must be non-empty")
+    if any(ord(char) < 32 and char not in "\n\t" for char in value):
+        raise RouteError(f"{path} contains control characters")
+    if any(pattern.search(value) for pattern in CREDENTIAL_SHAPES):
+        raise RouteError(f"{path} contains credential-shaped data")
+
+
+def _validate_hierarchy_request(request: dict[str, Any]) -> dict[str, Any]:
+    if set(request) != {"operation", "project", "milestone", "issue"}:
+        raise RouteError("structured hierarchy request has invalid fields")
+    if len(json.dumps(request, ensure_ascii=False).encode("utf-8")) > MAX_HIERARCHY_BYTES:
+        raise RouteError("structured hierarchy request exceeds the bounded size limit")
+    specs = (
+        ("project", {"name", "description"}, "name"),
+        ("milestone", {"name", "description"}, "name"),
+        ("issue", {"title", "description", "state"}, "title"),
+    )
+    change: dict[str, Any] = {}
+    for kind, allowed, name_field in specs:
+        spec = request.get(kind)
+        if not isinstance(spec, dict) or name_field not in spec:
+            raise RouteError(f"{kind} must contain {name_field}")
+        if not set(spec).issubset(allowed):
+            raise RouteError(f"{kind} contains unsupported fields")
+        _validate_clean_text(
+            spec[name_field], f"{kind}.{name_field}", maximum=200, required=True
+        )
+        if "description" in spec:
+            _validate_clean_text(
+                spec["description"],
+                f"{kind}.description",
+                maximum=10_000,
+                required=False,
+            )
+        if kind == "issue" and "state" in spec and spec["state"] not in SAFE_STATES:
+            raise RouteError("issue.state is not in the safe-state allowlist")
+        change[kind] = dict(spec)
+    return change
 
 
 def parse_linear_request(
@@ -82,7 +151,7 @@ def parse_linear_request(
     source_profile: str = "swe",
     uuid_factory: UUIDFactory = _uuid4,
 ) -> ParsedRequest:
-    """Parse one bounded source request into linear-command.v1."""
+    """Parse one bounded source request into linear-command.v2."""
     if not PROFILE_NAME.fullmatch(source_profile):
         raise RouteError("source profile is invalid")
     if isinstance(request, str):
@@ -151,12 +220,15 @@ def parse_linear_request(
                 "state": state,
                 "priority": priority,
             }
+        elif operation == "converge_hierarchy":
+            target = {"type": "team", "identifier": "SIS"}
+            change = _validate_hierarchy_request(request)
         else:
             raise RouteError("structured operation is not allowed")
     else:
         raise RouteError("request must be text or a structured request")
     command: dict[str, Any] = {
-        "schema_version": "linear-command.v1",
+        "schema_version": "linear-command.v2",
         "command_id": uuid_factory(),
         "correlation_id": uuid_factory(),
         "idempotency_key": "pending",
@@ -195,7 +267,7 @@ def validate_source_context(source: SourceContext) -> None:
 def build_task_body(command: dict[str, Any]) -> str:
     """Build a machine-readable PM worker envelope without credentials."""
     envelope = {
-        "schema_version": "linear-kanban-task.v1",
+        "schema_version": "linear-kanban-task.v2",
         "command": command,
         "worker_contract": {
             "profile": "project-manager",
@@ -207,7 +279,9 @@ def build_task_body(command: dict[str, Any]) -> str:
     return json.dumps(envelope, ensure_ascii=False, sort_keys=True)
 
 
-def _verified_replay(task: dict[str, Any], idempotency_key: str) -> dict[str, Any]:
+def _verified_replay(
+    task: dict[str, Any], command: dict[str, Any], delivery_key: str
+) -> dict[str, Any]:
     raw_result = task.get("result")
     try:
         result = json.loads(raw_result) if isinstance(raw_result, str) else raw_result
@@ -215,14 +289,131 @@ def _verified_replay(task: dict[str, Any], idempotency_key: str) -> dict[str, An
         raise RouteError("completed replay has invalid structured result") from exc
     if (
         not isinstance(result, dict)
-        or result.get("schema_version") != "linear-result.v1"
+        or result.get("schema_version") != "linear-result.v2"
         or result.get("verified") is not True
     ):
-        raise RouteError("completed replay lacks a verified linear-result.v1")
+        raise RouteError("completed replay lacks a verified linear-result.v2")
+
+    raw_body = task.get("body")
+    try:
+        envelope = json.loads(raw_body) if isinstance(raw_body, str) else raw_body
+    except json.JSONDecodeError as exc:
+        raise RouteError("completed replay has an invalid persisted task envelope") from exc
+    if (
+        not isinstance(envelope, dict)
+        or set(envelope) != {"schema_version", "command", "worker_contract"}
+        or envelope.get("schema_version") != "linear-kanban-task.v2"
+        or not isinstance(envelope.get("command"), dict)
+        or envelope.get("worker_contract")
+        != {
+            "profile": "project-manager",
+            "tool": "pm_linear_execute",
+            "mode": "plan_apply_read_back",
+            "completion": "tool_completes_current_kanban_task",
+        }
+    ):
+        raise RouteError("completed replay lacks a linear-kanban-task.v2 envelope")
+    persisted = envelope["command"]
+    expected_command_fields = {
+        "schema_version",
+        "command_id",
+        "correlation_id",
+        "idempotency_key",
+        "source_profile",
+        "operation",
+        "target",
+        "change",
+        "policy",
+    }
+    try:
+        command_ids = [uuid.UUID(str(persisted[field])) for field in ("command_id", "correlation_id")]
+    except (KeyError, ValueError, AttributeError, TypeError) as exc:
+        raise RouteError("completed replay has an invalid persisted command") from exc
+    if (
+        set(persisted) != expected_command_fields
+        or any(value.version != 4 for value in command_ids)
+        or any(str(value) != persisted[field] for value, field in zip(command_ids, ("command_id", "correlation_id")))
+    ):
+        raise RouteError("completed replay has an invalid persisted command")
+    semantic_fields = ("schema_version", "idempotency_key", "source_profile", "operation", "target", "change", "policy")
+    if any(persisted.get(field) != command.get(field) for field in semantic_fields):
+        raise RouteError("completed replay does not match persisted command")
+
+    required_result_fields = {
+        "schema_version",
+        "command_id",
+        "correlation_id",
+        "idempotency_key",
+        "source_profile",
+        "operation",
+        "mode",
+        "target",
+        "result",
+        "before",
+        "after",
+        "plan",
+        "no_op",
+        "verified",
+    }
+    if not required_result_fields.issubset(result):
+        raise RouteError("completed replay has an incomplete linear-result.v2")
+    binding_fields = (
+        "command_id",
+        "correlation_id",
+        "idempotency_key",
+        "source_profile",
+        "operation",
+    )
+    if any(result.get(field) != persisted.get(field) for field in binding_fields):
+        raise RouteError("completed replay does not match persisted command")
+    outcome = result.get("result")
+    if (
+        result.get("mode") != "apply"
+        or outcome not in {"applied", "no_op", "read"}
+        or not isinstance(result.get("plan"), list)
+        or not isinstance(result.get("no_op"), bool)
+        or result["no_op"] != (outcome in {"no_op", "read"})
+    ):
+        raise RouteError("completed replay has an invalid verified outcome")
+
+    target = result.get("target")
+    if not isinstance(target, dict):
+        raise RouteError("completed replay has an invalid verified target")
+    operation = persisted["operation"]
+    if operation == "converge_hierarchy":
+        expected_target = {
+            "type": "project",
+            "identifier": persisted["change"]["project"]["name"],
+        }
+        if target != expected_target:
+            raise RouteError("completed replay target does not match persisted command")
+    elif operation == "create_issue":
+        after = result.get("after")
+        identifier = target.get("identifier")
+        url = target.get("url")
+        if (
+            not isinstance(after, dict)
+            or target.get("type") != "issue"
+            or not isinstance(identifier, str)
+            or not identifier.strip()
+            or not isinstance(url, str)
+            or not url.strip()
+            or identifier != after.get("identifier")
+            or url != after.get("url")
+        ):
+            raise RouteError("completed replay has an invalid verified target")
+    elif (
+        target.get("type") != persisted["target"].get("type")
+        or target.get("identifier") != persisted["target"].get("identifier")
+        or not isinstance(target.get("url"), str)
+        or not target["url"].strip()
+    ):
+        raise RouteError("completed replay target does not match persisted command")
     return {
         "status": "verified_no_op",
         "task_id": task["id"],
-        "idempotency_key": idempotency_key,
+        "idempotency_key": command["idempotency_key"],
+        "delivery_key": delivery_key,
         "replayed": True,
         "linear_result": result,
     }
@@ -244,20 +435,34 @@ def route_request(
     )
     command = parsed.command
     idempotency_key = command["idempotency_key"]
-    task = board.find_task(idempotency_key)
-    replayed = task is not None
+    delivery_key = _delivery_key(idempotency_key, source)
+    task, created = board.get_or_create_task(
+        delivery_key,
+        title=f"Linear {command['operation']} {command['target']['identifier']}",
+        body=build_task_body(command),
+        assignee="project-manager",
+        skills=["project-manager-linear-worker"],
+        triage=True,
+        idempotency_key=delivery_key,
+        session_id=source.session_id,
+        max_runtime_seconds=300,
+    )
+    replayed = not created
 
-    if task is not None:
+    if not created:
+        if task.get("idempotency_key") != delivery_key:
+            raise RouteError("idempotent task delivery key mismatch")
         if task.get("session_id") != source.session_id:
             raise RouteError("idempotent task belongs to a different source session")
         status = task.get("status")
         if status == "done":
-            return _verified_replay(task, idempotency_key)
+            return _verified_replay(task, command, delivery_key)
         if status == "blocked":
             return {
                 "status": "blocked",
                 "task_id": task["id"],
                 "idempotency_key": idempotency_key,
+                "delivery_key": delivery_key,
                 "replayed": True,
             }
         if status in TERMINAL_IN_FLIGHT:
@@ -265,25 +470,18 @@ def route_request(
                 "status": "already_in_flight",
                 "task_id": task["id"],
                 "idempotency_key": idempotency_key,
+                "delivery_key": delivery_key,
                 "replayed": True,
             }
         if status != "triage":
             raise RouteError(f"idempotent task has unsupported status: {status}")
     else:
-        task = board.create_task(
-            title=f"Linear {command['operation']} {command['target']['identifier']}",
-            body=build_task_body(command),
-            assignee="project-manager",
-            skills=["project-manager-linear-worker"],
-            triage=True,
-            idempotency_key=idempotency_key,
-            session_id=source.session_id,
-            max_runtime_seconds=300,
-        )
         if task.get("status") != "triage":
             raise RouteError("new Linear task did not remain in triage")
         if task.get("session_id") != source.session_id:
             raise RouteError("new Linear task did not persist the exact source session")
+        if task.get("idempotency_key") != delivery_key:
+            raise RouteError("new Linear task did not persist the delivery key")
 
     task_id = task["id"]
     board.set_wake_route(task_id, source)
@@ -295,6 +493,7 @@ def route_request(
         "status": "queued",
         "task_id": task_id,
         "idempotency_key": idempotency_key,
+        "delivery_key": delivery_key,
         "replayed": replayed,
         "route_audit": audit,
     }

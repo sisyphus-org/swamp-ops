@@ -48,19 +48,19 @@ class FakeBoard:
         self.calls = []
         self.created = None
 
-    def find_task(self, idempotency_key):
-        self.calls.append(("find", idempotency_key))
-        return self.existing
-
-    def create_task(self, **kwargs):
-        self.calls.append(("create", kwargs))
+    def get_or_create_task(self, delivery_key, **kwargs):
+        self.calls.append(("get_or_create", delivery_key, kwargs))
+        if self.existing is not None:
+            existing = dict(self.existing)
+            existing.setdefault("idempotency_key", delivery_key)
+            return existing, False
         self.created = {
-            "id": "t_1234abcd",
+            "id": f"t_{delivery_key.rsplit(':', 1)[-1][:8]}",
             "status": "triage",
             "session_id": kwargs["session_id"],
             "idempotency_key": kwargs["idempotency_key"],
         }
-        return self.created
+        return self.created, True
 
     def set_wake_route(self, task_id, source):
         self.calls.append(("route", task_id, source))
@@ -79,6 +79,79 @@ class FakeBoard:
 
 
 class ParseTests(unittest.TestCase):
+    def test_structured_hierarchy_request_becomes_bounded_command(self):
+        request = {
+            "operation": "converge_hierarchy",
+            "project": {
+                "name": "health",
+            },
+            "milestone": {
+                "name": "Подолог",
+            },
+            "issue": {
+                "title": "Сходить в Solomia и записаться",
+                "description": "https://solomia.in.ua",
+            },
+        }
+
+        parsed = route.parse_linear_request(
+            request,
+            source_profile="default",
+            uuid_factory=uuid_factory(),
+        )
+
+        self.assertEqual(parsed.command["operation"], "converge_hierarchy")
+        self.assertEqual(
+            parsed.command["target"], {"type": "team", "identifier": "SIS"}
+        )
+        self.assertEqual(
+            parsed.command["change"],
+            {key: value for key, value in request.items() if key != "operation"},
+        )
+
+    def test_hierarchy_replay_key_ignores_random_command_ids_and_changes_with_semantics(self):
+        request = {
+            "operation": "converge_hierarchy",
+            "project": {"name": "health", "description": "private project detail"},
+            "milestone": {"name": "Подолог"},
+            "issue": {
+                "title": "Сходить в Solomia и записаться",
+                "description": "https://solomia.in.ua",
+                "state": "Todo",
+            },
+        }
+        first = route.parse_linear_request(
+            request, source_profile="default", uuid_factory=uuid_factory()
+        ).command
+        alternate_ids = iter(reversed(UUID_VALUES))
+        second = route.parse_linear_request(
+            request, source_profile="default", uuid_factory=lambda: next(alternate_ids)
+        ).command
+        changed_request = json.loads(json.dumps(request, ensure_ascii=False))
+        changed_request["issue"]["description"] += "/changed"
+        changed = route.parse_linear_request(
+            changed_request, source_profile="default", uuid_factory=uuid_factory()
+        ).command
+
+        self.assertNotEqual(first["command_id"], second["command_id"])
+        self.assertNotEqual(first["correlation_id"], second["correlation_id"])
+        self.assertEqual(first["idempotency_key"], second["idempotency_key"])
+        self.assertNotEqual(first["idempotency_key"], changed["idempotency_key"])
+        for entity in ("project", "milestone", "issue"):
+            self.assertNotIn("id", first["change"][entity])
+
+    def test_mutation_key_excludes_source_profile(self):
+        text = "Добавь к SIS-61 комментарий: Globally identical mutation."
+        default = route.parse_linear_request(
+            text, source_profile="default", uuid_factory=uuid_factory()
+        ).command
+        ideas = route.parse_linear_request(
+            text, source_profile="ideas", uuid_factory=uuid_factory()
+        ).command
+
+        self.assertEqual(default["idempotency_key"], ideas["idempotency_key"])
+        self.assertNotEqual(default["source_profile"], ideas["source_profile"])
+
     def test_exact_comment_request_becomes_bounded_command(self):
         parsed = route.parse_linear_request(
             "Добавь к SIS-61 комментарий: SIS-61 E2E proof A.",
@@ -86,13 +159,13 @@ class ParseTests(unittest.TestCase):
         )
 
         command = parsed.command
-        self.assertEqual(command["schema_version"], "linear-command.v1")
+        self.assertEqual(command["schema_version"], "linear-command.v2")
         self.assertEqual(command["source_profile"], "swe")
         self.assertEqual(command["operation"], "add_comment")
         self.assertEqual(command["target"], {"type": "issue", "identifier": "SIS-61"})
         self.assertEqual(command["change"], {"body": "SIS-61 E2E proof A."})
         self.assertEqual(command["policy"], {"mode": "standard"})
-        self.assertRegex(command["idempotency_key"], r"^linear:v1:[a-f0-9]{32}$")
+        self.assertRegex(command["idempotency_key"], r"^linear:v2:[a-f0-9]{32}$")
 
     def test_exact_replay_keeps_idempotency_key(self):
         factory = uuid_factory()
@@ -162,6 +235,7 @@ class ParseTests(unittest.TestCase):
             "Добавь к SIS-61 комментарий: ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890",
             "Добавь к SIS-61 комментарий: Authorization: Bearer secret-shaped-value",
             "Добавь к SIS-61 комментарий: Authorization: Basic secret-shaped-value",
+            "Добавь к SIS-61 комментарий: lin_api_" + "A" * 32,
         )
         for text in cases:
             with self.subTest(text=text):
@@ -213,17 +287,18 @@ class DispatchTests(unittest.TestCase):
         )
 
         self.assertEqual(result["status"], "queued")
-        self.assertEqual(result["task_id"], "t_1234abcd")
+        self.assertEqual(result["task_id"], board.created["id"])
         self.assertFalse(result["replayed"])
-        self.assertEqual([call[0] for call in board.calls], ["find", "create", "route", "audit", "release"])
-        created = board.calls[1][1]
+        self.assertEqual([call[0] for call in board.calls], ["get_or_create", "route", "audit", "release"])
+        created = board.calls[0][2]
         self.assertTrue(created["triage"])
         self.assertEqual(created["assignee"], "project-manager")
         self.assertEqual(created["skills"], ["project-manager-linear-worker"])
         self.assertEqual(created["session_id"], source_context().session_id)
-        self.assertEqual(created["idempotency_key"], result["idempotency_key"])
+        self.assertEqual(created["idempotency_key"], result["delivery_key"])
+        self.assertNotEqual(result["delivery_key"], result["idempotency_key"])
         body = json.loads(created["body"])
-        self.assertEqual(body["schema_version"], "linear-kanban-task.v1")
+        self.assertEqual(body["schema_version"], "linear-kanban-task.v2")
         self.assertEqual(body["command"]["target"]["identifier"], "SIS-61")
         self.assertEqual(body["worker_contract"]["tool"], "pm_linear_execute")
 
@@ -236,8 +311,30 @@ class DispatchTests(unittest.TestCase):
             board=board,
             uuid_factory=uuid_factory(),
         )
-        body = json.loads(board.calls[1][1]["body"])
+        body = json.loads(board.calls[0][2]["body"])
         self.assertEqual(body["command"]["source_profile"], "books")
+
+    def test_cross_profile_and_session_deliveries_share_mutation_key_but_create_separate_tasks(self):
+        text = "Добавь к SIS-61 комментарий: One global change."
+        deliveries = []
+        mutation_keys = []
+        task_ids = []
+        for source in (
+            source_context(profile="default"),
+            source_context(profile="ideas"),
+            source_context(session_id="20260828_120001_deadbeef"),
+        ):
+            board = FakeBoard()
+            result = route.route_request(
+                text, source=source, board=board, uuid_factory=uuid_factory()
+            )
+            deliveries.append(result["delivery_key"])
+            mutation_keys.append(result["idempotency_key"])
+            task_ids.append(result["task_id"])
+
+        self.assertEqual(len(set(mutation_keys)), 1)
+        self.assertEqual(len(set(deliveries)), 3)
+        self.assertEqual(len(set(task_ids)), 3)
 
     def test_route_drift_leaves_task_in_triage(self):
         board = FakeBoard(audit_result="drift")
@@ -248,28 +345,46 @@ class DispatchTests(unittest.TestCase):
                 board=board,
                 uuid_factory=uuid_factory(),
             )
-        self.assertEqual([call[0] for call in board.calls], ["find", "create", "route", "audit"])
+        self.assertEqual([call[0] for call in board.calls], ["get_or_create", "route", "audit"])
 
-    def test_completed_replay_is_verified_noop_without_new_task_or_route_write(self):
+    def test_completed_v2_replay_is_verified_noop_without_new_task_or_route_write(self):
+        request = "Добавь к SIS-61 комментарий: SIS-61 E2E proof A."
+        persisted = route.parse_linear_request(
+            request,
+            source_profile=source_context().profile,
+            uuid_factory=uuid_factory(),
+        ).command
         existing = {
             "id": "t_1234abcd",
             "status": "done",
             "session_id": source_context().session_id,
+            "body": route.build_task_body(persisted),
             "result": json.dumps(
                 {
-                    "schema_version": "linear-result.v1",
-                    "result": "applied",
-                    "verified": True,
+                    "schema_version": "linear-result.v2",
+                    "command_id": persisted["command_id"],
+                    "correlation_id": persisted["correlation_id"],
+                    "idempotency_key": persisted["idempotency_key"],
+                    "source_profile": persisted["source_profile"],
+                    "operation": persisted["operation"],
+                    "mode": "apply",
                     "target": {
+                        "type": "issue",
                         "identifier": "SIS-61",
                         "url": "https://linear.app/example/SIS-61",
                     },
+                    "result": "applied",
+                    "before": {},
+                    "after": {},
+                    "plan": [{"action": "add_comment"}],
+                    "no_op": False,
+                    "verified": True,
                 }
             ),
         }
         board = FakeBoard(existing=existing)
         result = route.route_request(
-            "Добавь к SIS-61 комментарий: SIS-61 E2E proof A.",
+            request,
             source=source_context(),
             board=board,
             uuid_factory=uuid_factory(),
@@ -278,7 +393,204 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(result["status"], "verified_no_op")
         self.assertTrue(result["replayed"])
         self.assertTrue(result["linear_result"]["verified"])
-        self.assertEqual([call[0] for call in board.calls], ["find"])
+        self.assertEqual([call[0] for call in board.calls], ["get_or_create"])
+
+    def test_completed_v2_result_for_another_mutation_is_rejected_fail_closed(self):
+        request = "Добавь к SIS-61 комментарий: SIS-61 E2E proof A."
+        persisted = route.parse_linear_request(
+            request,
+            source_profile=source_context().profile,
+            uuid_factory=uuid_factory(),
+        ).command
+        existing = {
+            "id": "t_1234abcd",
+            "status": "done",
+            "session_id": source_context().session_id,
+            "body": route.build_task_body(persisted),
+            "result": json.dumps(
+                {
+                    "schema_version": "linear-result.v2",
+                    "command_id": persisted["command_id"],
+                    "correlation_id": persisted["correlation_id"],
+                    "idempotency_key": "linear:v2:" + "f" * 32,
+                    "source_profile": persisted["source_profile"],
+                    "operation": persisted["operation"],
+                    "mode": "apply",
+                    "target": {
+                        "type": "issue",
+                        "identifier": "SIS-61",
+                        "url": "https://linear.app/example/SIS-61",
+                    },
+                    "result": "applied",
+                    "before": {},
+                    "after": {},
+                    "plan": [],
+                    "no_op": False,
+                    "verified": True,
+                }
+            ),
+        }
+        board = FakeBoard(existing=existing)
+
+        with self.assertRaisesRegex(route.RouteError, "does not match persisted command"):
+            route.route_request(
+                request,
+                source=source_context(),
+                board=board,
+                uuid_factory=uuid_factory(),
+            )
+
+        self.assertEqual([call[0] for call in board.calls], ["get_or_create"])
+
+    def test_completed_create_result_requires_nonempty_identifier_and_url(self):
+        request = {
+            "operation": "create_issue",
+            "title": "Replay target proof",
+            "description": "",
+            "parent_identifier": "SIS-68",
+            "state": "Todo",
+            "priority": "Low",
+        }
+        persisted = route.parse_linear_request(
+            request,
+            source_profile=source_context().profile,
+            uuid_factory=uuid_factory(),
+        ).command
+        result = {
+            "schema_version": "linear-result.v2",
+            "command_id": persisted["command_id"],
+            "correlation_id": persisted["correlation_id"],
+            "idempotency_key": persisted["idempotency_key"],
+            "source_profile": persisted["source_profile"],
+            "operation": persisted["operation"],
+            "mode": "apply",
+            "target": {"type": "issue"},
+            "result": "applied",
+            "before": None,
+            "after": {},
+            "plan": [],
+            "no_op": False,
+            "verified": True,
+        }
+        board = FakeBoard(
+            existing={
+                "id": "t_1234abcd",
+                "status": "done",
+                "session_id": source_context().session_id,
+                "body": route.build_task_body(persisted),
+                "result": json.dumps(result),
+            }
+        )
+
+        with self.assertRaisesRegex(route.RouteError, "invalid verified target"):
+            route.route_request(
+                request,
+                source=source_context(),
+                board=board,
+                uuid_factory=uuid_factory(),
+            )
+
+    def test_completed_replay_rejects_malformed_persisted_command_ids(self):
+        request = "Добавь к SIS-61 комментарий: SIS-61 E2E proof A."
+        persisted = route.parse_linear_request(
+            request,
+            source_profile=source_context().profile,
+            uuid_factory=uuid_factory(),
+        ).command
+        persisted["command_id"] = None
+        persisted["correlation_id"] = None
+        result = {
+            "schema_version": "linear-result.v2",
+            "command_id": None,
+            "correlation_id": None,
+            "idempotency_key": persisted["idempotency_key"],
+            "source_profile": persisted["source_profile"],
+            "operation": persisted["operation"],
+            "mode": "apply",
+            "target": {
+                "type": "issue",
+                "identifier": "SIS-61",
+                "url": "https://linear.app/example/SIS-61",
+            },
+            "result": "applied",
+            "before": {},
+            "after": {},
+            "plan": [],
+            "no_op": False,
+            "verified": True,
+        }
+        board = FakeBoard(
+            existing={
+                "id": "t_1234abcd",
+                "status": "done",
+                "session_id": source_context().session_id,
+                "body": route.build_task_body(persisted),
+                "result": json.dumps(result),
+            }
+        )
+
+        with self.assertRaisesRegex(route.RouteError, "invalid persisted command"):
+            route.route_request(
+                request,
+                source=source_context(),
+                board=board,
+                uuid_factory=uuid_factory(),
+            )
+
+    def test_completed_v1_result_is_rejected_fail_closed(self):
+        board = FakeBoard(
+            existing={
+                "id": "t_1234abcd",
+                "status": "done",
+                "session_id": source_context().session_id,
+                "result": json.dumps(
+                    {
+                        "schema_version": "linear-result.v1",
+                        "result": "applied",
+                        "verified": True,
+                    }
+                ),
+            }
+        )
+
+        with self.assertRaisesRegex(route.RouteError, "linear-result.v2"):
+            route.route_request(
+                "Добавь к SIS-61 комментарий: SIS-61 E2E proof A.",
+                source=source_context(),
+                board=board,
+                uuid_factory=uuid_factory(),
+            )
+
+        self.assertEqual([call[0] for call in board.calls], ["get_or_create"])
+
+    def test_v2_delivery_key_does_not_lookup_completed_v1_task(self):
+        old_task = {
+            "id": "t_oldv1aaa",
+            "status": "done",
+            "session_id": source_context().session_id,
+            "result": json.dumps(
+                {"schema_version": "linear-result.v1", "verified": True}
+            ),
+        }
+
+        class VersionedBoard(FakeBoard):
+            def get_or_create_task(self, delivery_key, **kwargs):
+                if delivery_key.startswith("linear-delivery:v1:"):
+                    self.calls.append(("get_or_create", delivery_key, kwargs))
+                    return old_task, False
+                return super().get_or_create_task(delivery_key, **kwargs)
+
+        board = VersionedBoard()
+        result = route.route_request(
+            "Добавь к SIS-61 комментарий: SIS-61 E2E proof A.",
+            source=source_context(),
+            board=board,
+            uuid_factory=uuid_factory(),
+        )
+
+        self.assertEqual(result["status"], "queued")
+        self.assertTrue(result["delivery_key"].startswith("linear-delivery:v2:"))
+        self.assertNotEqual(result["task_id"], old_task["id"])
 
     def test_existing_task_from_other_source_session_fails_closed(self):
         board = FakeBoard(

@@ -77,7 +77,7 @@ Wake-only subscription setup, human-facing completion/blocker verification, sour
 
 ## `linear-command-lane-plan`
 
-Read-only Swamp entry point for the Project Manager `linear-command.v1` lane. It accepts only a bounded command slug under `commands/linear/`, resolves one exact `SIS-N` issue, records current state and emits a typed before/after `linear-result.v1` plan. Apply is deliberately absent from the workflow and uses the same deterministic script only after review.
+Read-only Swamp entry point for the Project Manager `linear-command.v2` lane. It accepts only a bounded command slug under `commands/linear/`, resolves one exact `SIS-N` issue, records current state and emits a typed before/after `linear-result.v2` plan. Apply is deliberately absent from the workflow and uses the same deterministic script only after review.
 
 ```bash
 LINEAR_TOKEN=... swamp model validate linear-command-lane-plan
@@ -85,11 +85,13 @@ LINEAR_TOKEN=... swamp workflow validate linear-command-lane-plan
 LINEAR_TOKEN=... swamp workflow run linear-command-lane-plan --input command=<slug>
 ```
 
-MVP operations are exact read, safe workflow-state change, one bounded comment, and bounded issue creation in the `SIS` team under an exact parent. Bulk/fuzzy targeting, `Done`, `Canceled`, `Duplicate`, archive/delete and unrestricted structural writes fail closed. Comment and issue bodies remain exactly user-authored: replay protection uses deterministic caller-supplied Linear entity IDs, a hash-only idempotency journal and exact read-back verification rather than visible markers. Contract and evidence: [`docs/linear-command-lane.md`](docs/linear-command-lane.md).
+MVP operations are exact read, safe workflow-state change, one bounded comment, bounded issue creation in the `SIS` team under an exact parent, and SIS-77's create-only convergence for exactly one project → milestone → issue. The source/model request contains no hierarchy UUID fields: the trusted Project Manager derives separate deterministic UUIDv4 IDs for project, milestone and issue from the semantic idempotency key. Bulk/fuzzy targeting, `Done`, `Canceled`, `Duplicate`, move/update families, archive/delete and unrestricted structural writes fail closed. User text remains clean and exactly authored: replay protection uses deterministic Linear entity IDs, a hash-only idempotency journal and exact read-back verification rather than visible markers. Contract and evidence: [`docs/linear-command-lane.md`](docs/linear-command-lane.md).
 
 ## `linear-source-route` + `project-manager-linear`
 
-SIS-68 generalizes the proven SWE tracer bullet for every current and future user-facing profile. `linear-source-route` derives the source profile from Hermes runtime identity, rejects broker/PM use, validates the exact Telegram thread and persisted session, creates one typed triage task, writes one source-owned `wake` route, requires the route audit, and only then releases the task. It has no Linear client or credential. `project-manager-linear` alone performs deterministic plan/apply/read-back and the typed Kanban lifecycle transition.
+SIS-68 defines universal routing for every current and future user-facing profile. `linear-source-route` derives a global mutation key from operation/target/change/policy, then a distinct delivery key from the full exact source identity. It atomically gets or creates one typed triage task by delivery key, writes one source-owned `wake` route, requires the route audit, and only then releases the task. Different profiles/sessions therefore get separate wake tasks while Project Manager shares deterministic mutation/entity identity and converges globally. The plugin has no Linear client or credential. Local tests prove this contract; the live universal tracer remains post-deploy.
+
+SIS-77 is a clean v2-only protocol cutover: source commands are `linear-command.v2`, persisted PM envelopes are `linear-kanban-task.v2`, and PM results/replay validation are `linear-result.v2`. Mutation keys use the global `linear:v2` namespace and delivery keys use `linear-delivery:v2` while retaining the same source-independent mutation payload and exact source-identity delivery payload. The PM and source replay path reject legacy protocol objects fail closed. There is no fallback or migration code, and the new delivery namespace means completed legacy tasks are not looked up.
 
 The default `hermes-profile-bootstrap` role installs/enables the universal plugin and routing skill, configures no Linear MCP/token for the source profile, and reports mandatory source-Gateway/broker restart plus PM read-back/wake/replay gates. Full local verification, reviewed per-profile rollout, future-profile proof and rollback: [`docs/universal-linear-routing-e2e.md`](docs/universal-linear-routing-e2e.md).
 
@@ -103,21 +105,15 @@ Project → Milestones → Issues → Sub-issues
 
 Each project instance is declared in `manifests/linear/<slug>.json`. The manifest contains no credentials and uses neutral structural names: milestones are the grouping layer inside a project, issues are the primary tracked work/entities, and sub-issues are the concrete child work.
 
-Run through Swamp in two phases:
+The legacy Swamp workflow is a read-only inventory/planning surface:
 
 ```bash
 # Read-only live reconciliation plan
 swamp workflow run linear-project-standard \
-  --input manifest=books \
-  --input mode=plan
-
-# Apply only after reviewing the plan
-swamp workflow run linear-project-standard \
-  --input manifest=books \
-  --input mode=apply
+  --input manifest=books
 ```
 
-The workflow reads `LINEAR_TOKEN` from the calling environment and fails closed before its first write if any manifest reference is missing, ambiguous, or inconsistent. For create-only entries (no `identifier`) it creates missing hierarchy objects as before. For an existing top-level issue, the manifest must supply both its explicit Linear identifier (for example `SIS-6`) and its exact title; only then may apply assign or reassign that issue's `projectMilestoneId`. The update mutation contains no status, project, parent, title, description, priority, assignee, archive, or delete fields. Existing state values may remain in manifests for documentation, but milestone updates never write status. Apply reads the project back and requires a second reconciliation plan to converge.
+The workflow reads `LINEAR_TOKEN` only for bounded live discovery. It has no mode input and always invokes `--mode plan`; the CLI rejects `--mode apply` before manifest, token, client, network, or write access. Its `LinearClient` accepts only the five explicit fixed read queries, and the module exports no mutation constants, create/update helpers, or apply function. Reusable validation, discovery, and planner functions remain. Project Manager is the only Linear mutation boundary and the only place where reviewed create-only hierarchy convergence can execute.
 
 Committed manifests cover `Hermes Foundation`, `Hermes Experience`, `Home Infrastructure`, `Knowledge System`, `Crypto X Daily Intelligence Digest`, and `Книги`. `SIS-1…4`, `SIS-23`, `SIS-24`, `SIS-26`, and `SIS-27` are currently unprojected and intentionally absent: this workflow never changes project membership. The `books` manifest retains the existing Greek hierarchy and the identified Chaucer issue under the existing `Английская литература` milestone.
 
