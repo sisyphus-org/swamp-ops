@@ -187,6 +187,10 @@ def human_summary(result: dict[str, Any]) -> str:
         lead = "Запрос уже выполнен; повторных изменений не потребовалось."
     elif operation == "create_issue":
         lead = "Задача Linear создана."
+    elif operation == "create_standalone_issue":
+        lead = "Самостоятельная задача Linear создана."
+    elif operation == "converge_issue_tree":
+        lead = "Дерево задач Linear готово."
     elif operation == "converge_hierarchy":
         lead = "Иерархия Linear готова."
     elif operation == "change_state":

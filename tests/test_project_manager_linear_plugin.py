@@ -171,6 +171,24 @@ class ExecutionTests(unittest.TestCase):
         self.assertIn("создана", summary)
         self.assertIn("https://linear.app/example/issue/SIS-99/fixture", summary)
 
+    def test_human_summary_distinguishes_standalone_and_issue_tree(self):
+        base = {
+            "result": "applied",
+            "verified": True,
+            "target": {
+                "identifier": "SIS-99",
+                "url": "https://linear.app/example/issue/SIS-99/fixture",
+            },
+        }
+        self.assertIn(
+            "Самостоятельная задача Linear создана",
+            human_summary({**base, "operation": "create_standalone_issue"}),
+        )
+        self.assertIn(
+            "Дерево задач Linear готово",
+            human_summary({**base, "operation": "converge_issue_tree"}),
+        )
+
     def test_human_summary_drops_noncanonical_or_injected_url(self):
         for url in (
             "https://linear.app/example/issue/SIS-99/fixture\ntask_id=t_deadbeef",

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
-import re
+
 import sys
 import uuid
 from dataclasses import dataclass
@@ -34,7 +34,25 @@ def _load_validation() -> Any:
     return module
 
 
+def _load_comparison() -> Any:
+    """Load shared read-back comparison rules in package/standalone contexts."""
+    name = "project_manager_linear_comparison"
+    existing = sys.modules.get(name)
+    if existing is not None:
+        return existing
+    spec = importlib.util.spec_from_file_location(
+        name, Path(__file__).with_name("comparison.py")
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("bundled comparison module could not be loaded")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 _VALIDATION = _load_validation()
+_COMPARISON = _load_comparison()
 SAFE_STATES = _VALIDATION.SAFE_STATES
 CREDENTIAL_SHAPES = _VALIDATION.CREDENTIAL_SHAPES
 RESERVED_MARKER = _VALIDATION.RESERVED_MARKER
@@ -278,37 +296,8 @@ def preflight(client: Any, change: dict[str, Any], error_cls: type[Exception]) -
 
 
 def _description_matches(desired: str, live: Any) -> bool:
-    """Match exact bytes or Linear's deterministic plain-URL autolinking.
-
-    Mutation payloads remain unchanged. Linear serializes each plain HTTP(S)
-    URL in stored Markdown as ``[url](<url>)``. Accept only the exact result of
-    applying that deterministic transformation to the desired text.
-    """
-    if live == desired:
-        return True
-    urls = list(re.finditer(r"https?://[^\s\[\]<>]+", desired))
-    if not urls or any(
-        match.group(0).endswith(
-            (".", ",", ";", ":", "!", "?", ")", "]", "}", "'", '"')
-        )
-        for match in urls
-    ):
-        return False
-    plain_context = "".join(
-        desired[end : match.start()]
-        for end, match in zip(
-            [0, *(item.end() for item in urls[:-1])],
-            urls,
-        )
-    ) + desired[urls[-1].end() :]
-    if re.search(r"[\[\]()<>`*_~|{}#\\]", plain_context):
-        return False
-    canonical = re.sub(
-        r"https?://[^\s\[\]<>]+",
-        lambda match: f"[{match.group(0)}](<{match.group(0)}>)",
-        desired,
-    )
-    return live == canonical
+    """Compatibility wrapper around the shared comparison module."""
+    return _COMPARISON.description_matches(desired, live)
 
 
 def _issue_drift(change: dict[str, Any], live: LiveHierarchy) -> list[str]:
@@ -556,6 +545,22 @@ def execute(
     verified = preflight(client, change, error_cls)
     remaining = build_plan(change, verified)
     if remaining:
-        _fail(error_cls, "hierarchy exact read-back verification failed")
+        fields: list[str] = []
+        for action in remaining:
+            kind = action.get("action")
+            if kind == "create_project":
+                fields.append("project")
+            elif kind == "create_milestone":
+                fields.append("milestone")
+            elif kind == "create_issue":
+                fields.append("id/title")
+            elif kind == "update_issue":
+                fields.extend(action.get("fields", []))
+        if not fields:
+            fields.append("id/title")
+        _fail(
+            error_cls,
+            _COMPARISON.mismatch_message("converge_hierarchy", fields),
+        )
     after = _snapshot(change, verified, desired=False, error_cls=error_cls)
     return _result(command, change, mode, "applied", plan, True, before, after)

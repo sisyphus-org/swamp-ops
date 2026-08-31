@@ -59,6 +59,41 @@ def set_existing_task(board, task):
                     "milestone_id": "milestone-internal",
                 },
             }
+        elif operation in {"create_standalone_issue", "converge_issue_tree"}:
+            target = {
+                "type": "issue",
+                "identifier": "SIS-999",
+                "url": "https://linear.app/example/issue/SIS-999/fixture",
+            }
+            issue = {
+                "id": "issue-internal",
+                "identifier": target["identifier"],
+                "url": target["url"],
+                "title": command["change"]["issue"]["title"],
+                "state": command["change"]["issue"]["state"],
+            }
+            after = {
+                "project": {"id": "project-internal", "name": command["change"]["project"]["name"]},
+                "milestone": {
+                    "id": "milestone-internal",
+                    "name": command["change"]["milestone"]["name"],
+                },
+                "issue": issue,
+            }
+            if operation == "converge_issue_tree":
+                after["sub_issues"] = [
+                    {
+                        "id": f"child-{index}",
+                        "identifier": f"SIS-{1000 + index}",
+                        "url": (
+                            "https://linear.app/example/issue/"
+                            f"SIS-{1000 + index}/fixture"
+                        ),
+                        "title": child["title"],
+                        "state": child["state"],
+                    }
+                    for index, child in enumerate(command["change"]["sub_issues"])
+                ]
         elif operation == "create_issue":
             target = {
                 "type": "issue",
@@ -393,7 +428,7 @@ class PluginTests(unittest.TestCase):
         self.assertNotIn("LinearClient", source)
         self.assertNotIn("swamp-ops-runtime", source)
 
-    def test_tool_schema_accepts_comment_text_or_structured_safe_state(self):
+    def test_tool_schema_accepts_all_bounded_linear_operation_shapes(self):
         parameters = LINEAR_SOURCE_REQUEST_SCHEMA["parameters"]
         self.assertEqual(
             set(parameters["properties"]),
@@ -409,17 +444,31 @@ class PluginTests(unittest.TestCase):
                 "project",
                 "milestone",
                 "issue",
+                "sub_issues",
             },
         )
         self.assertFalse(parameters["additionalProperties"])
-        self.assertEqual(len(parameters["oneOf"]), 4)
+        self.assertEqual(len(parameters["oneOf"]), 6)
         self.assertEqual(
             parameters["properties"]["operation"]["enum"],
-            ["change_state", "create_issue", "converge_hierarchy"],
+            [
+                "change_state",
+                "create_issue",
+                "converge_hierarchy",
+                "create_standalone_issue",
+                "converge_issue_tree",
+            ],
         )
         self.assertEqual(
             [branch.get("properties", {}).get("operation", {}).get("const") for branch in parameters["oneOf"]],
-            [None, "change_state", "create_issue", "converge_hierarchy"],
+            [
+                None,
+                "change_state",
+                "create_issue",
+                "converge_hierarchy",
+                "create_standalone_issue",
+                "converge_issue_tree",
+            ],
         )
         for entity in ("project", "milestone", "issue"):
             entity_schema = parameters["properties"][entity]
@@ -527,6 +576,63 @@ class PluginTests(unittest.TestCase):
         )
         self.assertEqual(result["status"], "completed")
         self.assertEqual(captured, {"source_profile": "books"})
+
+    def test_handler_returns_verified_issue_tree_to_exact_source_session(self):
+        fake_board = mock.Mock()
+        set_existing_task(
+            fake_board,
+            {
+                "id": "t_1234abcd",
+                "status": "done",
+                "session_id": "20260828_120000_abcdef12",
+            },
+        )
+        session_values = {
+            "HERMES_SESSION_PROFILE": "books",
+            "HERMES_SESSION_PLATFORM": "telegram",
+            "HERMES_SESSION_CHAT_ID": "442308262",
+            "HERMES_SESSION_USER_ID": "442308262",
+            "HERMES_SESSION_CHAT_TYPE": "dm",
+            "HERMES_SESSION_THREAD_ID": "448864",
+            "HERMES_SESSION_ID": "20260828_120000_abcdef12",
+        }
+        args = {
+            "operation": "converge_issue_tree",
+            "project": {"name": "Книги", "description": "Reading project"},
+            "milestone": {
+                "name": "Английская литература",
+                "description": "English literature",
+            },
+            "issue": {
+                "title": "Уильям Шекспир — великие трагедии",
+                "description": "Основная четвёрка",
+                "state": "Todo",
+                "priority": "Medium",
+            },
+            "sub_issues": [
+                {
+                    "title": title,
+                    "description": f"Прочитать {title}",
+                    "state": "Todo",
+                    "priority": "Medium",
+                }
+                for title in ("Король Лир", "Макбет", "Гамлет", "Отелло")
+            ],
+        }
+        result = json.loads(
+            handle_linear_source_request(
+                args,
+                session_id="20260828_120000_abcdef12",
+                board_factory=lambda **_kwargs: fake_board,
+                session_getter=lambda name, default="": session_values.get(name, default),
+                runtime_profile_getter=lambda: "books",
+            )
+        )
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["target"]["identifier"], "SIS-999")
+        self.assertEqual(result["context"]["project"], "Книги")
+        self.assertEqual(len(result["context"]["sub_issues"]), 4)
+        self.assertNotIn("task_id", json.dumps(result))
 
     def test_handler_accepts_structured_safe_state_request(self):
         fake_board = mock.Mock()
@@ -842,7 +948,7 @@ class PluginTests(unittest.TestCase):
 
         fake_board.get_or_create_task.side_effect = get_or_create
         fake_board.block_reason.return_value = (
-            "Linear command failed: create_issue bounded field read-back verification failed"
+            "Linear command failed: create_issue read-back mismatched fields: description"
         )
         session_values = {
             "HERMES_SESSION_PROFILE": "ideas",
@@ -874,8 +980,8 @@ class PluginTests(unittest.TestCase):
             {
                 "status": "blocked",
                 "message": (
-                    "Не удалось выполнить: create_issue bounded field read-back "
-                    "verification failed."
+                    "Не удалось выполнить: create_issue read-back mismatched fields: "
+                    "description."
                 ),
             },
         )
@@ -961,6 +1067,44 @@ class PluginTests(unittest.TestCase):
                 }
             ),
             {"status": "blocked", "message": f"Не удалось выполнить: {reason}."},
+        )
+
+    def test_public_block_reason_preserves_only_allowlisted_mismatch_fields(self):
+        cases = (
+            ("create_issue", "create_issue read-back mismatched fields: description, priority"),
+            ("converge_hierarchy", "converge_hierarchy read-back mismatched fields: state"),
+            (
+                "create_standalone_issue",
+                "create_standalone_issue read-back mismatched fields: parent, milestone",
+            ),
+            (
+                "converge_issue_tree",
+                "converge_issue_tree read-back mismatched fields: id/title, team",
+            ),
+        )
+        for operation, reason in cases:
+            with self.subTest(operation=operation):
+                self.assertEqual(
+                    _public_result(
+                        {
+                            "status": "blocked",
+                            "operation": operation,
+                            "reason": f"Linear command failed: {reason}",
+                        }
+                    ),
+                    {"status": "blocked", "message": f"Не удалось выполнить: {reason}."},
+                )
+
+        unsafe = "create_issue read-back mismatched fields: description, live=secret"
+        self.assertEqual(
+            _public_result(
+                {
+                    "status": "blocked",
+                    "operation": "create_issue",
+                    "reason": f"Linear command failed: {unsafe}",
+                }
+            )["message"],
+            "Не удалось выполнить запрос: безопасная причина недоступна.",
         )
 
     def test_handler_hides_unsafe_block_reason_without_inventing_another_reason(self):

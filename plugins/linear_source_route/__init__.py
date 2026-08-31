@@ -28,9 +28,13 @@ PUBLIC_INTERNAL_MARKER = re.compile(
     r"[0-9a-f]{12}\b)"
 )
 PUBLIC_STATES = {"Backlog", "Todo", "Research", "In Progress", "In Review"}
+PUBLIC_MISMATCH_FIELDS = (
+    r"(?:id/title|description|state|priority|parent|project|milestone|team)"
+)
+PUBLIC_MISMATCH_LIST = rf"{PUBLIC_MISMATCH_FIELDS}(?:, {PUBLIC_MISMATCH_FIELDS})*"
 PUBLIC_BLOCK_REASON_PATTERNS = {
     "create_issue": (
-        re.compile(r"^create_issue (?:bounded field )?read-back verification failed$"),
+        re.compile(rf"^create_issue read-back mismatched fields: {PUBLIC_MISMATCH_LIST}$"),
         re.compile(r"^create_issue idempotency key conflicts with another request$"),
         re.compile(r"^create_issue parent is not in the SIS team$"),
         re.compile(r"^exact Linear parent not found: SIS-[1-9][0-9]*$"),
@@ -56,6 +60,29 @@ PUBLIC_BLOCK_REASON_PATTERNS = {
         re.compile(
             r"^(?:project|milestone|issue|hierarchy) exact read-back verification failed$"
         ),
+        re.compile(
+            rf"^converge_hierarchy read-back mismatched fields: {PUBLIC_MISMATCH_LIST}$"
+        ),
+    ),
+    "create_standalone_issue": (
+        re.compile(r"^exact SIS team was not found$"),
+        re.compile(r"^exact existing (?:project|milestone) was not found$"),
+        re.compile(r"^ambiguous scoped Linear match for (?:team SIS|project name|milestone name|workflow state|issue id|issue title)$"),
+        re.compile(r"^(?:project|milestone) supplied description conflicts with live state$"),
+        re.compile(r"^(?:project|milestone) exact-name match conflicts with live scope or name$"),
+        re.compile(
+            rf"^create_standalone_issue read-back mismatched fields: {PUBLIC_MISMATCH_LIST}$"
+        ),
+    ),
+    "converge_issue_tree": (
+        re.compile(r"^exact SIS team was not found$"),
+        re.compile(r"^exact existing (?:project|milestone) was not found$"),
+        re.compile(r"^ambiguous scoped Linear match for (?:team SIS|project name|milestone name|workflow state|issue id|issue title)$"),
+        re.compile(r"^(?:project|milestone) supplied description conflicts with live state$"),
+        re.compile(r"^(?:project|milestone) exact-name match conflicts with live scope or name$"),
+        re.compile(
+            rf"^converge_issue_tree read-back mismatched fields: {PUBLIC_MISMATCH_LIST}$"
+        ),
     ),
 }
 
@@ -64,10 +91,11 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
     "description": (
         "Route one bounded Linear request from an allowed user-facing profile "
         "through the project-manager Kanban lane. Accepts an exact comment text, "
-        "a structured change_state/create_issue request, or one bounded "
-        "converge_hierarchy project→milestone→issue request. The calling profile "
-        "never mutates Linear directly; the tool creates or replays one audited "
-        "wake-only task and returns its state."
+        "a structured state/child request, one bounded hierarchy request, one "
+        "standalone issue in an exact existing scope, or one top-level issue "
+        "plus 1-10 explicit sub-issues. The calling profile never mutates Linear "
+        "directly; the tool creates or replays one audited wake-only task and "
+        "returns its state."
     ),
     "parameters": {
         "type": "object",
@@ -81,7 +109,13 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
             },
             "operation": {
                 "type": "string",
-                "enum": ["change_state", "create_issue", "converge_hierarchy"],
+                "enum": [
+                    "change_state",
+                    "create_issue",
+                    "converge_hierarchy",
+                    "create_standalone_issue",
+                    "converge_issue_tree",
+                ],
             },
             "identifier": {
                 "type": "string",
@@ -126,8 +160,34 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                         "type": "string",
                         "enum": ["Backlog", "Todo", "Research", "In Progress", "In Review"],
                     },
+                    "priority": {
+                        "type": "string",
+                        "enum": ["High", "Medium", "Low"],
+                    },
                 },
                 "required": ["title"],
+            },
+            "sub_issues": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 10,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "title": {"type": "string", "minLength": 1, "maxLength": 200},
+                        "description": {"type": "string", "maxLength": 10000},
+                        "state": {
+                            "type": "string",
+                            "enum": ["Backlog", "Todo", "Research", "In Progress", "In Review"],
+                        },
+                        "priority": {
+                            "type": "string",
+                            "enum": ["High", "Medium", "Low"],
+                        },
+                    },
+                    "required": ["title", "description", "state", "priority"],
+                },
             },
         },
         "oneOf": [
@@ -150,6 +210,20 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
             {
                 "required": ["operation", "project", "milestone", "issue"],
                 "properties": {"operation": {"const": "converge_hierarchy"}},
+            },
+            {
+                "required": ["operation", "project", "milestone", "issue"],
+                "properties": {"operation": {"const": "create_standalone_issue"}},
+            },
+            {
+                "required": [
+                    "operation",
+                    "project",
+                    "milestone",
+                    "issue",
+                    "sub_issues",
+                ],
+                "properties": {"operation": {"const": "converge_issue_tree"}},
             },
         ],
     },
@@ -403,6 +477,47 @@ def _public_target(result: dict[str, Any]) -> tuple[dict[str, Any], dict[str, An
         }
         return public_target, context
 
+    if operation in {"create_standalone_issue", "converge_issue_tree"}:
+        if not isinstance(after, dict):
+            raise RouteError("verified scoped issue result lacks public completion facts")
+        issue = after.get("issue")
+        project = after.get("project")
+        milestone = after.get("milestone")
+        if (
+            not isinstance(issue, dict)
+            or not isinstance(project, dict)
+            or not isinstance(milestone, dict)
+        ):
+            raise RouteError("verified scoped issue result lacks public completion facts")
+        public_target = _public_issue_target(result.get("target"))
+        if (
+            issue.get("identifier") != public_target["identifier"]
+            or issue.get("url") != public_target["url"]
+        ):
+            raise RouteError("verified scoped issue result conflicts with its public target")
+        public_target["title"] = _public_text(issue.get("title"), "issue title")
+        state = issue.get("state")
+        if state not in PUBLIC_STATES:
+            raise RouteError("verified scoped issue result lacks a public state")
+        public_target["state"] = state
+        context: dict[str, Any] = {
+            "project": _public_text(project.get("name"), "project name"),
+            "milestone": _public_text(milestone.get("name"), "milestone name"),
+        }
+        if operation == "converge_issue_tree":
+            children = after.get("sub_issues")
+            if not isinstance(children, list) or not 1 <= len(children) <= 10:
+                raise RouteError("verified issue tree lacks bounded sub-issue facts")
+            public_children = []
+            for child in children:
+                if not isinstance(child, dict):
+                    raise RouteError("verified issue tree has invalid sub-issue facts")
+                target = _public_issue_target({"type": "issue", **child})
+                target["title"] = _public_text(child.get("title"), "sub-issue title")
+                public_children.append(target)
+            context["sub_issues"] = public_children
+        return public_target, context
+
     public_target = _public_issue_target(result.get("target"))
     if not isinstance(after, dict):
         raise RouteError("verified result lacks public completion facts")
@@ -499,6 +614,14 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
         }:
             request = dict(args)
         elif set(args) == {"operation", "project", "milestone", "issue"}:
+            request = dict(args)
+        elif set(args) == {
+            "operation",
+            "project",
+            "milestone",
+            "issue",
+            "sub_issues",
+        }:
             request = dict(args)
         else:
             raise RouteError("tool input does not match a bounded request shape")

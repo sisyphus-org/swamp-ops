@@ -74,6 +74,51 @@ def hierarchy_command(key="linear:SIS:hierarchy:health"):
     return raw
 
 
+def standalone_command(key="linear:SIS:standalone:wardrobe"):
+    raw = command("read_issue", {}, key)
+    raw["operation"] = "create_standalone_issue"
+    raw["target"] = {"type": "team", "identifier": "SIS"}
+    raw["change"] = {
+        "project": {"name": "Wardrobe & Style", "description": "Wardrobe project"},
+        "milestone": {"name": "Autumn 2026", "description": "Autumn milestone"},
+        "issue": {
+            "title": "Выбрать и купить костюм",
+            "description": "Варианты: https://example.com/suits",
+            "state": "Todo",
+            "priority": "High",
+        },
+    }
+    return raw
+
+
+def issue_tree_command(key="linear:SIS:tree:shakespeare"):
+    raw = standalone_command(key)
+    raw["operation"] = "converge_issue_tree"
+    raw["change"] = {
+        "project": {"name": "Книги", "description": "Reading project"},
+        "milestone": {
+            "name": "Английская литература",
+            "description": "English literature",
+        },
+        "issue": {
+            "title": "Уильям Шекспир — великие трагедии",
+            "description": "Прочитать основную четвёрку.",
+            "state": "Todo",
+            "priority": "Medium",
+        },
+        "sub_issues": [
+            {
+                "title": title,
+                "description": f"Прочитать «{title}».",
+                "state": "Todo",
+                "priority": "Medium",
+            }
+            for title in ("Король Лир", "Макбет", "Гамлет", "Отелло")
+        ],
+    }
+    return raw
+
+
 def issue(state="In Progress"):
     return {
         "id": "issue-uuid",
@@ -216,6 +261,7 @@ class FakeHierarchyClient:
         milestone_id,
         title,
         state_id=None,
+        priority=None,
         description=mock.ANY,
     ):
         self.calls.append(("create_project_issue", issue_id))
@@ -229,10 +275,118 @@ class FakeHierarchyClient:
             "projectMilestone": {"id": milestone_id},
             "state": {"id": state_id or "state-Todo", "name": "Todo"},
             "parent": None,
+            "priority": priority,
         }
         if description is not mock.ANY:
             created["description"] = description
         self.issues.append(created)
+
+
+class FakeIssueTreeClient(FakeHierarchyClient):
+    def __init__(self, *, project_name="Wardrobe & Style", milestone_name="Autumn 2026"):
+        super().__init__()
+        self.projects = [
+            {
+                "id": "project-existing",
+                "name": project_name,
+                "description": (
+                    "Wardrobe project"
+                    if project_name == "Wardrobe & Style"
+                    else "Reading project"
+                ),
+                "teams": {"nodes": [{"id": "team-sis"}]},
+            }
+        ]
+        self.milestones = [
+            {
+                "id": "milestone-existing",
+                "name": milestone_name,
+                "description": (
+                    "Autumn milestone"
+                    if milestone_name == "Autumn 2026"
+                    else "English literature"
+                ),
+                "project": {"id": "project-existing"},
+            }
+        ]
+        self.child_counter = 0
+
+    def list_child_issues(self, parent_identifier):
+        self.calls.append(("list_child_issues", parent_identifier))
+        return json.loads(
+            json.dumps(
+                [
+                    item
+                    for item in self.issues
+                    if isinstance(item.get("parent"), dict)
+                    and item["parent"].get("identifier") == parent_identifier
+                ]
+            )
+        )
+
+    def list_team_issues_by_title(self, team_id, title):
+        self.calls.append(("list_team_issues_by_title", team_id, title))
+        return json.loads(
+            json.dumps([item for item in self.issues if item.get("title") == title])
+        )
+
+    def create_issue(
+        self,
+        *,
+        issue_id,
+        team_id,
+        state_id,
+        parent_id,
+        title,
+        description,
+        priority,
+    ):
+        self.child_counter += 1
+        parent = next(item for item in self.issues if item["id"] == parent_id)
+        self.calls.append(("create_issue", issue_id, parent_id))
+        identifier = f"SIS-{200 + self.child_counter}"
+        self.issues.append(
+            {
+                "id": issue_id,
+                "identifier": identifier,
+                "title": title,
+                "url": f"https://linear.app/example/issue/{identifier}",
+                "description": description,
+                "priority": priority,
+                "state": {"id": state_id, "name": state_id.removeprefix("state-")},
+                "team": {"id": team_id, "key": "SIS"},
+                "project": {"id": parent["project"]["id"]},
+                "projectMilestone": {"id": parent["projectMilestone"]["id"]},
+                "parent": {"id": parent_id, "identifier": parent["identifier"]},
+            }
+        )
+
+    def update_scoped_issue(self, issue_id, **changes):
+        self.calls.append(("update_scoped_issue", issue_id, dict(changes)))
+        current = next(item for item in self.issues if item["id"] == issue_id)
+        if "description" in changes:
+            current["description"] = changes["description"]
+        if "state_id" in changes:
+            current["state"] = {
+                "id": changes["state_id"],
+                "name": changes["state_id"].removeprefix("state-"),
+            }
+        if "priority" in changes:
+            current["priority"] = changes["priority"]
+        if "parent_id" in changes:
+            parent_id = changes["parent_id"]
+            if parent_id is None:
+                current["parent"] = None
+            else:
+                parent = next(item for item in self.issues if item["id"] == parent_id)
+                current["parent"] = {
+                    "id": parent_id,
+                    "identifier": parent["identifier"],
+                }
+        if "project_id" in changes:
+            current["project"] = {"id": changes["project_id"]}
+        if "milestone_id" in changes:
+            current["projectMilestone"] = {"id": changes["milestone_id"]}
 
 
 class ContractTests(unittest.TestCase):
@@ -266,6 +420,18 @@ class ContractTests(unittest.TestCase):
         validated = lane.validate_command(create_command())
         self.assertEqual(validated["target"], {"type": "team", "identifier": "SIS"})
         self.assertEqual(validated["change"]["parent_identifier"], "SIS-56")
+
+    def test_accepts_separate_standalone_and_bounded_issue_tree_contracts(self):
+        standalone = lane.validate_command(standalone_command())
+        tree = lane.validate_command(issue_tree_command())
+        self.assertEqual(standalone["operation"], "create_standalone_issue")
+        self.assertEqual(tree["operation"], "converge_issue_tree")
+        self.assertEqual(len(tree["change"]["sub_issues"]), 4)
+
+        oversized = issue_tree_command()
+        oversized["change"]["sub_issues"] *= 3
+        with self.assertRaisesRegex(lane.ContractError, "1-10"):
+            lane.validate_command(oversized)
 
     def test_create_rejects_reserved_replay_markers_before_execution(self):
         for field in ("title", "description"):
@@ -522,6 +688,42 @@ class ClientTests(unittest.TestCase):
         with self.assertRaisesRegex(lane.ContractError, "no managed fields"):
             client.update_project_issue("hierarchy-uuid")
 
+    def test_client_issue_tree_queries_and_updates_exact_structural_fields(self):
+        for field in (
+            "priority",
+            "parent { id identifier }",
+            "project { id }",
+            "projectMilestone { id }",
+        ):
+            with self.subTest(field=field):
+                self.assertIn(field, lane.PARENT_CHILDREN_QUERY)
+        client = self.StubClient()
+        client.update_scoped_issue(
+            "issue-uuid",
+            description="new",
+            state_id="state-Todo",
+            priority=2,
+            parent_id=None,
+            project_id="project-uuid",
+            milestone_id="milestone-uuid",
+        )
+        query, variables = client.calls[-1]
+        self.assertEqual(query, lane.ISSUE_UPDATE)
+        self.assertEqual(
+            variables,
+            {
+                "id": "issue-uuid",
+                "input": {
+                    "description": "new",
+                    "stateId": "state-Todo",
+                    "priority": 2,
+                    "parentId": None,
+                    "projectId": "project-uuid",
+                    "projectMilestoneId": "milestone-uuid",
+                },
+            },
+        )
+
     def test_hierarchy_and_lane_share_validation_policy_constants(self):
         hierarchy = lane._load_hierarchy()
         self.assertIs(lane.SAFE_STATES, hierarchy.SAFE_STATES)
@@ -540,6 +742,167 @@ class ClientTests(unittest.TestCase):
 
 
 class ExecutionTests(unittest.TestCase):
+    def test_standalone_issue_reuses_exact_scope_and_replays_without_parent(self):
+        class CanonicalizingClient(FakeIssueTreeClient):
+            def create_project_issue(self, **kwargs):
+                super().create_project_issue(**kwargs)
+                desired = kwargs["description"]
+                url = "https://example.com/suits"
+                self.issues[-1]["description"] = desired.replace(
+                    url, f"[{url}](<{url}>)"
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = CanonicalizingClient()
+            raw = standalone_command()
+            applied = lane.execute_command(
+                client, raw, mode="apply", journal_path=Path(tmp) / "create.json"
+            )
+            self.assertEqual(applied["result"], "applied")
+            self.assertIsNone(client.issues[0]["parent"])
+            self.assertEqual(client.issues[0]["priority"], lane.PRIORITIES["High"])
+            self.assertEqual(applied["after"]["issue"]["identifier"], "SIS-100")
+
+            writes = [
+                call
+                for call in client.calls
+                if call[0].startswith(("create_", "update_"))
+            ]
+            replay = lane.execute_command(
+                client, raw, mode="apply", journal_path=Path(tmp) / "replay.json"
+            )
+            self.assertEqual(replay["result"], "no_op")
+            self.assertEqual(
+                [
+                    call
+                    for call in client.calls
+                    if call[0].startswith(("create_", "update_"))
+                ],
+                writes,
+            )
+            self.assertEqual(len(client.issues), 1)
+
+    def test_standalone_reconciles_one_exact_legacy_child_without_duplicate(self):
+        class LegacyOutsideDirectProjectQuery(FakeIssueTreeClient):
+            def list_project_issues(self, project_id):
+                self.calls.append(("list_project_issues", project_id))
+                return []
+
+        client = LegacyOutsideDirectProjectQuery()
+        legacy = {
+            "id": "legacy-child-id",
+            "identifier": "SIS-150",
+            "title": "Выбрать и купить костюм",
+            "url": "https://linear.app/example/issue/SIS-150",
+            "description": "Варианты: https://example.com/suits",
+            "priority": lane.PRIORITIES["High"],
+            "state": {"id": "state-Todo", "name": "Todo"},
+            "team": {"id": "team-sis", "key": "SIS"},
+            "project": {"id": "project-existing"},
+            "projectMilestone": {"id": "milestone-existing"},
+            "parent": {"id": "old-parent", "identifier": "SIS-81"},
+        }
+        client.issues.append(legacy)
+        with tempfile.TemporaryDirectory() as tmp:
+            result = lane.execute_command(
+                client,
+                standalone_command(),
+                mode="apply",
+                journal_path=Path(tmp) / "journal.json",
+            )
+        self.assertEqual(result["result"], "applied")
+        self.assertEqual(len(client.issues), 1)
+        self.assertIsNone(client.issues[0]["parent"])
+        self.assertEqual(result["after"]["issue"]["identifier"], "SIS-150")
+        self.assertEqual(
+            [call[0] for call in client.calls].count("create_project_issue"), 0
+        )
+
+    def test_standalone_reports_safe_field_level_readback_mismatch(self):
+        class TamperedClient(FakeIssueTreeClient):
+            def create_project_issue(self, **kwargs):
+                super().create_project_issue(**kwargs)
+                self.issues[-1]["priority"] = lane.PRIORITIES["Low"]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(
+                lane.ContractError,
+                r"^create_standalone_issue read-back mismatched fields: priority$",
+            ):
+                lane.execute_command(
+                    TamperedClient(),
+                    standalone_command(),
+                    mode="apply",
+                    journal_path=Path(tmp) / "journal.json",
+                )
+
+    def test_issue_tree_recovers_after_partial_child_write_and_literal_replay(self):
+        class CrashAfterSecondChild(FakeIssueTreeClient):
+            def __init__(self):
+                super().__init__(
+                    project_name="Книги", milestone_name="Английская литература"
+                )
+                self.crashed = False
+
+            def create_issue(self, **kwargs):
+                super().create_issue(**kwargs)
+                if self.child_counter == 2 and not self.crashed:
+                    self.crashed = True
+                    raise RuntimeError("simulated crash after second child write")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = CrashAfterSecondChild()
+            raw = issue_tree_command()
+            journal = Path(tmp) / "journal.json"
+            with self.assertRaisesRegex(RuntimeError, "second child write"):
+                lane.execute_command(client, raw, mode="apply", journal_path=journal)
+            self.assertEqual(len(client.issues), 3)
+            self.assertFalse(journal.exists())
+
+            recovered = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+            self.assertEqual(recovered["result"], "applied")
+            self.assertEqual(len(recovered["after"]["sub_issues"]), 4)
+            self.assertEqual(len(client.issues), 5)
+            self.assertEqual(
+                {item["title"] for item in client.issues[1:]},
+                {"Король Лир", "Макбет", "Гамлет", "Отелло"},
+            )
+
+            replay = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "replay.json",
+            )
+            self.assertEqual(replay["result"], "no_op")
+            self.assertEqual(len(client.issues), 5)
+
+    def test_issue_tree_never_adopts_non_deterministic_child_by_title(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = FakeIssueTreeClient(
+                project_name="Книги", milestone_name="Английская литература"
+            )
+            raw = issue_tree_command()
+            lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "create.json",
+            )
+            client.issues[1]["id"] = "non-deterministic-child"
+            with self.assertRaisesRegex(
+                lane.ContractError,
+                r"^converge_issue_tree read-back mismatched fields: id/title$",
+            ):
+                lane.execute_command(
+                    client,
+                    raw,
+                    mode="apply",
+                    journal_path=Path(tmp) / "replay.json",
+                )
+
     def test_hierarchy_ids_are_internal_stable_distinct_and_not_command_uuid_bound(self):
         first = hierarchy_command("linear:SIS:hierarchy:stable")
         second = json.loads(json.dumps(first, ensure_ascii=False))
@@ -817,6 +1180,33 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(replay["result"], "no_op")
             self.assertEqual(replay["before"], replay["after"])
             self.assertTrue(replay["verified"])
+
+    def test_hierarchy_reports_safe_field_level_readback_mismatch(self):
+        class StaleUpdateClient(FakeHierarchyClient):
+            def update_project_issue(self, issue_id, **kwargs):
+                self.calls.append(("stale_update_project_issue", issue_id, kwargs))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = StaleUpdateClient()
+            raw = hierarchy_command()
+            raw["change"]["issue"]["state"] = "Todo"
+            lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "create.json",
+            )
+            client.issues[0]["description"] = "tampered"
+            with self.assertRaisesRegex(
+                lane.ContractError,
+                r"^converge_hierarchy read-back mismatched fields: description$",
+            ):
+                lane.execute_command(
+                    client,
+                    raw,
+                    mode="apply",
+                    journal_path=Path(tmp) / "reconcile.json",
+                )
 
     def test_hierarchy_reconciles_exact_issue_description_and_state_drift(self):
         class ReconcilingClient(FakeHierarchyClient):
@@ -1617,10 +2007,51 @@ class ExecutionTests(unittest.TestCase):
             conflicting["idempotency_key"] = raw["idempotency_key"]
             conflicting["change"]["title"] = "Different title"
             journal.unlink()
-            with self.assertRaisesRegex(lane.ContractError, "idempotency key conflicts"):
+            with self.assertRaisesRegex(
+                lane.ContractError,
+                r"^create_issue read-back mismatched fields: id/title$",
+            ):
                 lane.execute_command(
                     client, conflicting, mode="apply", journal_path=journal
                 )
+
+    def test_create_issue_accepts_shared_linear_url_canonicalization_and_replays(self):
+        desired = (
+            "Выбрать костюм: https://example.com/suit\n"
+            "Записаться: https://example.com/appointment"
+        )
+        observed = (
+            "Выбрать костюм: [https://example.com/suit](<https://example.com/suit>)\n"
+            "Записаться: [https://example.com/appointment]"
+            "(<https://example.com/appointment>)"
+        )
+
+        class CanonicalizingClient(FakeClient):
+            def create_issue(self, **kwargs):
+                super().create_issue(**kwargs)
+                self.children[-1]["description"] = observed
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = CanonicalizingClient()
+            raw = create_command()
+            raw["change"]["description"] = desired
+            applied = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "create.json",
+            )
+            self.assertEqual(applied["result"], "applied")
+            self.assertEqual(applied["after"]["description"], observed)
+
+            replay = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "replay.json",
+            )
+            self.assertEqual(replay["result"], "no_op")
+            self.assertEqual(len(client.writes), 1)
 
     def test_create_issue_rejects_tampered_bounded_read_back_before_journal(self):
         for field in ("description", "priority"):
@@ -1635,7 +2066,8 @@ class ExecutionTests(unittest.TestCase):
 
                 journal = Path(tmp) / "journal.json"
                 with self.assertRaisesRegex(
-                    lane.ContractError, "bounded field read-back verification"
+                    lane.ContractError,
+                    rf"^create_issue read-back mismatched fields: {field}$",
                 ):
                     lane.execute_command(
                         TamperedClient(),
@@ -1644,6 +2076,25 @@ class ExecutionTests(unittest.TestCase):
                         journal_path=journal,
                     )
                 self.assertFalse(journal.exists())
+
+    def test_create_issue_reports_only_safe_field_level_readback_mismatches(self):
+        class TamperedClient(FakeClient):
+            def create_issue(self, **kwargs):
+                super().create_issue(**kwargs)
+                self.children[-1]["description"] = "tampered"
+                self.children[-1]["priority"] = 4
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(
+                lane.ContractError,
+                r"^create_issue read-back mismatched fields: description, priority$",
+            ):
+                lane.execute_command(
+                    TamperedClient(),
+                    create_command(),
+                    mode="apply",
+                    journal_path=Path(tmp) / "journal.json",
+                )
 
     def test_create_issue_replay_rejects_later_bounded_field_drift(self):
         for field in ("description", "priority"):
@@ -1657,7 +2108,8 @@ class ExecutionTests(unittest.TestCase):
                 else:
                     client.children[0]["priority"] = 4
                 with self.assertRaisesRegex(
-                    lane.ContractError, "idempotency key conflicts"
+                    lane.ContractError,
+                    rf"^create_issue read-back mismatched fields: {field}$",
                 ):
                     lane.execute_command(client, raw, mode="apply", journal_path=journal)
                 self.assertEqual(len(client.writes), 1)
