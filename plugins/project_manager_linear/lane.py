@@ -37,37 +37,117 @@ MAX_COMMENT_LENGTH = 4000
 MAX_TITLE_LENGTH = 200
 MAX_DESCRIPTION_LENGTH = 10000
 DESCRIPTION_TRANSFORMS = {"remove_links"}
-MARKDOWN_LINK = re.compile(r"\[([^\]\n]+)\]\(\s*https?://[^)\s]+\s*\)")
-AUTOLINK = re.compile(r"<https?://[^>\s]+>")
-BARE_URL = re.compile(r"https?://[^\s<>()]+")
 API_URL = "https://api.linear.app/graphql"
 COMMAND_ROOT = Path(__file__).parents[2] / "commands" / "linear"
 
 
+def _markdown_link_at(text: str, start: int) -> tuple[str, int] | None:
+    """Return visible label and end offset for one HTTP(S) Markdown link."""
+    if text[start] != "[":
+        return None
+    label_end = text.find("](", start + 1)
+    if label_end < 0 or "\n" in text[start + 1 : label_end]:
+        return None
+    destination = label_end + 2
+    while destination < len(text) and text[destination] in " \t":
+        destination += 1
+    if not text.startswith(("http://", "https://"), destination):
+        return None
+    depth = 1
+    cursor = destination
+    while cursor < len(text):
+        char = text[cursor]
+        if char == "\n":
+            return None
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return text[start + 1 : label_end], cursor + 1
+        cursor += 1
+    return None
+
+
+def _http_url_end(text: str, start: int) -> int:
+    """Return the exclusive end of one bare HTTP(S) URL with balanced parentheses."""
+    cursor = start
+    depth = 0
+    while cursor < len(text):
+        char = text[cursor]
+        if char.isspace() or char in "<>":
+            break
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            if depth == 0:
+                break
+            depth -= 1
+        cursor += 1
+    while cursor > start and text[cursor - 1] in ".,;:!?":
+        cursor -= 1
+    return cursor
+
+
+def _skip_whitespace_after_removed_url(text: str, end: int, output: list[str]) -> int:
+    """Avoid only the duplicate horizontal gap created by deleting a URL."""
+    line_start = "".join(output).rpartition("\n")[2]
+    if end >= len(text) or text[end] in "\r\n":
+        if line_start.strip():
+            while output and output[-1] in " \t":
+                output.pop()
+        return end
+    if text[end] in ".,;:!?":
+        if line_start.strip():
+            while output and output[-1] in " \t":
+                output.pop()
+        return end
+    if text[end] not in " \t":
+        return end
+    whitespace_end = end
+    while whitespace_end < len(text) and text[whitespace_end] in " \t":
+        whitespace_end += 1
+    if whitespace_end < len(text) and text[whitespace_end] in "\r\n":
+        if line_start.strip():
+            while output and output[-1] in " \t":
+                output.pop()
+        return end
+    if not output or output[-1] in " \t\n":
+        return whitespace_end
+    return end
+
+
 def remove_description_links(description: Any) -> str:
-    """Remove HTTP(S) destinations while preserving visible description text."""
+    """Remove HTTP(S) destinations while preserving unrelated bytes and formatting."""
     if description is None:
         return ""
     if not isinstance(description, str):
         raise ContractError("live Linear description must be text or null")
-    transformed = MARKDOWN_LINK.sub(r"\1", description)
-    transformed = AUTOLINK.sub("", transformed)
-
-    def remove_bare_url(match: re.Match[str]) -> str:
-        value = match.group(0)
-        trailing = ""
-        while value and value[-1] in ".,;:!?":
-            trailing = value[-1] + trailing
-            value = value[:-1]
-        return trailing
-
-    transformed = BARE_URL.sub(remove_bare_url, transformed)
-    lines = [re.sub(r"[ \t]+", " ", line).strip() for line in transformed.splitlines()]
-    while lines and not lines[0]:
-        lines.pop(0)
-    while lines and not lines[-1]:
-        lines.pop()
-    return "\n".join(lines)
+    output: list[str] = []
+    cursor = 0
+    while cursor < len(description):
+        markdown = _markdown_link_at(description, cursor)
+        if markdown is not None:
+            label, cursor = markdown
+            output.extend(label)
+            continue
+        if description.startswith(("<http://", "<https://"), cursor):
+            end = description.find(">", cursor + 1)
+            if end >= 0 and not any(
+                char.isspace() for char in description[cursor + 1 : end]
+            ):
+                cursor = _skip_whitespace_after_removed_url(
+                    description, end + 1, output
+                )
+                continue
+        if description.startswith(("http://", "https://"), cursor):
+            end = _http_url_end(description, cursor)
+            cursor = _skip_whitespace_after_removed_url(description, end, output)
+            continue
+        output.append(description[cursor])
+        cursor += 1
+    transformed = "".join(output)
+    return "" if not transformed.strip() else transformed
 ISSUE_QUERY = """
 query LaneIssue($id: String!) {
   issue(id: $id) {

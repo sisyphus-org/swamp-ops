@@ -1910,6 +1910,35 @@ class ExecutionTests(unittest.TestCase):
             "Текст дальше",
         )
 
+    def test_remove_links_preserves_parenthesized_markdown_and_url_labels(self):
+        self.assertEqual(
+            lane.remove_description_links(
+                "[Wikipedia](https://example.com/Function_(mathematics))"
+            ),
+            "Wikipedia",
+        )
+        self.assertEqual(
+            lane.remove_description_links(
+                "[https://visible.example](https://target.example)"
+            ),
+            "https://visible.example",
+        )
+
+    def test_remove_links_preserves_unrelated_markdown_whitespace(self):
+        original = (
+            "- parent  \n"
+            "  - [child](https://example.com)\n"
+            "    code  https://target.example  tail  \n"
+            "        indented block"
+        )
+        expected = (
+            "- parent  \n"
+            "  - child\n"
+            "    code  tail  \n"
+            "        indented block"
+        )
+        self.assertEqual(lane.remove_description_links(original), expected)
+
     def test_state_apply_fails_when_read_back_does_not_match(self):
         class StaleClient(FakeClient):
             def update_issue_state(self, issue_id, state_id):

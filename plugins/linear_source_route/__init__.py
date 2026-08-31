@@ -215,7 +215,7 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
             {"required": ["request"]},
             {
                 "required": ["operation", "state"],
-                "anyOf": [
+                "oneOf": [
                     {"required": ["identifier"]},
                     {"required": ["issue_number"]},
                 ],
@@ -225,10 +225,15 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                 "required": ["operation"],
                 "allOf": [
                     {
-                        "anyOf": [
+                        "oneOf": [
                             {"required": ["identifier"]},
                             {"required": ["issue_number"]},
                         ]
+                    },
+                    {
+                        "not": {
+                            "required": ["description", "description_transform"]
+                        }
                     },
                     {
                         "anyOf": [

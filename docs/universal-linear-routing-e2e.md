@@ -46,7 +46,7 @@ Supported operations:
 
 - `read_issue`;
 - `change_state` to the safe non-terminal allowlist;
-- `update_issue` for an explicit non-empty subset of description, deterministic `remove_links`, safe state, and bounded priority on one exact `SIS-N`; source shorthand is carried as a positive `issue_number` and canonicalized to the fixed `SIS` team before persistence;
+- `update_issue` for an explicit non-empty subset of description, deterministic `remove_links`, safe state, and bounded priority on one exact `SIS-N`; the source accepts a positive `issue_number`, binds it to the fixed `SIS` team, and canonicalizes it to the exact `SIS-N` target before emitting the PM command;
 - `add_comment` with deterministic-ID replay protection and a clean user-authored body;
 - `create_issue` in the `SIS` team under one exact `SIS-N` parent, with bounded title/description, safe state, and High/Medium/Low priority.
 - `converge_hierarchy` for exactly one `SIS` project → milestone → top-level issue; it performs complete bounded scoped preflight, safe unique exact-name reuse for project/milestone, deterministic-ID-only issue handling, exact scoped-list read-back, and crash/concurrent replay convergence under the existing hash-only journal lock.
