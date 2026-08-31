@@ -81,6 +81,13 @@ cd /Users/hermes/workspaces/swamp-ops
 hermes plugins doctor plugins/linear_source_route --ci
 hermes plugins doctor plugins/project_manager_linear --ci
 
+# PM credential context only; source profiles must never run this directly.
+HERMES_PROFILE=project-manager python scripts/linear_pm_readonly_smoke.py \
+  --live --operation inventory_linear \
+  --entity-type issues --entity-type projects \
+  --entity-type milestones --entity-type initiatives \
+  --exclude-archived
+
 swamp model validate hermes-profile-bootstrap
 swamp workflow validate hermes-profile-bootstrap
 swamp model validate linear-command-lane-plan
@@ -93,7 +100,7 @@ env -u HERMES_DELEGATED_CHILD_CONTEXT \
   scripts/linear_source_local_route_smoke.py
 ```
 
-The local smoke performs no network mutation. Healthy output reports one ready task, one wake subscription, the exact session/thread, and replay without a second task. The concurrent temporary-DB test separately races one delivery and proves exactly one task and one subscription.
+The local route smoke performs no network mutation. Healthy output reports one ready task, one wake subscription, the exact session/thread, and replay without a second task. The live PM smoke uses only fixed read queries, exhausts pagination, emits safe counts, and creates no journal entry. Source profiles remain credential-free: no `LINEAR_TOKEN`, Linear MCP, GraphQL, or direct read client. The concurrent temporary-DB test separately races one delivery and proves exactly one task and one subscription.
 
 ## Reviewed rollout for existing profiles
 

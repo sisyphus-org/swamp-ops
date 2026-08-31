@@ -41,7 +41,12 @@ OPERATIONS = {
     "create_initiative",
     "update_initiative",
     "link_project_to_initiative",
+    "search_linear",
+    "inventory_linear",
 }
+READ_OPERATIONS = {"read_issue", "inventory_sub_issues", "search_linear", "inventory_linear"}
+LINEAR_ENTITY_TYPES = ("issues", "projects", "milestones", "initiatives")
+MAX_SEARCH_QUERY = 500
 OWNER_CONTROLLED_STATES = {"Done", "Canceled", "Duplicate"}
 OWNER_APPROVAL_PARENT_BLOCKER = (
     "owner approval required: clearing or replacing an issue parent"
@@ -149,9 +154,10 @@ mutation LaneIssueRelationCreate($input: IssueRelationCreateInput!) {
 }
 """
 PARENT_CHILDREN_QUERY = """
-query LaneChildren($id: String!) {
+query LaneChildren($id: String!, $after: String) {
   issue(id: $id) {
-    children(first: 100) {
+    identifier
+    children(first: 100, after: $after) {
       nodes {
         id identifier title url description priority
         state { id name type }
@@ -160,11 +166,62 @@ query LaneChildren($id: String!) {
         project { id }
         projectMilestone { id }
       }
-      pageInfo { hasNextPage }
+      pageInfo { hasNextPage endCursor }
     }
   }
 }
 """
+WORKSPACE_ISSUES_QUERY = """
+query LaneWorkspaceIssues($after: String, $includeArchived: Boolean!) {
+  issues(first: 100, after: $after, includeArchived: $includeArchived) {
+    nodes {
+      id identifier title archivedAt
+      state { name }
+      team { key }
+      parent { identifier }
+      project { name }
+      projectMilestone { name }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+"""
+WORKSPACE_PROJECTS_QUERY = """
+query LaneWorkspaceProjects($after: String, $includeArchived: Boolean!) {
+  projects(first: 100, after: $after, includeArchived: $includeArchived) {
+    nodes { id name archivedAt teams { nodes { key } } }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+"""
+WORKSPACE_MILESTONES_QUERY = """
+query LaneWorkspaceMilestones($after: String, $includeArchived: Boolean!) {
+  projectMilestones(first: 100, after: $after, includeArchived: $includeArchived) {
+    nodes { id name archivedAt project { name teams { nodes { key } } } }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+"""
+WORKSPACE_INITIATIVES_QUERY = """
+query LaneWorkspaceInitiatives($after: String, $includeArchived: Boolean!) {
+  initiatives(first: 100, after: $after, includeArchived: $includeArchived) {
+    nodes { id name archivedAt }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+"""
+WORKSPACE_QUERIES = {
+    "issues": WORKSPACE_ISSUES_QUERY,
+    "projects": WORKSPACE_PROJECTS_QUERY,
+    "milestones": WORKSPACE_MILESTONES_QUERY,
+    "initiatives": WORKSPACE_INITIATIVES_QUERY,
+}
+WORKSPACE_CONNECTION_FIELDS = {
+    "issues": "issues",
+    "projects": "projects",
+    "milestones": "projectMilestones",
+    "initiatives": "initiatives",
+}
 ISSUE_CREATE = """
 mutation LaneCreateIssue($input: IssueCreateInput!) {
   issueCreate(input: $input) { success issue { id identifier } }
@@ -532,18 +589,76 @@ class LinearClient:
         if result.get("success") is not True:
             raise ContractError("Linear issue relation creation did not succeed")
 
+    @staticmethod
+    def _cursor_paginate(fetch: Any, label: str) -> list[dict[str, Any]]:
+        """Exhaust one fixed connection while rejecting malformed progress/duplicates."""
+        nodes: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        seen_cursors: set[str] = set()
+        after: str | None = None
+        while True:
+            connection = fetch(after)
+            if not isinstance(connection, dict) or not isinstance(
+                connection.get("nodes"), list
+            ):
+                raise ContractError(f"{label} payload is invalid")
+            for node in connection["nodes"]:
+                node_id = node.get("id") if isinstance(node, dict) else None
+                if not isinstance(node_id, str) or not node_id:
+                    raise ContractError(f"{label} contains a malformed node")
+                if node_id in seen_ids:
+                    raise ContractError(f"{label} contains a duplicate node")
+                seen_ids.add(node_id)
+                nodes.append(node)
+            page = connection.get("pageInfo")
+            if not isinstance(page, dict) or not isinstance(
+                page.get("hasNextPage"), bool
+            ):
+                raise ContractError(f"{label} pagination is invalid")
+            if not page["hasNextPage"]:
+                return nodes
+            cursor = page.get("endCursor")
+            if (
+                not isinstance(cursor, str)
+                or not cursor
+                or cursor == after
+                or cursor in seen_cursors
+            ):
+                raise ContractError(f"{label} pagination cursor is invalid")
+            seen_cursors.add(cursor)
+            after = cursor
+
+    def list_linear_entities(
+        self, entity_type: str, *, include_archived: bool
+    ) -> list[dict[str, Any]]:
+        """Return one complete core workspace inventory through a fixed query."""
+        if entity_type not in WORKSPACE_QUERIES or not isinstance(include_archived, bool):
+            raise ContractError("workspace entity inventory request is invalid")
+        query = WORKSPACE_QUERIES[entity_type]
+        field = WORKSPACE_CONNECTION_FIELDS[entity_type]
+        return self._cursor_paginate(
+            lambda after: self.execute(
+                query,
+                {"after": after, "includeArchived": include_archived},
+            ).get(field),
+            f"workspace {entity_type}",
+        )
+
     def list_child_issues(self, parent_identifier: str) -> list[dict[str, Any]]:
-        """Return bounded children of one exact parent for create replay detection."""
-        parent = self.execute(PARENT_CHILDREN_QUERY, {"id": parent_identifier}).get("issue")
-        if not isinstance(parent, dict):
-            raise ContractError(f"exact Linear parent not found: {parent_identifier}")
-        connection = parent.get("children")
-        if not isinstance(connection, dict) or connection.get("pageInfo", {}).get("hasNextPage"):
-            raise ContractError("parent exceeds the supported 100-child idempotency limit")
-        nodes = connection.get("nodes")
-        if not isinstance(nodes, list):
-            raise ContractError("Linear children payload is invalid")
-        return nodes
+        """Return every direct child of one exact parent with cursor validation."""
+        def fetch(after: str | None) -> Any:
+            parent = self.execute(
+                PARENT_CHILDREN_QUERY,
+                {"id": parent_identifier, "after": after},
+            ).get("issue")
+            if (
+                not isinstance(parent, dict)
+                or parent.get("identifier") != parent_identifier
+            ):
+                raise ContractError(f"exact Linear parent not found: {parent_identifier}")
+            return parent.get("children")
+
+        return self._cursor_paginate(fetch, "Linear children")
 
     def create_issue(
         self,
@@ -903,7 +1018,12 @@ def validate_command(raw: Any) -> dict[str, Any]:
     }:
         if target != {"type": "team", "identifier": "SIS"}:
             raise ContractError(f"{operation} target must be the exact SIS team")
-    elif operation in {"create_initiative", "update_initiative"}:
+    elif operation in {
+        "create_initiative",
+        "update_initiative",
+        "search_linear",
+        "inventory_linear",
+    }:
         if target != {"type": "workspace", "identifier": "current"}:
             raise ContractError(
                 f"{operation} target must be the current workspace"
@@ -915,7 +1035,40 @@ def validate_command(raw: Any) -> dict[str, Any]:
     change = raw["change"]
     if not isinstance(change, dict):
         raise ContractError("change must be an object")
-    if operation == "read_issue":
+    if operation in {"search_linear", "inventory_linear"}:
+        expected = {"entity_types", "include_archived"}
+        if operation == "search_linear":
+            expected.add("query")
+        entity_types = change.get("entity_types")
+        if set(change) != expected:
+            raise ContractError(f"{operation} change has invalid fields")
+        if (
+            not isinstance(entity_types, list)
+            or not entity_types
+            or len(entity_types) > len(LINEAR_ENTITY_TYPES)
+            or any(not isinstance(item, str) for item in entity_types)
+            or len(set(entity_types)) != len(entity_types)
+            or any(item not in LINEAR_ENTITY_TYPES for item in entity_types)
+            or entity_types
+            != [item for item in LINEAR_ENTITY_TYPES if item in entity_types]
+        ):
+            raise ContractError(
+                "entity_types must be a non-empty ordered unique core entity subset"
+            )
+        if not isinstance(change.get("include_archived"), bool):
+            raise ContractError("include_archived must be boolean")
+        if operation == "search_linear":
+            query = change.get("query")
+            if (
+                not isinstance(query, str)
+                or not query.strip()
+                or len(query) > MAX_SEARCH_QUERY
+                or any(ord(char) < 32 for char in query)
+            ):
+                raise ContractError("search query must be 1-500 safe characters")
+            if any(pattern.search(query) for pattern in CREDENTIAL_SHAPES):
+                raise ContractError("search query contains credential-shaped data")
+    elif operation == "read_issue":
         if change:
             raise ContractError("read_issue change must be empty")
     elif operation == "change_state":
@@ -1175,44 +1328,53 @@ def recursive_sub_issue_inventory(
     seen_identifiers = {root_identifier}
     inventory: list[dict[str, Any]] = []
 
-    def visit(parent_identifier: str) -> None:
+    def children_of(parent_identifier: str) -> list[dict[str, Any]]:
         children = client.list_child_issues(parent_identifier)
         if not isinstance(children, list):
             raise ContractError("sub-issue inventory payload is invalid")
-        for child in children:
-            if not isinstance(child, dict):
-                raise ContractError("sub-issue inventory payload is invalid")
-            child_id = child.get("id")
-            child_identifier = child.get("identifier")
-            child_team = child.get("team")
-            child_parent = child.get("parent")
-            if (
-                not isinstance(child_id, str)
-                or not child_id
-                or not isinstance(child_identifier, str)
-                or not ISSUE_IDENTIFIER.fullmatch(child_identifier)
-                or not isinstance(child_team, dict)
-                or child_team.get("id") != team_id
-                or child_team.get("key") != "SIS"
-                or not isinstance(child_parent, dict)
-                or child_parent.get("identifier") != parent_identifier
-            ):
-                raise ContractError("sub-issue inventory relationship verification failed")
-            if child_id in seen_ids or child_identifier in seen_identifiers:
-                raise ContractError("sub-issue inventory contains a cycle or duplicate")
-            seen_ids.add(child_id)
-            seen_identifiers.add(child_identifier)
-            inventory.append(
-                {
-                    "id": child_id,
-                    **issue_snapshot(child),
-                    "description": child.get("description"),
-                    "parent_identifier": parent_identifier,
-                }
-            )
-            visit(child_identifier)
+        return children
 
-    visit(root_identifier)
+    stack: list[tuple[str, Any]] = [
+        (root_identifier, iter(children_of(root_identifier)))
+    ]
+    while stack:
+        parent_identifier, child_iterator = stack[-1]
+        try:
+            child = next(child_iterator)
+        except StopIteration:
+            stack.pop()
+            continue
+        if not isinstance(child, dict):
+            raise ContractError("sub-issue inventory payload is invalid")
+        child_id = child.get("id")
+        child_identifier = child.get("identifier")
+        child_team = child.get("team")
+        child_parent = child.get("parent")
+        if (
+            not isinstance(child_id, str)
+            or not child_id
+            or not isinstance(child_identifier, str)
+            or not ISSUE_IDENTIFIER.fullmatch(child_identifier)
+            or not isinstance(child_team, dict)
+            or child_team.get("id") != team_id
+            or child_team.get("key") != "SIS"
+            or not isinstance(child_parent, dict)
+            or child_parent.get("identifier") != parent_identifier
+        ):
+            raise ContractError("sub-issue inventory relationship verification failed")
+        if child_id in seen_ids or child_identifier in seen_identifiers:
+            raise ContractError("sub-issue inventory contains a cycle or duplicate")
+        seen_ids.add(child_id)
+        seen_identifiers.add(child_identifier)
+        inventory.append(
+            {
+                "id": child_id,
+                **issue_snapshot(child),
+                "description": child.get("description"),
+                "parent_identifier": parent_identifier,
+            }
+        )
+        stack.append((child_identifier, iter(children_of(child_identifier))))
     return inventory
 
 
@@ -1231,6 +1393,222 @@ def result_base(command: dict[str, Any], issue: dict[str, Any], mode: str) -> di
             "identifier": issue["identifier"],
             "url": issue["url"],
         },
+    }
+
+
+def _read_text(value: Any, label: str, *, maximum: int = 200) -> str:
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or len(value) > maximum
+        or any(ord(char) < 32 for char in value)
+    ):
+        raise ContractError(f"workspace read {label} is invalid")
+    return value
+
+
+def _archived(node: dict[str, Any], *, include_archived: bool) -> bool:
+    archived_at = node.get("archivedAt")
+    if archived_at is not None and (
+        not isinstance(archived_at, str) or not archived_at.strip()
+    ):
+        raise ContractError("workspace read archived state is invalid")
+    archived = archived_at is not None
+    if archived and not include_archived:
+        raise ContractError("workspace read returned archived data outside requested scope")
+    return archived
+
+
+def _safe_workspace_entity(
+    entity_type: str,
+    node: Any,
+    *,
+    include_archived: bool,
+) -> dict[str, Any]:
+    """Project one raw core entity into safe hierarchy/scope facts only."""
+    if not isinstance(node, dict):
+        raise ContractError(f"workspace {entity_type} contains a malformed node")
+    archived = _archived(node, include_archived=include_archived)
+    if entity_type == "issues":
+        identifier = _read_text(node.get("identifier"), "issue identifier", maximum=50)
+        if not ISSUE_IDENTIFIER.fullmatch(identifier):
+            raise ContractError("workspace read issue identifier is invalid")
+        state = node.get("state")
+        team = node.get("team")
+        parent = node.get("parent")
+        project = node.get("project")
+        milestone = node.get("projectMilestone")
+        return {
+            "type": "issue",
+            "identifier": identifier,
+            "title": _read_text(node.get("title"), "issue title"),
+            "state": _read_text(
+                state.get("name") if isinstance(state, dict) else None,
+                "issue state",
+                maximum=100,
+            ),
+            "team": _read_text(
+                team.get("key") if isinstance(team, dict) else None,
+                "issue team",
+                maximum=50,
+            ),
+            "parent_identifier": (
+                None
+                if parent is None
+                else _read_text(
+                    parent.get("identifier") if isinstance(parent, dict) else None,
+                    "issue parent",
+                    maximum=50,
+                )
+            ),
+            "project": (
+                None
+                if project is None
+                else _read_text(
+                    project.get("name") if isinstance(project, dict) else None,
+                    "issue project",
+                )
+            ),
+            "milestone": (
+                None
+                if milestone is None
+                else _read_text(
+                    milestone.get("name") if isinstance(milestone, dict) else None,
+                    "issue milestone",
+                )
+            ),
+            "archived": archived,
+        }
+    name = _read_text(node.get("name"), f"{entity_type} name")
+    if entity_type == "initiatives":
+        return {"type": "initiative", "name": name, "archived": archived}
+    if entity_type == "projects":
+        teams = node.get("teams")
+        team_nodes = teams.get("nodes") if isinstance(teams, dict) else None
+        if not isinstance(team_nodes, list):
+            raise ContractError("workspace read project teams are invalid")
+        team_keys = sorted(
+            {
+                _read_text(
+                    team.get("key") if isinstance(team, dict) else None,
+                    "project team",
+                    maximum=50,
+                )
+                for team in team_nodes
+            }
+        )
+        return {
+            "type": "project",
+            "name": name,
+            "team_keys": team_keys,
+            "archived": archived,
+        }
+    if entity_type == "milestones":
+        project = node.get("project")
+        if not isinstance(project, dict):
+            raise ContractError("workspace read milestone project is invalid")
+        teams = project.get("teams")
+        team_nodes = teams.get("nodes") if isinstance(teams, dict) else None
+        if not isinstance(team_nodes, list):
+            raise ContractError("workspace read milestone teams are invalid")
+        team_keys = sorted(
+            {
+                _read_text(
+                    team.get("key") if isinstance(team, dict) else None,
+                    "milestone team",
+                    maximum=50,
+                )
+                for team in team_nodes
+            }
+        )
+        return {
+            "type": "milestone",
+            "name": name,
+            "project": _read_text(project.get("name"), "milestone project"),
+            "team_keys": team_keys,
+            "archived": archived,
+        }
+    raise ContractError("workspace entity type is invalid")
+
+
+def _workspace_read_result(
+    client: Any,
+    command: dict[str, Any],
+    *,
+    mode: str,
+) -> dict[str, Any]:
+    change = command["change"]
+    include_archived = change["include_archived"]
+    entities: dict[str, list[dict[str, Any]]] = {}
+    scanned_counts: dict[str, int] = {}
+    needle = change.get("query")
+    folded_needle = needle.casefold() if isinstance(needle, str) else None
+    for entity_type in change["entity_types"]:
+        raw_nodes = client.list_linear_entities(
+            entity_type,
+            include_archived=include_archived,
+        )
+        if not isinstance(raw_nodes, list):
+            raise ContractError(f"workspace {entity_type} inventory is invalid")
+        projected = [
+            _safe_workspace_entity(
+                entity_type,
+                node,
+                include_archived=include_archived,
+            )
+            for node in raw_nodes
+        ]
+        scanned_counts[entity_type] = len(projected)
+        if folded_needle is not None:
+            if entity_type == "issues":
+                projected = [
+                    item
+                    for item in projected
+                    if folded_needle in item["identifier"].casefold()
+                    or folded_needle in item["title"].casefold()
+                ]
+            else:
+                projected = [
+                    item
+                    for item in projected
+                    if folded_needle in item["name"].casefold()
+                ]
+        if entity_type == "issues":
+            projected.sort(
+                key=lambda item: int(item["identifier"].removeprefix("SIS-"))
+            )
+        else:
+            projected.sort(
+                key=lambda item: (item["name"].casefold(), item["name"])
+            )
+        entities[entity_type] = projected
+    facts: dict[str, Any] = {
+        "entity_types": list(change["entity_types"]),
+        "include_archived": include_archived,
+        "counts": {kind: len(items) for kind, items in entities.items()},
+        "entities": entities,
+    }
+    if folded_needle is not None:
+        facts = {
+            "query": needle,
+            **facts,
+            "scanned_counts": scanned_counts,
+        }
+    return {
+        "schema_version": "linear-result.v2",
+        "command_id": command["command_id"],
+        "correlation_id": command["correlation_id"],
+        "idempotency_key": command["idempotency_key"],
+        "source_profile": command["source_profile"],
+        "operation": command["operation"],
+        "mode": mode,
+        "target": {"type": "workspace", "identifier": "current"},
+        "result": "read",
+        "before": facts,
+        "after": facts,
+        "plan": [],
+        "no_op": True,
+        "verified": True,
     }
 
 
@@ -1309,7 +1687,7 @@ def execute_command(
         raise ContractError("mode must be plan or apply")
     command = validate_command(raw)
     key_hash, request_hash, _ = command_fingerprint(command)
-    mutation_apply = mode == "apply" and command["operation"] != "read_issue"
+    mutation_apply = mode == "apply" and command["operation"] not in READ_OPERATIONS
     if mutation_apply and not _lock_held:
         if journal_path is None:
             raise ContractError("apply mutations require an idempotency journal")
@@ -1332,7 +1710,7 @@ def execute_command(
         """Record a verified apply result without retaining request content."""
         if (
             mode == "apply"
-            and command["operation"] != "read_issue"
+            and command["operation"] not in READ_OPERATIONS
             and journal_path is not None
             and result.get("verified") is True
         ):
@@ -1382,6 +1760,9 @@ def execute_command(
                 client, command, mode=mode, error_cls=ContractError
             )
         )
+
+    if command["operation"] in {"search_linear", "inventory_linear"}:
+        return _workspace_read_result(client, command, mode=mode)
 
     if command["operation"] == "create_issue":
         change = command["change"]

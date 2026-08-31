@@ -140,6 +140,26 @@ def execute_pm_command(
 ) -> dict[str, Any]:
     """Run deterministic plan then apply and require verified exact read-back."""
     validated = lane.validate_command(command)
+    if validated.get("operation") in {
+        "read_issue",
+        "inventory_sub_issues",
+        "search_linear",
+        "inventory_linear",
+    }:
+        result = lane.execute_command(
+            client,
+            validated,
+            mode="apply",
+            journal_path=None,
+        )
+        if (
+            not isinstance(result, dict)
+            or result.get("schema_version") != "linear-result.v2"
+            or result.get("verified") is not True
+            or result.get("result") != "read"
+        ):
+            raise RuntimeError("Linear read did not return a verified linear-result.v2")
+        return {"plan": result, "result": result}
     plan = lane.execute_command(
         client,
         validated,
@@ -183,6 +203,10 @@ def human_summary(result: dict[str, Any]) -> str:
     operation = result.get("operation")
     if operation == "read_issue":
         lead = "Задача Linear прочитана."
+    elif operation == "search_linear":
+        lead = "Поиск Linear выполнен."
+    elif operation == "inventory_linear":
+        lead = "Инвентаризация Linear выполнена."
     elif result.get("result") == "no_op" or result.get("no_op") is True:
         lead = "Запрос уже выполнен; повторных изменений не потребовалось."
     elif operation == "create_issue":

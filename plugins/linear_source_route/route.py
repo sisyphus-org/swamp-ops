@@ -35,6 +35,8 @@ MAX_HIERARCHY_BYTES = 24_576
 MAX_ISSUE_TREE_BYTES = 65_536
 PRIORITIES = {"High", "Medium", "Low"}
 ISSUE_RELATION_TYPES = {"blocks", "blocked_by", "related"}
+LINEAR_ENTITY_TYPES = ("issues", "projects", "milestones", "initiatives")
+MAX_SEARCH_QUERY = 500
 
 
 class RouteError(RuntimeError):
@@ -213,6 +215,47 @@ def _validate_project_management_request(request: dict[str, Any]) -> dict[str, A
         except ValueError as exc:
             raise RouteError("target_date must be a valid calendar date") from exc
     return {key: value for key, value in request.items() if key != "operation"}
+
+
+def _validate_workspace_read_request(request: dict[str, Any]) -> dict[str, Any]:
+    """Validate one fixed-scope read without accepting query/API passthrough."""
+    operation = request.get("operation")
+    expected = {"operation", "entity_types", "include_archived"}
+    if operation == "search_linear":
+        expected.add("query")
+    if set(request) != expected:
+        raise RouteError("workspace read request has invalid fields")
+    entity_types = request.get("entity_types")
+    if (
+        not isinstance(entity_types, list)
+        or not entity_types
+        or len(entity_types) > len(LINEAR_ENTITY_TYPES)
+        or any(not isinstance(item, str) for item in entity_types)
+        or len(set(entity_types)) != len(entity_types)
+        or any(item not in LINEAR_ENTITY_TYPES for item in entity_types)
+    ):
+        raise RouteError("entity_types must be a non-empty unique core entity subset")
+    include_archived = request.get("include_archived")
+    if not isinstance(include_archived, bool):
+        raise RouteError("include_archived must be boolean")
+    ordered_types = [item for item in LINEAR_ENTITY_TYPES if item in entity_types]
+    if operation == "search_linear":
+        query = request.get("query")
+        _validate_clean_text(
+            query,
+            "query",
+            maximum=MAX_SEARCH_QUERY,
+            required=True,
+        )
+        return {
+            "query": query,
+            "entity_types": ordered_types,
+            "include_archived": include_archived,
+        }
+    return {
+        "entity_types": ordered_types,
+        "include_archived": include_archived,
+    }
 
 
 def _validate_exact_issue_spec(spec: Any, path: str) -> dict[str, Any]:
@@ -563,6 +606,9 @@ def parse_linear_request(
         elif operation in {"create_initiative", "update_initiative"}:
             target = {"type": "workspace", "identifier": "current"}
             change = _validate_initiative_management_request(request)
+        elif operation in {"search_linear", "inventory_linear"}:
+            target = {"type": "workspace", "identifier": "current"}
+            change = _validate_workspace_read_request(request)
         elif operation in {
             "create_project",
             "create_milestone",
@@ -739,6 +785,21 @@ def _verified_replay(
         }
         if target != expected_target:
             raise RouteError("completed replay target does not match persisted command")
+    elif operation in {"search_linear", "inventory_linear"}:
+        if target != {"type": "workspace", "identifier": "current"}:
+            raise RouteError("completed replay target does not match persisted command")
+        after = result.get("after")
+        change = persisted["change"]
+        if (
+            not isinstance(after, dict)
+            or after.get("entity_types") != change.get("entity_types")
+            or after.get("include_archived") != change.get("include_archived")
+            or (
+                operation == "search_linear"
+                and after.get("query") != change.get("query")
+            )
+        ):
+            raise RouteError("completed replay read scope does not match persisted command")
     elif operation in {"create_initiative", "update_initiative"}:
         change = persisted["change"]
         expected_target = {

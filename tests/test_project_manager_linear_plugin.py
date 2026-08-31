@@ -101,6 +101,30 @@ class FakeLifecycle:
 
 
 class ExecutionTests(unittest.TestCase):
+    def test_workspace_read_executes_once_without_journal_or_plan_replay(self):
+        raw = command()
+        raw.update(
+            {
+                "operation": "inventory_linear",
+                "target": {"type": "workspace", "identifier": "current"},
+                "change": {
+                    "entity_types": ["issues"],
+                    "include_archived": False,
+                },
+            }
+        )
+        lane = FakeLane(apply_result="read")
+        output = execute_pm_command(
+            raw,
+            lane=lane,
+            client=object(),
+            journal_path=Path("/must/not/be/used.json"),
+        )
+        self.assertEqual([call[0] for call in lane.calls], ["validate", "apply"])
+        self.assertIsNone(lane.calls[-1][2])
+        self.assertEqual(output["result"]["result"], "read")
+        self.assertEqual(output["plan"], output["result"])
+
     def test_plan_runs_before_apply_and_returns_verified_result(self):
         lane = FakeLane()
         with tempfile.TemporaryDirectory() as tmp:
@@ -247,6 +271,23 @@ class ExecutionTests(unittest.TestCase):
                     human_summary({"operation": operation, "result": "applied", "verified": True, "target": {"type": "project", "identifier": "safe-name"}}),
                     summary,
                 )
+
+    def test_human_summary_distinguishes_workspace_reads(self):
+        for operation, expected in (
+            ("search_linear", "Поиск Linear выполнен."),
+            ("inventory_linear", "Инвентаризация Linear выполнена."),
+        ):
+            self.assertEqual(
+                human_summary(
+                    {
+                        "operation": operation,
+                        "result": "read",
+                        "verified": True,
+                        "target": {"type": "workspace", "identifier": "current"},
+                    }
+                ),
+                expected,
+            )
 
     def test_human_summary_renders_read_before_noop(self):
         read = {

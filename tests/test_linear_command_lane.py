@@ -141,6 +141,27 @@ def initiative_link_command(key="linear:SIS:initiative-link:fixture"):
     return raw
 
 
+def workspace_read_command(
+    operation="inventory_linear",
+    *,
+    entity_types=None,
+    include_archived=False,
+    query="STRASSE",
+    key="linear:workspace:read:fixture",
+):
+    raw = command(operation, {}, key)
+    raw["target"] = {"type": "workspace", "identifier": "current"}
+    raw["change"] = {
+        "entity_types": entity_types
+        if entity_types is not None
+        else ["issues", "projects", "milestones", "initiatives"],
+        "include_archived": include_archived,
+    }
+    if operation == "search_linear":
+        raw["change"] = {"query": query, **raw["change"]}
+    return raw
+
+
 def initiative_command(
     operation="create_initiative", key="linear:workspace:initiative:fixture"
 ):
@@ -634,6 +655,50 @@ class FakeIssueTreeClient(FakeHierarchyClient):
 
 
 class ContractTests(unittest.TestCase):
+    def test_accepts_exact_workspace_read_contracts(self):
+        inventory = lane.validate_command(
+            workspace_read_command(entity_types=["issues", "initiatives"])
+        )
+        search = lane.validate_command(
+            workspace_read_command(
+                "search_linear",
+                entity_types=["projects", "milestones"],
+                query="Straße",
+            )
+        )
+        self.assertEqual(
+            inventory["target"], {"type": "workspace", "identifier": "current"}
+        )
+        self.assertEqual(search["change"]["query"], "Straße")
+
+    def test_workspace_read_contracts_reject_unbounded_or_implicit_inputs(self):
+        cases = []
+        for entity_types in (
+            [],
+            ["issues", "issues"],
+            [["issues"]],
+            [None],
+            ["users"],
+        ):
+            cases.append(workspace_read_command(entity_types=entity_types))
+        raw = workspace_read_command(entity_types=["issues"])
+        raw["change"]["include_archived"] = 1
+        cases.append(raw)
+        for query in ("", "   "):
+            cases.append(
+                workspace_read_command(
+                    "search_linear", entity_types=["issues"], query=query
+                )
+            )
+        raw = workspace_read_command("search_linear", entity_types=["issues"])
+        raw["change"]["graphql"] = "query Workspace"
+        cases.append(raw)
+        for raw in cases:
+            with self.subTest(change=raw["change"]), self.assertRaises(
+                lane.ContractError
+            ):
+                lane.validate_command(raw)
+
     def test_accepts_exact_bounded_issue_relation_command(self):
         validated = lane.validate_command(relation_command())
 
@@ -902,6 +967,119 @@ class WorkflowContractTests(unittest.TestCase):
 
 
 class ClientTests(unittest.TestCase):
+    def test_workspace_core_reads_paginate_to_exhaustion_with_fixed_queries(self):
+        client = object.__new__(lane.LinearClient)
+        calls = []
+        query_by_type = {
+            "issues": lane.WORKSPACE_ISSUES_QUERY,
+            "projects": lane.WORKSPACE_PROJECTS_QUERY,
+            "milestones": lane.WORKSPACE_MILESTONES_QUERY,
+            "initiatives": lane.WORKSPACE_INITIATIVES_QUERY,
+        }
+
+        def execute(query, variables=None):
+            variables = variables or {}
+            calls.append((query, dict(variables)))
+            entity_type = next(
+                kind for kind, fixed_query in query_by_type.items() if query == fixed_query
+            )
+            after = variables["after"]
+            nodes = (
+                [{"id": f"{entity_type}-1", "name": "first"}]
+                if after is None
+                else [{"id": f"{entity_type}-2", "name": "second"}]
+            )
+            return {
+                lane.WORKSPACE_CONNECTION_FIELDS[entity_type]: {
+                    "nodes": nodes,
+                    "pageInfo": {
+                        "hasNextPage": after is None,
+                        "endCursor": "cursor-1" if after is None else None,
+                    },
+                }
+            }
+
+        client.execute = execute
+        for entity_type in lane.LINEAR_ENTITY_TYPES:
+            with self.subTest(entity_type=entity_type):
+                result = client.list_linear_entities(entity_type, include_archived=True)
+                self.assertEqual(len(result), 2)
+                entity_calls = [item for item in calls if item[0] == query_by_type[entity_type]]
+                self.assertEqual(
+                    [item[1] for item in entity_calls],
+                    [
+                        {"after": None, "includeArchived": True},
+                        {"after": "cursor-1", "includeArchived": True},
+                    ],
+                )
+                self.assertIn("first: 100", query_by_type[entity_type])
+                self.assertIn("after: $after", query_by_type[entity_type])
+
+    def test_workspace_pagination_rejects_duplicate_nodes_and_repeated_cursors(self):
+        for duplicate in (True, False):
+            client = object.__new__(lane.LinearClient)
+
+            def execute(_query, variables=None, *, duplicate=duplicate):
+                after = (variables or {}).get("after")
+                return {
+                    "issues": {
+                        "nodes": [
+                            {
+                                "id": "same" if duplicate or after is None else "second",
+                                "identifier": "SIS-1" if after is None else "SIS-2",
+                            }
+                        ],
+                        "pageInfo": {
+                            "hasNextPage": True,
+                            "endCursor": "cursor-1",
+                        },
+                    }
+                }
+
+            client.execute = execute
+            expected = "duplicate" if duplicate else "cursor"
+            with self.subTest(expected=expected), self.assertRaisesRegex(
+                lane.ContractError, expected
+            ):
+                client.list_linear_entities("issues", include_archived=False)
+
+    def test_direct_child_reader_uses_complete_cursor_pagination(self):
+        client = object.__new__(lane.LinearClient)
+        calls = []
+
+        def execute(query, variables=None):
+            self.assertEqual(query, lane.PARENT_CHILDREN_QUERY)
+            calls.append(dict(variables or {}))
+            after = variables["after"]
+            start = 0 if after is None else 100
+            size = 100 if after is None else 1
+            return {
+                "issue": {
+                    "identifier": "SIS-1",
+                    "children": {
+                        "nodes": [
+                            {"id": f"child-{index}", "identifier": f"SIS-{index + 2}"}
+                            for index in range(start, start + size)
+                        ],
+                        "pageInfo": {
+                            "hasNextPage": after is None,
+                            "endCursor": "children-100" if after is None else None,
+                        },
+                    },
+                }
+            }
+
+        client.execute = execute
+        children = client.list_child_issues("SIS-1")
+        self.assertEqual(len(children), 101)
+        self.assertEqual(
+            calls,
+            [
+                {"id": "SIS-1", "after": None},
+                {"id": "SIS-1", "after": "children-100"},
+            ],
+        )
+
     class StubClient(lane.LinearClient):
         def __init__(self):
             self.authorization = "fixture"
@@ -919,7 +1097,15 @@ class ClientTests(unittest.TestCase):
             if query == lane.COMMENT_QUERY:
                 return {"comment": {"id": variables["id"], "issueId": "issue-uuid", "body": "body"}}
             if query == lane.PARENT_CHILDREN_QUERY:
-                return {"issue": {"children": {"nodes": [{**issue(), "description": "marker"}], "pageInfo": {"hasNextPage": False}}}}
+                return {
+                    "issue": {
+                        "identifier": variables["id"],
+                        "children": {
+                            "nodes": [{**issue(), "description": "marker"}],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        },
+                    }
+                }
             if query == lane.ISSUE_UPDATE:
                 return {"issueUpdate": {"success": True}}
             if query == lane.COMMENT_CREATE:
@@ -1162,6 +1348,137 @@ class ClientTests(unittest.TestCase):
 
 
 class ExecutionTests(unittest.TestCase):
+    class WorkspaceReadClient:
+        def __init__(self):
+            self.calls = []
+            self.data = {
+                "issues": [
+                    {
+                        "id": "issue-internal-1",
+                        "identifier": "SIS-9",
+                        "title": "Straße rollout",
+                        "description": "secret description",
+                        "url": "https://linear.app/secret",
+                        "archivedAt": None,
+                        "state": {"name": "In Progress"},
+                        "team": {"key": "SIS"},
+                        "parent": {"identifier": "SIS-1"},
+                        "project": {"name": "Hermes"},
+                        "projectMilestone": {"name": "Read lane"},
+                        "assignee": {"name": "Private", "email": "private@example.com"},
+                    },
+                    {
+                        "id": "issue-internal-2",
+                        "identifier": "SIS-10",
+                        "title": "Other",
+                        "archivedAt": "2026-01-01T00:00:00.000Z",
+                        "state": {"name": "Todo"},
+                        "team": {"key": "SIS"},
+                        "parent": None,
+                        "project": None,
+                        "projectMilestone": None,
+                    },
+                ],
+                "projects": [
+                    {
+                        "id": "project-internal",
+                        "name": "Straße Program",
+                        "archivedAt": None,
+                        "teams": {"nodes": [{"key": "SIS"}]},
+                        "description": "private",
+                    }
+                ],
+                "milestones": [
+                    {
+                        "id": "milestone-internal",
+                        "name": "Roadmap",
+                        "archivedAt": None,
+                        "project": {
+                            "name": "Straße Program",
+                            "teams": {"nodes": [{"key": "SIS"}]},
+                        },
+                    }
+                ],
+                "initiatives": [
+                    {
+                        "id": "initiative-internal",
+                        "name": "STRASSE Initiative",
+                        "archivedAt": None,
+                    }
+                ],
+            }
+
+        def list_linear_entities(self, entity_type, *, include_archived):
+            self.calls.append((entity_type, include_archived))
+            items = self.data[entity_type]
+            if not include_archived:
+                items = [item for item in items if item.get("archivedAt") is None]
+            return json.loads(json.dumps(items))
+
+    def test_inventory_read_returns_safe_hierarchy_counts_without_journal(self):
+        client = self.WorkspaceReadClient()
+        raw = workspace_read_command(
+            entity_types=["issues", "projects", "milestones", "initiatives"],
+            include_archived=True,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Path(tmp) / "journal.json"
+            result = lane.execute_command(client, raw, mode="apply", journal_path=journal)
+            self.assertFalse(journal.exists())
+        self.assertEqual(result["result"], "read")
+        self.assertTrue(result["verified"])
+        self.assertTrue(result["no_op"])
+        self.assertEqual(result["after"]["counts"], {kind: len(client.data[kind]) for kind in lane.LINEAR_ENTITY_TYPES})
+        issue_item = result["after"]["entities"]["issues"][0]
+        self.assertEqual(
+            issue_item,
+            {
+                "type": "issue",
+                "identifier": "SIS-9",
+                "title": "Straße rollout",
+                "state": "In Progress",
+                "team": "SIS",
+                "parent_identifier": "SIS-1",
+                "project": "Hermes",
+                "milestone": "Read lane",
+                "archived": False,
+            },
+        )
+        serialized = json.dumps(result, ensure_ascii=False).lower()
+        for forbidden in (
+            "internal",
+            "description",
+            "https://",
+            "private@example.com",
+            "assignee",
+            "user",
+            "email",
+        ):
+            self.assertNotIn(forbidden, serialized)
+
+    def test_search_uses_unicode_casefold_substring_over_only_allowed_names(self):
+        client = self.WorkspaceReadClient()
+        result = lane.execute_command(
+            client,
+            workspace_read_command("search_linear", query="STRASSE"),
+            mode="apply",
+            journal_path=Path("/must/not/be/written.json"),
+        )
+        after = result["after"]
+        self.assertEqual(after["query"], "STRASSE")
+        self.assertEqual(
+            after["counts"],
+            {"issues": 1, "projects": 1, "milestones": 0, "initiatives": 1},
+        )
+        self.assertEqual(
+            after["scanned_counts"],
+            {"issues": 1, "projects": 1, "milestones": 1, "initiatives": 1},
+        )
+        self.assertEqual(after["entities"]["issues"][0]["identifier"], "SIS-9")
+        self.assertEqual(after["entities"]["projects"][0]["name"], "Straße Program")
+        self.assertEqual(after["entities"]["initiatives"][0]["name"], "STRASSE Initiative")
+        self.assertEqual(after["entities"]["milestones"], [])
+
     def test_blocks_and_equivalent_blocked_by_share_canonical_relation_identity(self):
         blocks = relation_command("blocks", "linear:SIS:relation:blocks")
         blocked_by = relation_command(
@@ -3057,6 +3374,40 @@ class ExecutionTests(unittest.TestCase):
                 [("SIS-87", "SIS-86"), ("SIS-88", "SIS-87")],
             )
             self.assertEqual(client.writes, [])
+
+    def test_recursive_inventory_has_no_python_recursion_depth_cap(self):
+        depth = 1100
+        root = issue("Todo")
+        root.update({"identifier": "SIS-1", "id": "root"})
+
+        class DeepClient:
+            def list_child_issues(self, parent_identifier):
+                number = int(parent_identifier.removeprefix("SIS-"))
+                if number > depth:
+                    return []
+                child_number = number + 1
+                child = issue("Todo")
+                child.update(
+                    {
+                        "id": f"child-{child_number}",
+                        "identifier": f"SIS-{child_number}",
+                        "title": f"Child {child_number}",
+                        "url": f"https://linear.app/example/issue/SIS-{child_number}",
+                        "parent": {
+                            "id": "ignored",
+                            "identifier": parent_identifier,
+                        },
+                    }
+                )
+                return [child]
+
+        inventory = lane.recursive_sub_issue_inventory(
+            DeepClient(),
+            parent=root,
+            team_id="team-uuid",
+        )
+        self.assertEqual(len(inventory), depth)
+        self.assertEqual(inventory[-1]["identifier"], f"SIS-{depth + 1}")
 
     def test_update_sub_issues_clears_descriptions_preserves_states_and_replays_noop(self):
         class RecursiveClient(FakeClient):

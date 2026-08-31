@@ -80,6 +80,67 @@ class FakeBoard:
 
 
 class ParseTests(unittest.TestCase):
+    def test_search_and_inventory_requests_become_workspace_read_commands(self):
+        requests = (
+            (
+                {
+                    "operation": "search_linear",
+                    "query": "Straße",
+                    "entity_types": ["issues", "projects"],
+                    "include_archived": False,
+                },
+                {
+                    "query": "Straße",
+                    "entity_types": ["issues", "projects"],
+                    "include_archived": False,
+                },
+            ),
+            (
+                {
+                    "operation": "inventory_linear",
+                    "entity_types": ["milestones", "initiatives"],
+                    "include_archived": True,
+                },
+                {
+                    "entity_types": ["milestones", "initiatives"],
+                    "include_archived": True,
+                },
+            ),
+        )
+        for request, expected_change in requests:
+            with self.subTest(operation=request["operation"]):
+                parsed = route.parse_linear_request(
+                    request,
+                    source_profile="default",
+                    uuid_factory=uuid_factory(),
+                )
+                self.assertEqual(parsed.command["operation"], request["operation"])
+                self.assertEqual(
+                    parsed.command["target"],
+                    {"type": "workspace", "identifier": "current"},
+                )
+                self.assertEqual(parsed.command["change"], expected_change)
+
+    def test_workspace_reads_require_exact_nonempty_bounded_inputs(self):
+        invalid = (
+            {"operation": "inventory_linear", "entity_types": [], "include_archived": False},
+            {"operation": "inventory_linear", "entity_types": ["issues", "issues"], "include_archived": False},
+            {"operation": "inventory_linear", "entity_types": [["issues"]], "include_archived": False},
+            {"operation": "inventory_linear", "entity_types": [None], "include_archived": False},
+            {"operation": "inventory_linear", "entity_types": ["users"], "include_archived": False},
+            {"operation": "inventory_linear", "entity_types": ["issues"], "include_archived": 1},
+            {"operation": "search_linear", "query": "", "entity_types": ["issues"], "include_archived": False},
+            {"operation": "search_linear", "query": "   ", "entity_types": ["issues"], "include_archived": False},
+            {"operation": "search_linear", "query": "x", "entity_types": ["issues"], "include_archived": False, "graphql": "query"},
+        )
+        for request in invalid:
+            with self.subTest(request=request), self.assertRaises(route.RouteError):
+                route.parse_linear_request(
+                    request,
+                    source_profile="default",
+                    uuid_factory=uuid_factory(),
+                )
+
     def test_structured_issue_relation_request_becomes_bounded_command(self):
         parsed = route.parse_linear_request(
             {
@@ -930,6 +991,67 @@ class DispatchTests(unittest.TestCase):
                 )
                 self.assertEqual(replay["status"], "verified_no_op")
                 self.assertEqual([call[0] for call in board.calls], ["get_or_create"])
+
+    def test_completed_workspace_read_literal_replay_uses_same_task_and_result(self):
+        request = {
+            "operation": "inventory_linear",
+            "entity_types": ["issues"],
+            "include_archived": False,
+        }
+        persisted = route.parse_linear_request(
+            request,
+            source_profile=source_context().profile,
+            uuid_factory=uuid_factory(),
+        ).command
+        facts = {
+            "entity_types": ["issues"],
+            "include_archived": False,
+            "counts": {"issues": 0},
+            "entities": {"issues": []},
+        }
+        linear_result = {
+            "schema_version": "linear-result.v2",
+            "command_id": persisted["command_id"],
+            "correlation_id": persisted["correlation_id"],
+            "idempotency_key": persisted["idempotency_key"],
+            "source_profile": persisted["source_profile"],
+            "operation": persisted["operation"],
+            "mode": "apply",
+            "target": {"type": "workspace", "identifier": "current"},
+            "result": "read",
+            "before": facts,
+            "after": facts,
+            "plan": [],
+            "no_op": True,
+            "verified": True,
+        }
+        board = FakeBoard(
+            existing={
+                "id": "t_1234abcd",
+                "status": "done",
+                "session_id": source_context().session_id,
+                "body": route.build_task_body(persisted),
+                "result": json.dumps(linear_result),
+            }
+        )
+        first = route.route_request(
+            request,
+            source=source_context(),
+            board=board,
+            uuid_factory=uuid_factory(),
+        )
+        second = route.route_request(
+            request,
+            source=source_context(),
+            board=board,
+            uuid_factory=uuid_factory(),
+        )
+        self.assertEqual(first["task_id"], second["task_id"])
+        self.assertEqual(first["linear_result"], second["linear_result"])
+        self.assertEqual(first["status"], "verified_no_op")
+        self.assertEqual(
+            [call[0] for call in board.calls], ["get_or_create", "get_or_create"]
+        )
 
     def test_completed_v2_replay_is_verified_noop_without_new_task_or_route_write(self):
         request = "Добавь к SIS-61 комментарий: SIS-61 E2E proof A."

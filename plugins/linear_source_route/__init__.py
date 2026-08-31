@@ -174,8 +174,22 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                     "create_initiative",
                     "update_initiative",
                     "link_project_to_initiative",
+                    "search_linear",
+                    "inventory_linear",
                 ],
             },
+            "query": {"type": "string", "minLength": 1, "maxLength": 500},
+            "entity_types": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 4,
+                "uniqueItems": True,
+                "items": {
+                    "type": "string",
+                    "enum": ["issues", "projects", "milestones", "initiatives"],
+                },
+            },
+            "include_archived": {"type": "boolean"},
             "identifier": {
                 "type": "string",
                 "pattern": "^SIS-[1-9][0-9]*$",
@@ -314,6 +328,19 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
         },
         "oneOf": [
             {"required": ["request"]},
+            {
+                "required": [
+                    "operation",
+                    "query",
+                    "entity_types",
+                    "include_archived",
+                ],
+                "properties": {"operation": {"const": "search_linear"}},
+            },
+            {
+                "required": ["operation", "entity_types", "include_archived"],
+                "properties": {"operation": {"const": "inventory_linear"}},
+            },
             {
                 "required": ["operation", "identifier", "state"],
                 "properties": {"operation": {"const": "change_state"}},
@@ -700,10 +727,182 @@ def _public_issue_target(target: Any) -> dict[str, Any]:
     return {"type": "issue", "identifier": identifier, "url": url}
 
 
+def _public_workspace_read(
+    result: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    operation = result.get("operation")
+    after = result.get("after")
+    target = result.get("target")
+    if (
+        operation not in {"search_linear", "inventory_linear"}
+        or target != {"type": "workspace", "identifier": "current"}
+        or not isinstance(after, dict)
+    ):
+        raise RouteError("verified workspace read lacks public completion facts")
+    expected_after = {
+        "entity_types",
+        "include_archived",
+        "counts",
+        "entities",
+    }
+    if operation == "search_linear":
+        expected_after |= {"query", "scanned_counts"}
+    if set(after) != expected_after:
+        raise RouteError("verified workspace read has invalid public fields")
+    entity_types = after.get("entity_types")
+    allowed = ("issues", "projects", "milestones", "initiatives")
+    if (
+        not isinstance(entity_types, list)
+        or not entity_types
+        or any(not isinstance(item, str) or item not in allowed for item in entity_types)
+        or len(set(entity_types)) != len(entity_types)
+        or entity_types != [item for item in allowed if item in entity_types]
+    ):
+        raise RouteError("verified workspace read has invalid entity types")
+    if not isinstance(after.get("include_archived"), bool):
+        raise RouteError("verified workspace read has invalid archive scope")
+    entities = after.get("entities")
+    counts = after.get("counts")
+    if (
+        not isinstance(entities, dict)
+        or not isinstance(counts, dict)
+        or set(entities) != set(entity_types)
+        or set(counts) != set(entity_types)
+    ):
+        raise RouteError("verified workspace read has invalid counts")
+
+    public_entities: dict[str, list[dict[str, Any]]] = {}
+    for entity_type in entity_types:
+        items = entities[entity_type]
+        if not isinstance(items, list):
+            raise RouteError("verified workspace read has invalid entity inventory")
+        projected: list[dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                raise RouteError("verified workspace read has malformed entity facts")
+            if entity_type == "issues":
+                expected = {
+                    "type",
+                    "identifier",
+                    "title",
+                    "state",
+                    "team",
+                    "parent_identifier",
+                    "project",
+                    "milestone",
+                    "archived",
+                }
+                identifier = item.get("identifier")
+                parent = item.get("parent_identifier")
+                if (
+                    set(item) != expected
+                    or item.get("type") != "issue"
+                    or not isinstance(identifier, str)
+                    or not PUBLIC_ISSUE_IDENTIFIER.fullmatch(identifier)
+                    or (
+                        parent is not None
+                        and (
+                            not isinstance(parent, str)
+                            or not PUBLIC_ISSUE_IDENTIFIER.fullmatch(parent)
+                        )
+                    )
+                ):
+                    raise RouteError("verified workspace read has invalid issue facts")
+                public_item = {
+                    "type": "issue",
+                    "identifier": identifier,
+                    "title": _public_text(item.get("title"), "issue title"),
+                    "state": _public_text(item.get("state"), "issue state", maximum=100),
+                    "team": _public_text(item.get("team"), "issue team", maximum=50),
+                    "parent_identifier": parent,
+                    "project": (
+                        None
+                        if item.get("project") is None
+                        else _public_text(item.get("project"), "project name")
+                    ),
+                    "milestone": (
+                        None
+                        if item.get("milestone") is None
+                        else _public_text(item.get("milestone"), "milestone name")
+                    ),
+                    "archived": item.get("archived"),
+                }
+            elif entity_type == "initiatives":
+                if set(item) != {"type", "name", "archived"} or item.get("type") != "initiative":
+                    raise RouteError("verified workspace read has invalid initiative facts")
+                public_item = {
+                    "type": "initiative",
+                    "name": _public_text(item.get("name"), "initiative name"),
+                    "archived": item.get("archived"),
+                }
+            else:
+                expected = {"type", "name", "team_keys", "archived"}
+                expected_type = "project"
+                if entity_type == "milestones":
+                    expected.add("project")
+                    expected_type = "milestone"
+                team_keys = item.get("team_keys")
+                if (
+                    set(item) != expected
+                    or item.get("type") != expected_type
+                    or not isinstance(team_keys, list)
+                    or any(not isinstance(value, str) for value in team_keys)
+                    or len(set(team_keys)) != len(team_keys)
+                ):
+                    raise RouteError("verified workspace read has invalid scope facts")
+                public_item = {
+                    "type": expected_type,
+                    "name": _public_text(item.get("name"), f"{expected_type} name"),
+                    "team_keys": [
+                        _public_text(value, "team key", maximum=50)
+                        for value in team_keys
+                    ],
+                    "archived": item.get("archived"),
+                }
+                if entity_type == "milestones":
+                    public_item["project"] = _public_text(
+                        item.get("project"), "milestone project"
+                    )
+            if not isinstance(public_item.get("archived"), bool):
+                raise RouteError("verified workspace read has invalid archive fact")
+            projected.append(public_item)
+        count = counts[entity_type]
+        if isinstance(count, bool) or not isinstance(count, int) or count != len(projected):
+            raise RouteError("verified workspace read count does not match entities")
+        public_entities[entity_type] = projected
+
+    context: dict[str, Any] = {
+        "entity_types": list(entity_types),
+        "include_archived": after["include_archived"],
+        "counts": dict(counts),
+        "entities": public_entities,
+    }
+    if operation == "search_linear":
+        query = after.get("query")
+        scanned = after.get("scanned_counts")
+        if (
+            not isinstance(query, str)
+            or not query.strip()
+            or not isinstance(scanned, dict)
+            or set(scanned) != set(entity_types)
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < counts[kind]
+                for kind, value in scanned.items()
+            )
+        ):
+            raise RouteError("verified workspace search has invalid scope counts")
+        context["scanned_counts"] = dict(scanned)
+    return {"type": "workspace", "identifier": "current"}, context
+
+
 def _public_target(result: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
     """Return only validated user-relevant target facts from one PM result."""
     operation = result.get("operation")
     after = result.get("after")
+    if operation in {"search_linear", "inventory_linear"}:
+        return _public_workspace_read(result)
     if operation == "create_issue_relation":
         target = result.get("target")
         expected_fields = {
@@ -1072,6 +1271,16 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
             request: Any = args["request"]
             if not isinstance(request, str):
                 raise RouteError("request must be text")
+        elif (
+            args.get("operation") in {"search_linear", "inventory_linear"}
+            and "entity_types" in args
+            and "include_archived" in args
+            and set(args).issubset(
+                {"operation", "query", "entity_types", "include_archived"}
+            )
+            and ((args.get("operation") == "search_linear") == ("query" in args))
+        ):
+            request = dict(args)
         elif set(args) == {"operation", "identifier", "state"}:
             request = dict(args)
         elif (

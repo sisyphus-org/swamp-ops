@@ -228,6 +228,51 @@ class FakeKanban:
 
 
 class AdapterTests(unittest.TestCase):
+    def test_tool_schema_exposes_exact_workspace_read_shapes(self):
+        parameters = LINEAR_SOURCE_REQUEST_SCHEMA["parameters"]
+        self.assertEqual(
+            parameters["properties"]["entity_types"],
+            {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 4,
+                "uniqueItems": True,
+                "items": {
+                    "type": "string",
+                    "enum": ["issues", "projects", "milestones", "initiatives"],
+                },
+            },
+        )
+        self.assertEqual(parameters["properties"]["include_archived"], {"type": "boolean"})
+        for operation, required in (
+            (
+                "search_linear",
+                ["operation", "query", "entity_types", "include_archived"],
+            ),
+            (
+                "inventory_linear",
+                ["operation", "entity_types", "include_archived"],
+            ),
+        ):
+            branch = next(
+                item
+                for item in parameters["oneOf"]
+                if item.get("properties", {}).get("operation", {}).get("const")
+                == operation
+            )
+            self.assertEqual(branch["required"], required)
+        serialized = json.dumps(parameters, sort_keys=True).lower()
+        for forbidden in ("graphql", "url", "description_filter", "user", "email"):
+            self.assertNotIn(forbidden, serialized)
+
+    def test_source_plugin_contains_no_linear_credential_or_network_client(self):
+        plugin_root = ROOT / "plugins" / "linear_source_route"
+        source = "\n".join(path.read_text() for path in sorted(plugin_root.glob("*.py")))
+        self.assertNotIn("LINEAR_TOKEN", source)
+        self.assertNotIn("api.linear.app", source)
+        self.assertNotIn("urllib", source)
+        self.assertNotIn("requests.", source)
+
     def test_tool_schema_exposes_only_exact_bounded_issue_relation_shape(self):
         parameters = LINEAR_SOURCE_REQUEST_SCHEMA["parameters"]
 
@@ -495,7 +540,20 @@ class AdapterTests(unittest.TestCase):
                     {"type": "string", "minLength": 1, "maxLength": 200},
                 )
         self.assertEqual(parameters["properties"]["target_date"]["oneOf"][1], {"type": "null"})
-        serialized = json.dumps(parameters, sort_keys=True)
+        serialized = json.dumps(
+            [
+                branch
+                for branch in parameters["oneOf"]
+                if branch.get("properties", {}).get("operation", {}).get("const")
+                in {
+                    "create_project",
+                    "create_milestone",
+                    "update_project",
+                    "update_milestone",
+                }
+            ],
+            sort_keys=True,
+        )
         for forbidden in ("archive", "delete", "lead", "member", "approval"):
             self.assertNotIn(forbidden, serialized.lower())
 
@@ -523,6 +581,9 @@ class PluginTests(unittest.TestCase):
             {
                 "request",
                 "operation",
+                "query",
+                "entity_types",
+                "include_archived",
                 "identifier",
                 "related_identifier",
                 "relation_type",
@@ -574,7 +635,12 @@ class PluginTests(unittest.TestCase):
                 ],
             )
             self.assertNotIn("id", variants[0]["properties"])
-        update_branch = parameters["oneOf"][2]
+        update_branch = next(
+            branch
+            for branch in parameters["oneOf"]
+            if branch.get("properties", {}).get("operation", {}).get("const")
+            == "update_issue"
+        )
         self.assertIn(
             {"required": ["project", "milestone"]},
             update_branch["anyOf"],
@@ -602,7 +668,7 @@ class PluginTests(unittest.TestCase):
             create_branch["properties"]["parent_identifier"],
             {"type": "string", "pattern": "^SIS-[1-9][0-9]*$"},
         )
-        self.assertEqual(len(parameters["oneOf"]), 17)
+        self.assertEqual(len(parameters["oneOf"]), 19)
         self.assertEqual(
             parameters["properties"]["operation"]["enum"],
             [
@@ -622,12 +688,16 @@ class PluginTests(unittest.TestCase):
                 "create_initiative",
                 "update_initiative",
                 "link_project_to_initiative",
+                "search_linear",
+                "inventory_linear",
             ],
         )
         self.assertEqual(
             [branch.get("properties", {}).get("operation", {}).get("const") for branch in parameters["oneOf"]],
             [
                 None,
+                "search_linear",
+                "inventory_linear",
                 "change_state",
                 "update_issue",
                 "inventory_sub_issues",
@@ -659,6 +729,159 @@ class PluginTests(unittest.TestCase):
         entity_schema = parameters["properties"]["issue"]
         self.assertNotIn("id", entity_schema["properties"])
         self.assertNotIn("id", entity_schema["required"])
+
+    def test_handler_queues_workspace_reads_through_pm_task_lane(self):
+        session_values = {
+            "HERMES_SESSION_PROFILE": "default",
+            "HERMES_SESSION_PLATFORM": "telegram",
+            "HERMES_SESSION_CHAT_ID": "442308262",
+            "HERMES_SESSION_USER_ID": "442308262",
+            "HERMES_SESSION_CHAT_TYPE": "dm",
+            "HERMES_SESSION_THREAD_ID": "449233",
+            "HERMES_SESSION_ID": "20260828_120000_abcdef12",
+        }
+        for request in (
+            {
+                "operation": "search_linear",
+                "query": "Straße",
+                "entity_types": ["issues", "projects"],
+                "include_archived": False,
+            },
+            {
+                "operation": "inventory_linear",
+                "entity_types": ["milestones", "initiatives"],
+                "include_archived": True,
+            },
+        ):
+            fake_board = mock.Mock()
+
+            def create_task(_delivery_key, **kwargs):
+                envelope = json.loads(kwargs["body"])
+                self.assertEqual(envelope["command"]["operation"], request["operation"])
+                return (
+                    {
+                        "id": "t_1234abcd",
+                        "status": "triage",
+                        "session_id": kwargs["session_id"],
+                        "idempotency_key": kwargs["idempotency_key"],
+                    },
+                    True,
+                )
+
+            fake_board.get_or_create_task.side_effect = create_task
+            fake_board.audit_route.return_value = {"result": "pass"}
+            result = json.loads(
+                handle_linear_source_request(
+                    request,
+                    session_id="20260828_120000_abcdef12",
+                    board_factory=lambda **_kwargs: fake_board,
+                    session_getter=lambda name, default="": session_values.get(
+                        name, default
+                    ),
+                    runtime_profile_getter=lambda: "default",
+                )
+            )
+            self.assertEqual(result, {"status": "queued"})
+
+    def test_public_result_projects_workspace_reads_without_sensitive_fields(self):
+        after = {
+            "query": "STRASSE",
+            "entity_types": ["issues", "projects"],
+            "include_archived": False,
+            "counts": {"issues": 1, "projects": 1},
+            "scanned_counts": {"issues": 4, "projects": 2},
+            "entities": {
+                "issues": [
+                    {
+                        "type": "issue",
+                        "identifier": "SIS-9",
+                        "title": "Straße rollout",
+                        "state": "In Progress",
+                        "team": "SIS",
+                        "parent_identifier": "SIS-1",
+                        "project": "Hermes",
+                        "milestone": "Read lane",
+                        "archived": False,
+                    }
+                ],
+                "projects": [
+                    {
+                        "type": "project",
+                        "name": "Straße Program",
+                        "team_keys": ["SIS"],
+                        "archived": False,
+                    }
+                ],
+            },
+        }
+        result = _public_result(
+            {
+                "status": "verified_no_op",
+                "linear_result": {
+                    "verified": True,
+                    "result": "read",
+                    "operation": "search_linear",
+                    "target": {"type": "workspace", "identifier": "current"},
+                    "after": after,
+                },
+            }
+        )
+        self.assertEqual(
+            result,
+            {
+                "status": "completed",
+                "changed": False,
+                "target": {"type": "workspace", "identifier": "current"},
+                "context": {
+                    key: value for key, value in after.items() if key != "query"
+                },
+            },
+        )
+        serialized = json.dumps(result, ensure_ascii=False).lower()
+        for forbidden in (
+            "description",
+            "https://",
+            "internal",
+            "email",
+            "user",
+            "task_id",
+            "run_id",
+            "command_id",
+            "query",
+        ):
+            self.assertNotIn(forbidden, serialized)
+
+        tampered = json.loads(json.dumps(after, ensure_ascii=False))
+        tampered["entities"]["issues"][0]["description"] = "must not be ignored"
+        with self.assertRaises(RouteError):
+            _public_result(
+                {
+                    "status": "verified_no_op",
+                    "linear_result": {
+                        "verified": True,
+                        "result": "read",
+                        "operation": "search_linear",
+                        "target": {"type": "workspace", "identifier": "current"},
+                        "after": tampered,
+                    },
+                }
+            )
+
+        tampered = json.loads(json.dumps(after, ensure_ascii=False))
+        tampered["entity_types"] = [["issues"]]
+        with self.assertRaises(RouteError):
+            _public_result(
+                {
+                    "status": "verified_no_op",
+                    "linear_result": {
+                        "verified": True,
+                        "result": "read",
+                        "operation": "search_linear",
+                        "target": {"type": "workspace", "identifier": "current"},
+                        "after": tampered,
+                    },
+                }
+            )
 
     def test_public_result_exposes_recursive_sub_issue_inventory_without_internal_ids(self):
         result = _public_result(

@@ -13,7 +13,7 @@ Required envelope:
   "correlation_id": "UUIDv4",
   "idempotency_key": "linear:SIS-59:read:2026-08-28",
   "source_profile": "swe",
-  "operation": "read_issue | change_state | update_issue | add_comment | create_issue | converge_hierarchy | create_standalone_issue | converge_issue_tree | create_project | create_milestone | update_project | update_milestone | create_initiative | update_initiative | link_project_to_initiative",
+  "operation": "read_issue | search_linear | inventory_linear | change_state | update_issue | add_comment | create_issue | converge_hierarchy | create_standalone_issue | converge_issue_tree | create_project | create_milestone | update_project | update_milestone | create_initiative | update_initiative | link_project_to_initiative",
   "target": {"type": "issue", "identifier": "SIS-N"},
   "change": {},
   "policy": {"mode": "standard"}
@@ -29,6 +29,8 @@ The lane accepts only `linear-command.v2` and emits/accepts only `linear-result.
 ### Allowed operations
 
 - `read_issue`: `change` must be empty.
+- `inventory_linear`: workspace target only; requires an explicit non-empty unique ordered subset of `issues`, `projects`, `milestones`, and `initiatives`, plus an explicit `include_archived` boolean.
+- `search_linear`: the same complete inventory scope plus an exact non-empty query. PM exhausts fixed 100-node cursor pages with cursor and duplicate validation, then applies deterministic Python Unicode `casefold()` substring matching to issue identifiers/titles and entity names. There is no 100-item total cap and no server-side/raw query passthrough.
 - `change_state`: `change` must contain only `state`; exact allowlist is `Backlog`, `Todo`, `Research`, `In Progress`, `In Review`.
 - `update_issue`: `change` is a non-empty subset of `description`, safe `state`, and `High|Medium|Low` priority for one exact `SIS-N`; apply uses exact read-back and literal replay is a verified no-op.
 - `add_comment`: `change` must contain only `body`, 1–4000 characters. The public comment body remains exactly this user-authored text; reserved internal marker text cannot be supplied by the caller.
@@ -43,7 +45,21 @@ The lane accepts only `linear-command.v2` and emits/accepts only `linear-result.
 - `update_initiative`: selects one exact existing initiative by current `name`, then updates a non-empty subset of `new_name`, `description`, and `target_date` with exact read-back and no-op replay.
 - `link_project_to_initiative`: adds one unique exact existing `SIS` project to one unique exact existing initiative. The relation uses a deterministic caller UUIDv4 and exact initiative-project read-back. Unlink is intentionally unavailable. Live schema introspection confirmed `InitiativeCreateInput.id`, nullable `InitiativeCreateInput.targetDate` / `InitiativeUpdateInput.targetDate`, and `InitiativeToProjectCreateInput.id`, `initiativeId`, and `projectId`.
 
-`Done`, `Canceled`, `Duplicate`, initiative unlink/reparenting/status/owner/labels/search, archive, delete, approval, bulk and unrestricted structure changes are unavailable and fail closed. Destructive actions remain owner-controlled instead of being enabled by an untrusted command field.
+`Done`, `Canceled`, `Duplicate`, arbitrary/raw search, initiative unlink/reparenting/status/owner/labels, archive/delete mutations, approval, bulk and unrestricted structure changes are unavailable and fail closed. Destructive actions remain owner-controlled instead of being enabled by an untrusted command field.
+
+### Read-only credential boundary
+
+All workspace reads follow source → durable Kanban/broker → Project Manager. Source profiles have no `LINEAR_TOKEN`, Linear MCP, GraphQL, or direct Linear read client. PM owns the four fixed core-entity queries and complete cursor pagination. Read commands create the normal audited task and exact-session wake, execute once without mutation or journal writes, return `verified=true`, and replay the same persisted task/result. PM read results and public source projection contain safe hierarchy/scope facts and counts only—no descriptions, URLs, internal IDs, users/emails, raw API payloads, or task/run/routing metadata.
+
+Live PM-only smoke (requires the existing PM credential; never run from or provision a source profile):
+
+```bash
+HERMES_PROFILE=project-manager python scripts/linear_pm_readonly_smoke.py \
+  --live --operation inventory_linear \
+  --entity-type issues --entity-type projects \
+  --entity-type milestones --entity-type initiatives \
+  --exclude-archived
+```
 
 ### SIS-77 hierarchy tracer contract (live proof post-deploy)
 
