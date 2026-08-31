@@ -35,6 +35,9 @@ OPERATIONS = {
     "converge_issue_tree",
 }
 OWNER_CONTROLLED_STATES = {"Done", "Canceled", "Duplicate"}
+OWNER_APPROVAL_PARENT_BLOCKER = (
+    "owner approval required: clearing or replacing an issue parent"
+)
 PRIORITIES = {"High": 2, "Medium": 3, "Low": 4}
 MAX_COMMENT_LENGTH = 4000
 MAX_TITLE_LENGTH = 200
@@ -554,6 +557,7 @@ class LinearClient:
             "label_ids",
             "due_date",
             "estimate",
+            "parent_id",
             "project_id",
             "milestone_id",
         }
@@ -576,6 +580,8 @@ class LinearClient:
             payload["dueDate"] = fields["due_date"]
         if "estimate" in fields:
             payload["estimate"] = fields["estimate"]
+        if "parent_id" in fields:
+            payload["parentId"] = fields["parent_id"]
         if "project_id" in fields:
             payload["projectId"] = fields["project_id"]
         if "milestone_id" in fields:
@@ -670,12 +676,13 @@ def validate_command(raw: Any) -> dict[str, Any]:
             "labels",
             "due_date",
             "estimate",
+            "parent_identifier",
             "project",
             "milestone",
         }
         if not change or not set(change).issubset(allowed):
             raise ContractError(
-                "update_issue supports title, description, state, priority, assignee, labels, due_date, estimate, project, and milestone"
+                "update_issue supports title, description, state, priority, assignee, labels, due_date, estimate, parent_identifier, project, and milestone"
             )
         if "title" in change:
             title = change["title"]
@@ -737,6 +744,15 @@ def validate_command(raw: Any) -> dict[str, Any]:
             ):
                 raise ContractError(
                     "update_issue estimate must be a non-negative integer or null"
+                )
+        if "parent_identifier" in change:
+            parent_identifier = change["parent_identifier"]
+            if parent_identifier is not None and (
+                not isinstance(parent_identifier, str)
+                or not ISSUE_IDENTIFIER.fullmatch(parent_identifier)
+            ):
+                raise ContractError(
+                    "update_issue parent_identifier must be an exact SIS-N identifier or null"
                 )
         if ("project" in change) != ("milestone" in change):
             raise ContractError(
@@ -1384,6 +1400,89 @@ def execute_command(
                 raise ContractError(f"exact workflow state not found: {change['state']}")
             state_id = states[0]["id"]
 
+        desired_parent_id: str | object = ...
+        desired_parent_identifier: str | None = None
+        if "parent_identifier" in change:
+            requested_parent = change["parent_identifier"]
+            if requested_parent is None:
+                raise ContractError(OWNER_APPROVAL_PARENT_BLOCKER)
+            if requested_parent == identifier:
+                raise ContractError("update_issue target cannot be its own parent")
+            parent = client.get_issue(requested_parent)
+            if (
+                not isinstance(parent, dict)
+                or parent.get("identifier") != requested_parent
+                or not isinstance(parent.get("id"), str)
+                or not parent["id"].strip()
+            ):
+                raise ContractError(f"exact Linear parent not found: {requested_parent}")
+            parent_team = parent.get("team")
+            if (
+                not isinstance(parent_team, dict)
+                or parent_team.get("id") != team["id"]
+                or parent_team.get("key") != "SIS"
+            ):
+                raise ContractError("update_issue parent is not in the SIS team")
+            current_parent = issue.get("parent")
+            if current_parent is not None:
+                if (
+                    not isinstance(current_parent, dict)
+                    or not isinstance(current_parent.get("id"), str)
+                    or not current_parent["id"].strip()
+                    or not isinstance(current_parent.get("identifier"), str)
+                    or not ISSUE_IDENTIFIER.fullmatch(current_parent["identifier"])
+                ):
+                    raise ContractError("current issue parent is malformed")
+                if (
+                    current_parent["id"] != parent["id"]
+                    or current_parent["identifier"] != requested_parent
+                ):
+                    raise ContractError(OWNER_APPROVAL_PARENT_BLOCKER)
+
+            ancestor = parent
+            seen_ancestors: set[str] = set()
+            while True:
+                ancestor_identifier = ancestor.get("identifier")
+                ancestor_id = ancestor.get("id")
+                ancestor_team = ancestor.get("team")
+                if ancestor_identifier == identifier:
+                    raise ContractError("update_issue parent would create a cycle")
+                if (
+                    not isinstance(ancestor_identifier, str)
+                    or not ISSUE_IDENTIFIER.fullmatch(ancestor_identifier)
+                    or not isinstance(ancestor_id, str)
+                    or not ancestor_id.strip()
+                    or not isinstance(ancestor_team, dict)
+                    or ancestor_team.get("id") != team["id"]
+                    or ancestor_team.get("key") != "SIS"
+                    or ancestor_identifier in seen_ancestors
+                ):
+                    raise ContractError("update_issue parent ancestry is malformed or cyclic")
+                seen_ancestors.add(ancestor_identifier)
+                ancestor_parent = ancestor.get("parent")
+                if ancestor_parent is None:
+                    break
+                if (
+                    not isinstance(ancestor_parent, dict)
+                    or not isinstance(ancestor_parent.get("id"), str)
+                    or not ancestor_parent["id"].strip()
+                    or not isinstance(ancestor_parent.get("identifier"), str)
+                    or not ISSUE_IDENTIFIER.fullmatch(ancestor_parent["identifier"])
+                ):
+                    raise ContractError("update_issue parent ancestry is malformed or cyclic")
+                if ancestor_parent["identifier"] == identifier:
+                    raise ContractError("update_issue parent would create a cycle")
+                next_ancestor = client.get_issue(ancestor_parent["identifier"])
+                if (
+                    not isinstance(next_ancestor, dict)
+                    or next_ancestor.get("id") != ancestor_parent["id"]
+                    or next_ancestor.get("identifier") != ancestor_parent["identifier"]
+                ):
+                    raise ContractError("update_issue parent ancestry is malformed or missing")
+                ancestor = next_ancestor
+            desired_parent_id = parent["id"]
+            desired_parent_identifier = requested_parent
+
         desired_project_id: str | None | object = ...
         desired_milestone_id: str | None | object = ...
         current_project_name: str | None = None
@@ -1582,7 +1681,15 @@ def execute_command(
                 fields.append("assignee")
             if "labels" not in change and live.get("labels") != issue.get("labels"):
                 fields.append("labels")
-            if live.get("parent") != issue.get("parent"):
+            if "parent_identifier" in change:
+                live_parent = live.get("parent")
+                if (
+                    not isinstance(live_parent, dict)
+                    or live_parent.get("id") != desired_parent_id
+                    or live_parent.get("identifier") != desired_parent_identifier
+                ):
+                    fields.append("parent")
+            elif live.get("parent") != issue.get("parent"):
                 fields.append("parent")
             if "project" in change:
                 live_project = live.get("project")
@@ -1638,6 +1745,13 @@ def execute_command(
                 snapshot["due_date"] = live.get("dueDate")
             if "estimate" in change:
                 snapshot["estimate"] = live.get("estimate")
+            if "parent_identifier" in change:
+                live_parent = live.get("parent")
+                snapshot["parent_identifier"] = (
+                    live_parent.get("identifier")
+                    if isinstance(live_parent, dict)
+                    else None
+                )
             if "project" in change:
                 live_project = live.get("project")
                 live_project_id = (
@@ -1686,6 +1800,7 @@ def execute_command(
                 "labels",
                 "due_date",
                 "estimate",
+                "parent_identifier",
                 "project",
                 "milestone",
             )
@@ -1725,6 +1840,8 @@ def execute_command(
             mutation["due_date"] = change["due_date"]
         if "estimate" in change:
             mutation["estimate"] = change["estimate"]
+        if desired_parent_id is not ...:
+            mutation["parent_id"] = desired_parent_id
         if "project" in change:
             mutation["project_id"] = desired_project_id
             mutation["milestone_id"] = desired_milestone_id

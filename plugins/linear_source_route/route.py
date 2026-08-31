@@ -274,6 +274,7 @@ def parse_linear_request(
                 "labels",
                 "due_date",
                 "estimate",
+                "parent_identifier",
                 "project",
                 "milestone",
             }
@@ -299,6 +300,7 @@ def parse_linear_request(
                     "labels",
                     "due_date",
                     "estimate",
+                    "parent_identifier",
                     "project",
                     "milestone",
                 )
@@ -360,6 +362,15 @@ def parse_linear_request(
                     or estimate < 0
                 ):
                     raise RouteError("estimate must be a non-negative integer or null")
+            if "parent_identifier" in change:
+                parent_identifier = change["parent_identifier"]
+                if parent_identifier is not None and (
+                    not isinstance(parent_identifier, str)
+                    or not re.fullmatch(r"SIS-[1-9][0-9]*", parent_identifier)
+                ):
+                    raise RouteError(
+                        "parent_identifier must be an exact SIS-N identifier or null"
+                    )
             if ("project" in change) != ("milestone" in change):
                 raise RouteError("project and milestone must be supplied together")
             if "project" in change:

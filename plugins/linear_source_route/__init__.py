@@ -43,6 +43,13 @@ PUBLIC_BLOCK_REASON_PATTERNS = {
         re.compile(r"^exact Linear (?:project|milestone) not found or ambiguous$"),
         re.compile(r"^project is not in the SIS team$"),
         re.compile(r"^milestone does not belong to the selected project$"),
+        re.compile(r"^exact Linear parent not found: SIS-[1-9][0-9]*$"),
+        re.compile(r"^update_issue parent is not in the SIS team$"),
+        re.compile(r"^update_issue target cannot be its own parent$"),
+        re.compile(r"^update_issue parent would create a cycle$"),
+        re.compile(r"^update_issue parent ancestry is malformed or (?:cyclic|missing)$"),
+        re.compile(r"^current issue parent is malformed$"),
+        re.compile(r"^owner approval required: clearing or replacing an issue parent$"),
         re.compile(rf"^update_issue read-back mismatched fields: {PUBLIC_MISMATCH_LIST}$"),
     ),
     "create_issue": (
@@ -143,8 +150,10 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
             "title": {"type": "string", "minLength": 1, "maxLength": 200},
             "description": {"type": "string", "maxLength": 10000},
             "parent_identifier": {
-                "type": "string",
-                "pattern": "^SIS-[1-9][0-9]*$",
+                "oneOf": [
+                    {"type": "string", "pattern": "^SIS-[1-9][0-9]*$"},
+                    {"type": "null"},
+                ],
             },
             "priority": {"type": "string", "enum": ["High", "Medium", "Low"]},
             "assignee": {
@@ -266,10 +275,20 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                     {"required": ["labels"]},
                     {"required": ["due_date"]},
                     {"required": ["estimate"]},
+                    {"required": ["parent_identifier"]},
                     {"required": ["project", "milestone"]},
                 ],
                 "properties": {
                     "operation": {"const": "update_issue"},
+                    "parent_identifier": {
+                        "oneOf": [
+                            {
+                                "type": "string",
+                                "pattern": "^SIS-[1-9][0-9]*$",
+                            },
+                            {"type": "null"},
+                        ]
+                    },
                     "project": {
                         "oneOf": [
                             {"type": "string", "minLength": 1, "maxLength": 200},
@@ -301,7 +320,13 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                     "state",
                     "priority",
                 ],
-                "properties": {"operation": {"const": "create_issue"}},
+                "properties": {
+                    "operation": {"const": "create_issue"},
+                    "parent_identifier": {
+                        "type": "string",
+                        "pattern": "^SIS-[1-9][0-9]*$",
+                    },
+                },
             },
             {
                 "required": ["operation", "project", "milestone", "issue"],
@@ -702,6 +727,16 @@ def _public_target(result: dict[str, Any]) -> tuple[dict[str, Any], dict[str, An
             ):
                 raise RouteError("verified issue update has an invalid public estimate")
             public_target["estimate"] = estimate
+        if operation == "update_issue" and "parent_identifier" in after:
+            parent_identifier = after.get("parent_identifier")
+            if (
+                not isinstance(parent_identifier, str)
+                or not PUBLIC_ISSUE_IDENTIFIER.fullmatch(parent_identifier)
+            ):
+                raise RouteError(
+                    "verified issue update has an invalid public parent identifier"
+                )
+            public_target["parent_identifier"] = parent_identifier
         if operation == "update_issue" and (
             ("project" in after) != ("milestone" in after)
         ):
@@ -823,6 +858,7 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
                     "labels",
                     "due_date",
                     "estimate",
+                    "parent_identifier",
                     "project",
                     "milestone",
                 }
@@ -839,6 +875,7 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
                     "labels",
                     "due_date",
                     "estimate",
+                    "parent_identifier",
                     "project",
                     "milestone",
                 }

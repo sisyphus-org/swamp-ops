@@ -142,6 +142,7 @@ def issue(state="In Progress"):
 class FakeClient:
     def __init__(self, state="In Progress"):
         self.current = issue(state)
+        self.related = {}
         self.comments = []
         self.children = []
         self.writes = []
@@ -175,6 +176,16 @@ class FakeClient:
         }
 
     def get_issue(self, identifier):
+        related = next(
+            (
+                item
+                for item in self.related.values()
+                if item.get("identifier") == identifier or item.get("id") == identifier
+            ),
+            None,
+        )
+        if related is not None:
+            return json.loads(json.dumps(related))
         if identifier == "SIS-56":
             parent = issue("In Progress")
             parent["id"] = "parent-uuid"
@@ -235,6 +246,14 @@ class FakeClient:
             self.current["dueDate"] = fields["due_date"]
         if "estimate" in fields:
             self.current["estimate"] = fields["estimate"]
+        if "parent_id" in fields:
+            parent_id = fields["parent_id"]
+            parent = self.related.get(parent_id)
+            self.current["parent"] = (
+                None
+                if parent is None
+                else {"id": parent["id"], "identifier": parent["identifier"]}
+            )
         if "project_id" in fields:
             self.current["project"] = (
                 None if fields["project_id"] is None else {"id": fields["project_id"]}
@@ -596,6 +615,17 @@ class ContractTests(unittest.TestCase):
                 with self.assertRaises(lane.ContractError):
                     lane.validate_command(command("update_issue", change))
 
+    def test_update_issue_contract_accepts_parent_attach_and_clear_shape_but_rejects_malformed_values(self):
+        lane.validate_command(command("update_issue", {"parent_identifier": "SIS-68"}))
+        lane.validate_command(command("update_issue", {"parent_identifier": None}))
+        for parent_identifier in ("sis-68", "SIS-0", "SIS-68 ", 68, {"id": "internal"}):
+            with self.subTest(parent_identifier=parent_identifier), self.assertRaisesRegex(
+                lane.ContractError, "parent_identifier"
+            ):
+                lane.validate_command(
+                    command("update_issue", {"parent_identifier": parent_identifier})
+                )
+
     def test_update_issue_contract_rejects_invalid_due_dates_and_estimates(self):
         invalid = (
             {"due_date": "2026-02-30"},
@@ -840,6 +870,19 @@ class ClientTests(unittest.TestCase):
                     "input": {"dueDate": None, "estimate": 8},
                 },
             ),
+        )
+
+    def test_client_issue_reparent_emits_only_parent_id(self):
+        client = self.StubClient()
+        client.update_issue_fields("issue-uuid", parent_id="parent-uuid")
+        self.assertEqual(
+            client.calls,
+            [
+                (
+                    lane.ISSUE_UPDATE,
+                    {"id": "issue-uuid", "input": {"parentId": "parent-uuid"}},
+                )
+            ],
         )
 
     def test_client_issue_move_emits_only_exact_structural_ids(self):
@@ -1996,6 +2039,188 @@ class ExecutionTests(unittest.TestCase):
             )
             self.assertEqual(replay["result"], "no_op")
             self.assertEqual(len(client.writes), 1)
+
+    def test_update_issue_attaches_top_level_issue_with_minimal_write_and_safe_projection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = FakeClient()
+            client.current["parent"] = None
+            parent = issue("Todo")
+            parent.update(
+                {
+                    "id": "parent-68-uuid",
+                    "identifier": "SIS-68",
+                    "title": "Exact parent",
+                    "url": "https://linear.app/example/issue/SIS-68",
+                    "parent": None,
+                }
+            )
+            client.related[parent["id"]] = parent
+            unmanaged = json.loads(json.dumps(client.current))
+            raw = command(
+                "update_issue",
+                {"parent_identifier": "SIS-68"},
+                key="linear:SIS-59:parent-attach:fixture",
+            )
+
+            planned = lane.execute_command(client, raw, mode="plan")
+            self.assertEqual(
+                planned["plan"],
+                [{"action": "update_issue", "fields": ["parent_identifier"]}],
+            )
+            self.assertEqual(planned["after"]["parent_identifier"], "SIS-68")
+            self.assertNotIn("parent-68-uuid", json.dumps(planned))
+            self.assertEqual(client.writes, [])
+
+            applied = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "journal.json",
+            )
+            self.assertEqual(applied["result"], "applied")
+            self.assertEqual(applied["after"]["parent_identifier"], "SIS-68")
+            self.assertNotIn("parent-68-uuid", json.dumps(applied))
+            self.assertEqual(
+                client.writes,
+                [("fields", "issue-uuid", {"parent_id": "parent-68-uuid"})],
+            )
+            self.assertEqual(
+                {key: client.current[key] for key in unmanaged if key != "parent"},
+                {key: unmanaged[key] for key in unmanaged if key != "parent"},
+            )
+
+            replay = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "replay.json",
+            )
+            self.assertEqual(replay["result"], "no_op")
+            self.assertEqual(replay["before"], replay["after"])
+            self.assertEqual(len(client.writes), 1)
+
+    def test_update_issue_parent_clear_and_replacement_require_owner_approval(self):
+        blocker = "owner approval required: clearing or replacing an issue parent"
+        parent = issue("Todo")
+        parent.update(
+            {
+                "id": "parent-68-uuid",
+                "identifier": "SIS-68",
+                "url": "https://linear.app/example/issue/SIS-68",
+                "parent": None,
+            }
+        )
+        for requested, current_parent in (
+            (None, None),
+            (
+                "SIS-68",
+                {"id": "different-parent-uuid", "identifier": "SIS-1"},
+            ),
+        ):
+            client = FakeClient()
+            client.current["parent"] = current_parent
+            client.related[parent["id"]] = parent
+            with self.subTest(requested=requested), self.assertRaisesRegex(
+                lane.ContractError, rf"^{blocker}$"
+            ):
+                lane.execute_command(
+                    client,
+                    command(
+                        "update_issue",
+                        {"parent_identifier": requested},
+                        key=f"linear:SIS-59:parent-blocker:{requested}",
+                    ),
+                    mode="plan",
+                )
+            self.assertEqual(client.writes, [])
+
+    def test_update_issue_rejects_missing_wrong_team_self_and_cycle_parent(self):
+        cases = []
+
+        missing = FakeClient()
+        missing.current["parent"] = None
+        cases.append((missing, "SIS-68", "exact Linear parent not found"))
+
+        wrong_team = FakeClient()
+        wrong_team.current["parent"] = None
+        wrong_team_parent = issue("Todo")
+        wrong_team_parent.update(
+            {
+                "id": "parent-68-uuid",
+                "identifier": "SIS-68",
+                "url": "https://linear.app/example/issue/SIS-68",
+                "team": {"id": "other-team", "key": "OTHER"},
+                "parent": None,
+            }
+        )
+        wrong_team.related[wrong_team_parent["id"]] = wrong_team_parent
+        cases.append((wrong_team, "SIS-68", "parent is not in the SIS team"))
+
+        self_parent = FakeClient()
+        self_parent.current["parent"] = None
+        cases.append((self_parent, "SIS-59", "cannot be its own parent"))
+
+        cyclic = FakeClient()
+        cyclic.current["parent"] = None
+        cyclic_parent = issue("Todo")
+        cyclic_parent.update(
+            {
+                "id": "parent-68-uuid",
+                "identifier": "SIS-68",
+                "url": "https://linear.app/example/issue/SIS-68",
+                "parent": {"id": "issue-uuid", "identifier": "SIS-59"},
+            }
+        )
+        cyclic.related[cyclic_parent["id"]] = cyclic_parent
+        cases.append((cyclic, "SIS-68", "would create a cycle"))
+
+        for client, parent_identifier, message in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(
+                lane.ContractError, message
+            ):
+                lane.execute_command(
+                    client,
+                    command(
+                        "update_issue",
+                        {"parent_identifier": parent_identifier},
+                        key=f"linear:SIS-59:parent-negative:{message.replace(' ', '-')}",
+                    ),
+                    mode="plan",
+                )
+            self.assertEqual(client.writes, [])
+
+    def test_update_issue_parent_attach_fails_exact_read_back_on_parent_drift(self):
+        class DriftingParentClient(FakeClient):
+            def update_issue_fields(self, issue_id, **fields):
+                super().update_issue_fields(issue_id, **fields)
+                self.current["parent"] = None
+
+        client = DriftingParentClient()
+        client.current["parent"] = None
+        parent = issue("Todo")
+        parent.update(
+            {
+                "id": "parent-68-uuid",
+                "identifier": "SIS-68",
+                "url": "https://linear.app/example/issue/SIS-68",
+                "parent": None,
+            }
+        )
+        client.related[parent["id"]] = parent
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(
+            lane.ContractError,
+            r"^update_issue read-back mismatched fields: parent$",
+        ):
+            lane.execute_command(
+                client,
+                command(
+                    "update_issue",
+                    {"parent_identifier": "SIS-68"},
+                    key="linear:SIS-59:parent-readback-drift:fixture",
+                ),
+                mode="apply",
+                journal_path=Path(tmp) / "journal.json",
+            )
 
     def test_update_issue_applies_exact_fields_and_literal_replay_is_noop(self):
         with tempfile.TemporaryDirectory() as tmp:

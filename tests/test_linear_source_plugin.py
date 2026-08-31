@@ -487,6 +487,29 @@ class PluginTests(unittest.TestCase):
             {"required": ["project", "milestone"]},
             update_branch["anyOf"],
         )
+        self.assertIn(
+            {"required": ["parent_identifier"]},
+            update_branch["anyOf"],
+        )
+        self.assertEqual(
+            update_branch["properties"]["parent_identifier"],
+            {
+                "oneOf": [
+                    {"type": "string", "pattern": "^SIS-[1-9][0-9]*$"},
+                    {"type": "null"},
+                ]
+            },
+        )
+        create_branch = next(
+            branch
+            for branch in parameters["oneOf"]
+            if branch.get("properties", {}).get("operation", {}).get("const")
+            == "create_issue"
+        )
+        self.assertEqual(
+            create_branch["properties"]["parent_identifier"],
+            {"type": "string", "pattern": "^SIS-[1-9][0-9]*$"},
+        )
         self.assertEqual(len(parameters["oneOf"]), 9)
         self.assertEqual(
             parameters["properties"]["operation"]["enum"],
@@ -605,6 +628,46 @@ class PluginTests(unittest.TestCase):
             result["target"]["labels"],
             ["area:linear", "priority:owner"],
         )
+
+    def test_public_result_exposes_only_exact_parent_identifier(self):
+        result = _public_result(
+            {
+                "status": "verified_no_op",
+                "linear_result": {
+                    "verified": True,
+                    "result": "applied",
+                    "operation": "update_issue",
+                    "target": {
+                        "type": "issue",
+                        "identifier": "SIS-94",
+                        "url": "https://linear.app/example/issue/SIS-94/fixture",
+                    },
+                    "after": {
+                        "parent_identifier": "SIS-68",
+                        "parent_id": "must-not-leak",
+                    },
+                },
+            }
+        )
+        self.assertEqual(result["target"]["parent_identifier"], "SIS-68")
+        self.assertNotIn("parent_id", result["target"])
+        with self.assertRaisesRegex(RouteError, "parent"):
+            _public_result(
+                {
+                    "status": "verified_no_op",
+                    "linear_result": {
+                        "verified": True,
+                        "result": "applied",
+                        "operation": "update_issue",
+                        "target": {
+                            "type": "issue",
+                            "identifier": "SIS-94",
+                            "url": "https://linear.app/example/issue/SIS-94/fixture",
+                        },
+                        "after": {"parent_identifier": "sis-68"},
+                    },
+                }
+            )
 
     def test_public_result_exposes_only_validated_due_date_and_estimate(self):
         result = _public_result(
@@ -1360,6 +1423,19 @@ class PluginTests(unittest.TestCase):
                 {
                     "status": "blocked",
                     "operation": "converge_hierarchy",
+                    "reason": f"Linear command failed: {reason}",
+                }
+            ),
+            {"status": "blocked", "message": f"Не удалось выполнить: {reason}."},
+        )
+
+    def test_public_block_reason_preserves_exact_owner_approval_capability_blocker(self):
+        reason = "owner approval required: clearing or replacing an issue parent"
+        self.assertEqual(
+            _public_result(
+                {
+                    "status": "blocked",
+                    "operation": "update_issue",
                     "reason": f"Linear command failed: {reason}",
                 }
             ),

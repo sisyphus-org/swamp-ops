@@ -408,6 +408,43 @@ class ParseTests(unittest.TestCase):
             {"due_date": None, "estimate": None},
         )
 
+    def test_structured_issue_update_preserves_exact_parent_identifier_and_clear_request(self):
+        attached = route.parse_linear_request(
+            {
+                "operation": "update_issue",
+                "identifier": "SIS-94",
+                "parent_identifier": "SIS-68",
+            },
+            source_profile="default",
+            uuid_factory=uuid_factory(),
+        )
+        clear = route.parse_linear_request(
+            {
+                "operation": "update_issue",
+                "identifier": "SIS-94",
+                "parent_identifier": None,
+            },
+            source_profile="default",
+            uuid_factory=uuid_factory(),
+        )
+        self.assertEqual(attached.command["change"], {"parent_identifier": "SIS-68"})
+        self.assertEqual(clear.command["change"], {"parent_identifier": None})
+
+    def test_structured_issue_update_rejects_malformed_parent_identifier(self):
+        for parent_identifier in ("sis-68", "SIS-0", "SIS-68 ", 68, {"id": "internal"}):
+            with self.subTest(parent_identifier=parent_identifier), self.assertRaisesRegex(
+                route.RouteError, "parent_identifier"
+            ):
+                route.parse_linear_request(
+                    {
+                        "operation": "update_issue",
+                        "identifier": "SIS-94",
+                        "parent_identifier": parent_identifier,
+                    },
+                    source_profile="default",
+                    uuid_factory=uuid_factory(),
+                )
+
     def test_structured_issue_update_preserves_exact_project_and_milestone_names(self):
         parsed = route.parse_linear_request(
             {
