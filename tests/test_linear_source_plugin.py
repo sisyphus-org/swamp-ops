@@ -8,6 +8,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import jsonschema
+
 
 ROOT = Path(__file__).parents[1]
 if str(ROOT) not in sys.path:
@@ -436,9 +438,11 @@ class PluginTests(unittest.TestCase):
                 "request",
                 "operation",
                 "identifier",
+                "issue_number",
                 "state",
                 "title",
                 "description",
+                "description_transform",
                 "parent_identifier",
                 "priority",
                 "project",
@@ -449,6 +453,10 @@ class PluginTests(unittest.TestCase):
         )
         self.assertFalse(parameters["additionalProperties"])
         self.assertEqual(len(parameters["oneOf"]), 7)
+        self.assertEqual(
+            parameters["properties"]["description_transform"]["enum"],
+            ["remove_links"],
+        )
         self.assertEqual(
             parameters["properties"]["operation"]["enum"],
             [
@@ -481,6 +489,32 @@ class PluginTests(unittest.TestCase):
             entity_schema = parameters["properties"][entity]
             self.assertNotIn("id", entity_schema["properties"])
             self.assertNotIn("id", entity_schema["required"])
+
+    def test_tool_schema_rejects_conflicting_issue_targets_and_description_modes(self):
+        invalid = (
+            {
+                "operation": "change_state",
+                "identifier": "SIS-86",
+                "issue_number": 86,
+                "state": "Todo",
+            },
+            {
+                "operation": "update_issue",
+                "identifier": "SIS-86",
+                "issue_number": 86,
+                "state": "Todo",
+            },
+            {
+                "operation": "update_issue",
+                "issue_number": 86,
+                "description": "literal",
+                "description_transform": "remove_links",
+            },
+        )
+        for payload in invalid:
+            with self.subTest(payload=payload):
+                with self.assertRaises(jsonschema.ValidationError):
+                    jsonschema.validate(payload, LINEAR_SOURCE_REQUEST_SCHEMA["parameters"])
 
     def test_handler_uses_request_scoped_gateway_identity(self):
         fake_board = mock.Mock()

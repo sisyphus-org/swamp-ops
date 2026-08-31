@@ -99,11 +99,12 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
     "description": (
         "Route one bounded Linear request from an allowed user-facing profile "
         "through the project-manager Kanban lane. Accepts an exact comment text, "
-        "a structured state/field/child request, one bounded hierarchy request, one "
-        "standalone issue in an exact existing scope, or one top-level issue "
-        "plus 1-10 explicit sub-issues. The calling profile never mutates Linear "
-        "directly; the tool creates or replays one audited wake-only task and "
-        "returns its state."
+        "a structured state/field request targeting either exact SIS-N or a positive "
+        "issue_number in the single SIS team, deterministic description link removal, "
+        "one bounded hierarchy request, one standalone issue in an exact existing "
+        "scope, or one top-level issue plus 1-10 explicit sub-issues. The calling "
+        "profile never mutates Linear directly; the tool creates or replays one "
+        "audited wake-only task and returns its state."
     ),
     "parameters": {
         "type": "object",
@@ -130,12 +131,23 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                 "type": "string",
                 "pattern": "^SIS-[1-9][0-9]*$",
             },
+            "issue_number": {
+                "type": "integer",
+                "minimum": 1,
+                "description": (
+                    "Positive issue number for shorthand references in the single SIS team."
+                ),
+            },
             "state": {
                 "type": "string",
                 "enum": ["Backlog", "Todo", "Research", "In Progress", "In Review"],
             },
             "title": {"type": "string", "minLength": 1, "maxLength": 200},
             "description": {"type": "string", "maxLength": 10000},
+            "description_transform": {
+                "type": "string",
+                "enum": ["remove_links"],
+            },
             "parent_identifier": {
                 "type": "string",
                 "pattern": "^SIS-[1-9][0-9]*$",
@@ -202,15 +214,35 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
         "oneOf": [
             {"required": ["request"]},
             {
-                "required": ["operation", "identifier", "state"],
+                "required": ["operation", "state"],
+                "oneOf": [
+                    {"required": ["identifier"]},
+                    {"required": ["issue_number"]},
+                ],
                 "properties": {"operation": {"const": "change_state"}},
             },
             {
-                "required": ["operation", "identifier"],
-                "anyOf": [
-                    {"required": ["description"]},
-                    {"required": ["state"]},
-                    {"required": ["priority"]},
+                "required": ["operation"],
+                "allOf": [
+                    {
+                        "oneOf": [
+                            {"required": ["identifier"]},
+                            {"required": ["issue_number"]},
+                        ]
+                    },
+                    {
+                        "not": {
+                            "required": ["description", "description_transform"]
+                        }
+                    },
+                    {
+                        "anyOf": [
+                            {"required": ["description"]},
+                            {"required": ["description_transform"]},
+                            {"required": ["state"]},
+                            {"required": ["priority"]},
+                        ]
+                    },
                 ],
                 "properties": {"operation": {"const": "update_issue"}},
             },
@@ -633,14 +665,32 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
             request: Any = args["request"]
             if not isinstance(request, str):
                 raise RouteError("request must be text")
-        elif set(args) == {"operation", "identifier", "state"}:
+        elif (
+            args.get("operation") == "change_state"
+            and "state" in args
+            and bool(set(args) & {"identifier", "issue_number"})
+            and set(args).issubset(
+                {"operation", "identifier", "issue_number", "state"}
+            )
+        ):
             request = dict(args)
         elif (
             args.get("operation") == "update_issue"
-            and "identifier" in args
-            and bool(set(args) & {"description", "state", "priority"})
+            and bool(set(args) & {"identifier", "issue_number"})
+            and bool(
+                set(args)
+                & {"description", "description_transform", "state", "priority"}
+            )
             and set(args).issubset(
-                {"operation", "identifier", "description", "state", "priority"}
+                {
+                    "operation",
+                    "identifier",
+                    "issue_number",
+                    "description",
+                    "description_transform",
+                    "state",
+                    "priority",
+                }
             )
         ):
             request = dict(args)

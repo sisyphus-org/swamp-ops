@@ -33,6 +33,7 @@ RESERVED_MARKER = "<!-- linear-command"
 MAX_HIERARCHY_BYTES = 24_576
 MAX_ISSUE_TREE_BYTES = 65_536
 PRIORITIES = {"High", "Medium", "Low"}
+DESCRIPTION_TRANSFORMS = {"remove_links"}
 
 
 class RouteError(RuntimeError):
@@ -222,6 +223,25 @@ def _validate_scoped_issue_request(request: dict[str, Any]) -> dict[str, Any]:
     return change
 
 
+def _issue_identifier(request: dict[str, Any]) -> str:
+    """Resolve one exact SIS target from an identifier or bounded issue number."""
+    has_identifier = "identifier" in request
+    has_number = "issue_number" in request
+    if has_identifier == has_number:
+        raise RouteError("request must contain exactly one issue target")
+    if has_identifier:
+        identifier = request["identifier"]
+        if not isinstance(identifier, str) or not re.fullmatch(
+            r"SIS-[1-9][0-9]*", identifier
+        ):
+            raise RouteError("target must be an exact SIS-N identifier")
+        return identifier
+    number = request["issue_number"]
+    if isinstance(number, bool) or not isinstance(number, int) or number < 1:
+        raise RouteError("issue_number must be a positive integer")
+    return f"SIS-{number}"
+
+
 def parse_linear_request(
     request: Any,
     *,
@@ -249,32 +269,45 @@ def parse_linear_request(
     elif isinstance(request, dict):
         operation = request.get("operation")
         if operation == "change_state":
-            if set(request) != {"operation", "identifier", "state"}:
+            if not set(request).issubset(
+                {"operation", "identifier", "issue_number", "state"}
+            ) or "state" not in request:
                 raise RouteError("structured state request has invalid fields")
-            identifier = request.get("identifier")
+            identifier = _issue_identifier(request)
             state = request.get("state")
-            if not isinstance(identifier, str) or not re.fullmatch(
-                r"SIS-[1-9][0-9]*", identifier
-            ):
-                raise RouteError("target must be an exact SIS-N identifier")
             if state not in SAFE_STATES:
                 raise RouteError("state is not in the safe-state allowlist")
             target = {"type": "issue", "identifier": identifier}
             change = {"state": state}
         elif operation == "update_issue":
-            allowed = {"operation", "identifier", "description", "state", "priority"}
-            if (
-                not set(request).issubset(allowed)
-                or "identifier" not in request
-                or len(request) < 3
-            ):
+            allowed = {
+                "operation",
+                "identifier",
+                "issue_number",
+                "description",
+                "description_transform",
+                "state",
+                "priority",
+            }
+            if not set(request).issubset(allowed) or len(request) < 3:
                 raise RouteError("structured issue update has invalid fields")
-            identifier = request.get("identifier")
-            if not isinstance(identifier, str) or not re.fullmatch(
-                r"SIS-[1-9][0-9]*", identifier
-            ):
-                raise RouteError("target must be an exact SIS-N identifier")
-            change = {key: request[key] for key in ("description", "state", "priority") if key in request}
+            identifier = _issue_identifier(request)
+            change = {
+                key: request[key]
+                for key in (
+                    "description",
+                    "description_transform",
+                    "state",
+                    "priority",
+                )
+                if key in request
+            }
+            if not change:
+                raise RouteError("structured issue update has no changed fields")
+            if "description" in change and "description_transform" in change:
+                raise RouteError(
+                    "description and description_transform are mutually exclusive"
+                )
             if "description" in change:
                 _validate_clean_text(
                     change["description"],
@@ -282,6 +315,11 @@ def parse_linear_request(
                     maximum=10_000,
                     required=False,
                 )
+            if (
+                "description_transform" in change
+                and change["description_transform"] not in DESCRIPTION_TRANSFORMS
+            ):
+                raise RouteError("description_transform is not in the bounded allowlist")
             if "state" in change and change["state"] not in SAFE_STATES:
                 raise RouteError("state is not in the safe-state allowlist")
             if "priority" in change and change["priority"] not in PRIORITIES:

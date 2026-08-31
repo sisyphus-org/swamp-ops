@@ -36,8 +36,177 @@ PRIORITIES = {"High": 2, "Medium": 3, "Low": 4}
 MAX_COMMENT_LENGTH = 4000
 MAX_TITLE_LENGTH = 200
 MAX_DESCRIPTION_LENGTH = 10000
+DESCRIPTION_TRANSFORMS = {"remove_links"}
 API_URL = "https://api.linear.app/graphql"
 COMMAND_ROOT = Path(__file__).parents[2] / "commands" / "linear"
+
+
+def _unescaped_angle_end(text: str, start: int) -> int | None:
+    """Find a valid angle destination close, rejecting raw nested angle opens."""
+    escaped = False
+    for cursor in range(start, len(text)):
+        char = text[cursor]
+        if char in "\r\n":
+            return None
+        if escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == "<":
+            return None
+        elif char == ">":
+            return cursor
+    return None
+
+
+def _inline_link_close(text: str, start: int) -> int | None:
+    """Consume optional quoted title and return the inline link's closing offset."""
+    cursor = start
+    while cursor < len(text) and text[cursor] in " \t":
+        cursor += 1
+    if cursor < len(text) and text[cursor] == ")":
+        return cursor + 1
+    if cursor == start or cursor >= len(text) or text[cursor] not in "\"'":
+        return None
+    quote = text[cursor]
+    cursor += 1
+    escaped = False
+    while cursor < len(text):
+        char = text[cursor]
+        if char == "\n":
+            return None
+        if escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == quote:
+            cursor += 1
+            while cursor < len(text) and text[cursor] in " \t":
+                cursor += 1
+            return cursor + 1 if cursor < len(text) and text[cursor] == ")" else None
+        cursor += 1
+    return None
+
+
+def _markdown_link_at(text: str, start: int) -> tuple[str, int] | None:
+    """Return visible label and end offset for one HTTP(S) Markdown link."""
+    if text[start] != "[":
+        return None
+    label_end = text.find("](", start + 1)
+    if label_end < 0 or "\n" in text[start + 1 : label_end]:
+        return None
+    destination = label_end + 2
+    while destination < len(text) and text[destination] in " \t":
+        destination += 1
+    if destination < len(text) and text[destination] == "<":
+        angle_end = _unescaped_angle_end(text, destination + 1)
+        if angle_end is None:
+            return None
+        if not text.startswith(("http://", "https://"), destination + 1):
+            return None
+        link_end = _inline_link_close(text, angle_end + 1)
+        return (
+            (text[start + 1 : label_end], link_end)
+            if link_end is not None
+            else None
+        )
+    if not text.startswith(("http://", "https://"), destination):
+        return None
+    depth = 1
+    cursor = destination
+    while cursor < len(text):
+        char = text[cursor]
+        if char == "\n":
+            return None
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return text[start + 1 : label_end], cursor + 1
+        cursor += 1
+    return None
+
+
+def _http_url_end(text: str, start: int) -> int:
+    """Return the exclusive end of one bare HTTP(S) URL with balanced parentheses."""
+    cursor = start
+    depth = 0
+    while cursor < len(text):
+        char = text[cursor]
+        if char.isspace() or char in "<>":
+            break
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            if depth == 0:
+                break
+            depth -= 1
+        cursor += 1
+    while cursor > start and text[cursor - 1] in ".,;:!?":
+        cursor -= 1
+    return cursor
+
+
+def _skip_whitespace_after_removed_url(text: str, end: int, output: list[str]) -> int:
+    """Avoid only the duplicate horizontal gap created by deleting a URL."""
+    line_start = "".join(output).rpartition("\n")[2]
+    if end >= len(text) or text[end] in "\r\n":
+        if line_start.strip():
+            while output and output[-1] in " \t":
+                output.pop()
+        return end
+    if text[end] in ".,;:!?":
+        if line_start.strip():
+            while output and output[-1] in " \t":
+                output.pop()
+        return end
+    if text[end] not in " \t":
+        return end
+    whitespace_end = end
+    while whitespace_end < len(text) and text[whitespace_end] in " \t":
+        whitespace_end += 1
+    if whitespace_end < len(text) and text[whitespace_end] in "\r\n":
+        if line_start.strip():
+            while output and output[-1] in " \t":
+                output.pop()
+        return end
+    if not output or output[-1] in " \t\n":
+        return whitespace_end
+    return end
+
+
+def remove_description_links(description: Any) -> str:
+    """Remove HTTP(S) destinations while preserving unrelated bytes and formatting."""
+    if description is None:
+        return ""
+    if not isinstance(description, str):
+        raise ContractError("live Linear description must be text or null")
+    output: list[str] = []
+    cursor = 0
+    while cursor < len(description):
+        markdown = _markdown_link_at(description, cursor)
+        if markdown is not None:
+            label, cursor = markdown
+            output.extend(label)
+            continue
+        if description.startswith(("<http://", "<https://"), cursor):
+            end = description.find(">", cursor + 1)
+            if end >= 0 and not any(
+                char.isspace() for char in description[cursor + 1 : end]
+            ):
+                cursor = _skip_whitespace_after_removed_url(
+                    description, end + 1, output
+                )
+                continue
+        if description.startswith(("http://", "https://"), cursor):
+            end = _http_url_end(description, cursor)
+            cursor = _skip_whitespace_after_removed_url(description, end, output)
+            continue
+        output.append(description[cursor])
+        cursor += 1
+    transformed = "".join(output)
+    return "" if not transformed.strip() else transformed
 ISSUE_QUERY = """
 query LaneIssue($id: String!) {
   issue(id: $id) {
@@ -568,9 +737,15 @@ def validate_command(raw: Any) -> dict[str, Any]:
         if state not in SAFE_STATES:
             raise ContractError("requested state is not in the exact safe-state allowlist")
     elif operation == "update_issue":
-        allowed = {"description", "state", "priority"}
+        allowed = {"description", "description_transform", "state", "priority"}
         if not change or not set(change).issubset(allowed):
-            raise ContractError("update_issue supports description, state, and priority")
+            raise ContractError(
+                "update_issue supports description, description_transform, state, and priority"
+            )
+        if "description" in change and "description_transform" in change:
+            raise ContractError(
+                "update_issue description and description_transform are mutually exclusive"
+            )
         if "description" in change:
             description = change["description"]
             if not isinstance(description, str) or len(description) > MAX_DESCRIPTION_LENGTH:
@@ -579,6 +754,11 @@ def validate_command(raw: Any) -> dict[str, Any]:
                 raise ContractError("update_issue description contains the reserved marker")
             if any(pattern.search(description) for pattern in CREDENTIAL_SHAPES):
                 raise ContractError("update_issue description contains credential-shaped data")
+        if (
+            "description_transform" in change
+            and change["description_transform"] not in DESCRIPTION_TRANSFORMS
+        ):
+            raise ContractError("update_issue description_transform is not allowed")
         if "state" in change:
             if change["state"] in OWNER_CONTROLLED_STATES:
                 raise ContractError("update_issue state is owner-controlled")
@@ -981,7 +1161,9 @@ def execute_command(
             "verified": True,
         }
     if command["operation"] == "update_issue":
-        change = command["change"]
+        change = dict(command["change"])
+        if change.pop("description_transform", None) == "remove_links":
+            change["description"] = remove_description_links(issue.get("description"))
         state_id = None
         if "state" in change:
             states = [
