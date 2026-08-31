@@ -1927,6 +1927,18 @@ class ExecutionTests(unittest.TestCase):
             lane.remove_description_links("[docs](<https://example.com/path>)"),
             "docs",
         )
+        self.assertEqual(
+            lane.remove_description_links(
+                '[docs](<https://example.com/path> "title")'
+            ),
+            "docs",
+        )
+        self.assertIsNone(
+            lane._markdown_link_at(r"[docs](<https://example.com\>)", 0)
+        )
+        self.assertIsNone(
+            lane._markdown_link_at("[docs](<https://example.com/<x>)", 0)
+        )
 
     def test_remove_links_preserves_unrelated_markdown_whitespace(self):
         original = (

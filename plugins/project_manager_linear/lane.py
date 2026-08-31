@@ -41,6 +41,53 @@ API_URL = "https://api.linear.app/graphql"
 COMMAND_ROOT = Path(__file__).parents[2] / "commands" / "linear"
 
 
+def _unescaped_angle_end(text: str, start: int) -> int | None:
+    """Find a valid angle destination close, rejecting raw nested angle opens."""
+    escaped = False
+    for cursor in range(start, len(text)):
+        char = text[cursor]
+        if char == "\n":
+            return None
+        if escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == "<":
+            return None
+        elif char == ">":
+            return cursor
+    return None
+
+
+def _inline_link_close(text: str, start: int) -> int | None:
+    """Consume optional quoted title and return the inline link's closing offset."""
+    cursor = start
+    while cursor < len(text) and text[cursor] in " \t":
+        cursor += 1
+    if cursor < len(text) and text[cursor] == ")":
+        return cursor + 1
+    if cursor == start or cursor >= len(text) or text[cursor] not in "\"'":
+        return None
+    quote = text[cursor]
+    cursor += 1
+    escaped = False
+    while cursor < len(text):
+        char = text[cursor]
+        if char == "\n":
+            return None
+        if escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == quote:
+            cursor += 1
+            while cursor < len(text) and text[cursor] in " \t":
+                cursor += 1
+            return cursor + 1 if cursor < len(text) and text[cursor] == ")" else None
+        cursor += 1
+    return None
+
+
 def _markdown_link_at(text: str, start: int) -> tuple[str, int] | None:
     """Return visible label and end offset for one HTTP(S) Markdown link."""
     if text[start] != "[":
@@ -52,19 +99,19 @@ def _markdown_link_at(text: str, start: int) -> tuple[str, int] | None:
     while destination < len(text) and text[destination] in " \t":
         destination += 1
     if destination < len(text) and text[destination] == "<":
-        angle_end = text.find(">", destination + 1)
-        if angle_end < 0 or any(
+        angle_end = _unescaped_angle_end(text, destination + 1)
+        if angle_end is None or any(
             char.isspace() for char in text[destination + 1 : angle_end]
         ):
             return None
         if not text.startswith(("http://", "https://"), destination + 1):
             return None
-        cursor = angle_end + 1
-        while cursor < len(text) and text[cursor] in " \t":
-            cursor += 1
-        if cursor < len(text) and text[cursor] == ")":
-            return text[start + 1 : label_end], cursor + 1
-        return None
+        link_end = _inline_link_close(text, angle_end + 1)
+        return (
+            (text[start + 1 : label_end], link_end)
+            if link_end is not None
+            else None
+        )
     if not text.startswith(("http://", "https://"), destination):
         return None
     depth = 1
