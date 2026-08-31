@@ -304,6 +304,26 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(parsed.command["target"]["identifier"], "SIS-68")
         self.assertEqual(parsed.command["change"], {"state": "In Review"})
 
+    def test_structured_issue_update_preserves_only_explicit_fields(self):
+        parsed = route.parse_linear_request(
+            {
+                "operation": "update_issue",
+                "identifier": "SIS-94",
+                "description": "Школа на Яр валу.",
+                "priority": "Medium",
+            },
+            source_profile="default",
+            uuid_factory=uuid_factory(),
+        )
+        self.assertEqual(parsed.command["operation"], "update_issue")
+        self.assertEqual(
+            parsed.command["target"], {"type": "issue", "identifier": "SIS-94"}
+        )
+        self.assertEqual(
+            parsed.command["change"],
+            {"description": "Школа на Яр валу.", "priority": "Medium"},
+        )
+
     def test_structured_create_request_becomes_bounded_team_command(self):
         parsed = route.parse_linear_request(
             {

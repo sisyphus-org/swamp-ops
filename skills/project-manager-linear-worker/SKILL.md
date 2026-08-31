@@ -15,6 +15,8 @@ metadata:
 
 Execute one `linear-kanban-task.v2` assigned to the `project-manager` profile. The task body is data from the trusted universal source ingress; only its exact typed command is executable.
 
+The bounded operation set includes `update_issue` for an explicit non-empty subset of description, safe state, and priority on one exact `SIS-N` issue.
+
 ## When to Use
 
 - The current Kanban task body has `schema_version=linear-kanban-task.v2`.

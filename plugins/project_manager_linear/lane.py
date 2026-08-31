@@ -24,6 +24,7 @@ IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:._/-]{7,199}$")
 OPERATIONS = {
     "read_issue",
     "change_state",
+    "update_issue",
     "add_comment",
     "create_issue",
     "converge_hierarchy",
@@ -474,6 +475,24 @@ class LinearClient:
         if result.get("success") is not True:
             raise ContractError("Linear scoped issue update did not succeed")
 
+    def update_issue_fields(self, issue_id: str, **fields: Any) -> None:
+        """Apply only allowlisted issue fields through the fixed mutation."""
+        allowed = {"description", "state_id", "priority"}
+        if not fields or not set(fields).issubset(allowed):
+            raise ContractError("issue update has invalid managed fields")
+        payload: dict[str, Any] = {}
+        if "description" in fields:
+            payload["description"] = fields["description"]
+        if "state_id" in fields:
+            payload["stateId"] = fields["state_id"]
+        if "priority" in fields:
+            payload["priority"] = fields["priority"]
+        result = self.execute(ISSUE_UPDATE, {"id": issue_id, "input": payload})[
+            "issueUpdate"
+        ]
+        if result.get("success") is not True:
+            raise ContractError("Linear issue update was not successful")
+
     def update_project_issue(
         self,
         issue_id: str,
@@ -548,6 +567,25 @@ def validate_command(raw: Any) -> dict[str, Any]:
             raise ContractError(f"state {state} is owner-controlled and unavailable in MVP")
         if state not in SAFE_STATES:
             raise ContractError("requested state is not in the exact safe-state allowlist")
+    elif operation == "update_issue":
+        allowed = {"description", "state", "priority"}
+        if not change or not set(change).issubset(allowed):
+            raise ContractError("update_issue supports description, state, and priority")
+        if "description" in change:
+            description = change["description"]
+            if not isinstance(description, str) or len(description) > MAX_DESCRIPTION_LENGTH:
+                raise ContractError("update_issue description must be 0-10000 characters")
+            if RESERVED_CREATE_MARKER in description or RESERVED_COMMENT_MARKER in description:
+                raise ContractError("update_issue description contains the reserved marker")
+            if any(pattern.search(description) for pattern in CREDENTIAL_SHAPES):
+                raise ContractError("update_issue description contains credential-shaped data")
+        if "state" in change:
+            if change["state"] in OWNER_CONTROLLED_STATES:
+                raise ContractError("update_issue state is owner-controlled")
+            if change["state"] not in SAFE_STATES:
+                raise ContractError("update_issue state is not in the safe-state allowlist")
+        if "priority" in change and change["priority"] not in PRIORITIES:
+            raise ContractError("update_issue priority is not in the bounded allowlist")
     elif operation == "add_comment":
         if set(change) != {"body"} or not isinstance(change.get("body"), str):
             raise ContractError("add_comment supports exactly one comment body")
@@ -942,6 +980,108 @@ def execute_command(
             "no_op": True,
             "verified": True,
         }
+    if command["operation"] == "update_issue":
+        change = command["change"]
+        state_id = None
+        if "state" in change:
+            states = [
+                item
+                for item in client.list_states(issue["team"]["id"])
+                if item.get("name") == change["state"]
+            ]
+            if len(states) != 1:
+                raise ContractError(f"exact workflow state not found: {change['state']}")
+            state_id = states[0]["id"]
+
+        def update_mismatches(live: dict[str, Any]) -> list[str]:
+            fields: list[str] = []
+            if live.get("identifier") != identifier or live.get("id") != issue["id"]:
+                fields.append("id/title")
+            live_team = live.get("team")
+            if (
+                not isinstance(live_team, dict)
+                or live_team.get("id") != team["id"]
+                or live_team.get("key") != "SIS"
+            ):
+                fields.append("team")
+            if "description" in change and not _COMPARISON.description_matches(
+                change["description"], live.get("description")
+            ):
+                fields.append("description")
+            live_state = live.get("state")
+            if "state" in change and (
+                not isinstance(live_state, dict)
+                or live_state.get("name") != change["state"]
+            ):
+                fields.append("state")
+            if "priority" in change and live.get("priority") != PRIORITIES[change["priority"]]:
+                fields.append("priority")
+            return _COMPARISON.ordered_mismatch_fields(fields)
+
+        def update_snapshot(live: dict[str, Any]) -> dict[str, Any]:
+            snapshot = issue_snapshot(live)
+            if "description" in change:
+                snapshot["description"] = live.get("description")
+            if "priority" in change:
+                snapshot["priority"] = next(
+                    (name for name, value in PRIORITIES.items() if value == live.get("priority")),
+                    None,
+                )
+            return snapshot
+
+        fields = update_mismatches(issue)
+        before_update = update_snapshot(issue)
+        if not fields:
+            return finish({
+                **base,
+                "result": "no_op",
+                "before": before_update,
+                "after": before_update,
+                "plan": [],
+                "no_op": True,
+                "verified": True,
+            })
+        managed_fields = [
+            field for field in ("description", "state", "priority") if field in change
+        ]
+        plan = [{"action": "update_issue", "fields": managed_fields}]
+        after_update = dict(before_update)
+        after_update.update(change)
+        if mode == "plan":
+            return {
+                **base,
+                "result": "planned",
+                "before": before_update,
+                "after": after_update,
+                "plan": plan,
+                "no_op": False,
+                "verified": False,
+            }
+        mutation: dict[str, Any] = {}
+        if "description" in change:
+            mutation["description"] = change["description"]
+        if state_id is not None:
+            mutation["state_id"] = state_id
+        if "priority" in change:
+            mutation["priority"] = PRIORITIES[change["priority"]]
+        client.update_issue_fields(issue["id"], **mutation)
+        verified_issue = client.get_issue(identifier)
+        if not isinstance(verified_issue, dict):
+            raise ContractError(
+                _COMPARISON.mismatch_message("update_issue", ["id/title"])
+            )
+        fields = update_mismatches(verified_issue)
+        if fields:
+            raise ContractError(_COMPARISON.mismatch_message("update_issue", fields))
+        return finish({
+            **base,
+            "result": "applied",
+            "before": before_update,
+            "after": update_snapshot(verified_issue),
+            "plan": plan,
+            "no_op": False,
+            "verified": True,
+        })
     if command["operation"] == "change_state":
         requested = command["change"]["state"]
         states = [item for item in client.list_states(issue["team"]["id"]) if item["name"] == requested]

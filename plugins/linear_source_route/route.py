@@ -261,6 +261,32 @@ def parse_linear_request(
                 raise RouteError("state is not in the safe-state allowlist")
             target = {"type": "issue", "identifier": identifier}
             change = {"state": state}
+        elif operation == "update_issue":
+            allowed = {"operation", "identifier", "description", "state", "priority"}
+            if (
+                not set(request).issubset(allowed)
+                or "identifier" not in request
+                or len(request) < 3
+            ):
+                raise RouteError("structured issue update has invalid fields")
+            identifier = request.get("identifier")
+            if not isinstance(identifier, str) or not re.fullmatch(
+                r"SIS-[1-9][0-9]*", identifier
+            ):
+                raise RouteError("target must be an exact SIS-N identifier")
+            change = {key: request[key] for key in ("description", "state", "priority") if key in request}
+            if "description" in change:
+                _validate_clean_text(
+                    change["description"],
+                    "description",
+                    maximum=10_000,
+                    required=False,
+                )
+            if "state" in change and change["state"] not in SAFE_STATES:
+                raise RouteError("state is not in the safe-state allowlist")
+            if "priority" in change and change["priority"] not in PRIORITIES:
+                raise RouteError("priority is not in the bounded allowlist")
+            target = {"type": "issue", "identifier": identifier}
         elif operation == "create_issue":
             expected = {
                 "operation",

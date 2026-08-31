@@ -448,11 +448,12 @@ class PluginTests(unittest.TestCase):
             },
         )
         self.assertFalse(parameters["additionalProperties"])
-        self.assertEqual(len(parameters["oneOf"]), 6)
+        self.assertEqual(len(parameters["oneOf"]), 7)
         self.assertEqual(
             parameters["properties"]["operation"]["enum"],
             [
                 "change_state",
+                "update_issue",
                 "create_issue",
                 "converge_hierarchy",
                 "create_standalone_issue",
@@ -464,6 +465,7 @@ class PluginTests(unittest.TestCase):
             [
                 None,
                 "change_state",
+                "update_issue",
                 "create_issue",
                 "converge_hierarchy",
                 "create_standalone_issue",
