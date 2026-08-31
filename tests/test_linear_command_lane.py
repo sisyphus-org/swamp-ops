@@ -663,15 +663,18 @@ class ExecutionTests(unittest.TestCase):
                     lane.execute_command(client, raw, mode="plan")
                 self.assertFalse(any(call[0].startswith("create_") for call in client.calls))
 
-    def test_hierarchy_rejects_sis_key_with_unexpected_team_name(self):
-        class WrongTeamNameClient(FakeHierarchyClient):
+    def test_hierarchy_accepts_sis_key_independent_of_team_display_name(self):
+        class RenamedTeamClient(FakeHierarchyClient):
             def list_teams(self):
-                return [{"id": "team-sis", "key": "SIS", "name": "Not Sisyphus"}]
+                return [{"id": "team-sis", "key": "SIS", "name": "Renamed team"}]
 
-        with self.assertRaisesRegex(lane.ContractError, "exact SIS team"):
-            lane.execute_command(
-                WrongTeamNameClient(), hierarchy_command(), mode="plan"
-            )
+        planned = lane.execute_command(
+            RenamedTeamClient(), hierarchy_command(), mode="plan"
+        )
+        self.assertEqual(
+            [item["action"] for item in planned["plan"]],
+            ["create_project", "create_milestone", "create_issue"],
+        )
 
     def test_name_fallback_scope_errors_do_not_claim_deterministic_id_conflict(self):
         project_client = FakeHierarchyClient()
