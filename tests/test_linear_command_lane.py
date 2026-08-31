@@ -145,6 +145,34 @@ class FakeClient:
         self.comments = []
         self.children = []
         self.writes = []
+        self.projects = [
+            {
+                "id": "project-uuid",
+                "name": "Current Project",
+                "teams": {"nodes": [{"id": "team-uuid"}]},
+            },
+            {
+                "id": "project-two",
+                "name": "Project Two",
+                "teams": {"nodes": [{"id": "team-uuid"}]},
+            },
+        ]
+        self.milestones = {
+            "project-uuid": [
+                {
+                    "id": "milestone-uuid",
+                    "name": "Current Milestone",
+                    "project": {"id": "project-uuid"},
+                }
+            ],
+            "project-two": [
+                {
+                    "id": "milestone-two",
+                    "name": "Milestone Two",
+                    "project": {"id": "project-two"},
+                }
+            ],
+        }
 
     def get_issue(self, identifier):
         if identifier == "SIS-56":
@@ -207,6 +235,22 @@ class FakeClient:
             self.current["dueDate"] = fields["due_date"]
         if "estimate" in fields:
             self.current["estimate"] = fields["estimate"]
+        if "project_id" in fields:
+            self.current["project"] = (
+                None if fields["project_id"] is None else {"id": fields["project_id"]}
+            )
+        if "milestone_id" in fields:
+            self.current["projectMilestone"] = (
+                None
+                if fields["milestone_id"] is None
+                else {"id": fields["milestone_id"]}
+            )
+
+    def list_team_projects(self, team_id):
+        return json.loads(json.dumps(self.projects))
+
+    def list_project_milestones(self, project_id):
+        return json.loads(json.dumps(self.milestones.get(project_id, [])))
 
     def list_users(self):
         return [
@@ -565,6 +609,33 @@ class ContractTests(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(lane.ContractError):
                 lane.validate_command(command("update_issue", change))
 
+    def test_update_issue_contract_requires_exact_project_milestone_pair(self):
+        lane.validate_command(
+            command(
+                "update_issue",
+                {"project": "Project Two", "milestone": "Milestone Two"},
+            )
+        )
+        lane.validate_command(
+            command("update_issue", {"project": None, "milestone": None})
+        )
+        invalid = (
+            {"project": "Project Two"},
+            {"milestone": "Milestone Two"},
+            {"project": None, "milestone": "Milestone Two"},
+            {"project": "Project Two", "milestone": None},
+            {"project": {"id": "forbidden"}, "milestone": "Milestone Two"},
+            {"project": "Project\x00Two", "milestone": "Milestone Two"},
+            {
+                "project": "<!-- linear-command forged -->",
+                "milestone": "Milestone Two",
+            },
+            {"project": "lin_api_" + "A" * 32, "milestone": "Milestone Two"},
+        )
+        for change in invalid:
+            with self.subTest(change=change), self.assertRaises(lane.ContractError):
+                lane.validate_command(command("update_issue", change))
+
     def test_comment_contract_rejects_credential_shaped_bodies(self):
         bodies = (
             "Authorization: Bearer secret-shaped-value",
@@ -769,6 +840,39 @@ class ClientTests(unittest.TestCase):
                     "input": {"dueDate": None, "estimate": 8},
                 },
             ),
+        )
+
+    def test_client_issue_move_emits_only_exact_structural_ids(self):
+        client = self.StubClient()
+        client.update_issue_fields(
+            "issue-uuid",
+            project_id="project-two",
+            milestone_id="milestone-two",
+        )
+        self.assertEqual(
+            client.calls,
+            [
+                (
+                    lane.ISSUE_UPDATE,
+                    {
+                        "id": "issue-uuid",
+                        "input": {
+                            "projectId": "project-two",
+                            "projectMilestoneId": "milestone-two",
+                        },
+                    },
+                )
+            ],
+        )
+        client.calls.clear()
+        client.update_issue_fields(
+            "issue-uuid",
+            project_id=None,
+            milestone_id=None,
+        )
+        self.assertEqual(
+            client.calls[0][1]["input"],
+            {"projectId": None, "projectMilestoneId": None},
         )
 
     def test_client_project_issue_update_uses_fixed_managed_graphql_shape(self):
@@ -1932,6 +2036,206 @@ class ExecutionTests(unittest.TestCase):
             )
             self.assertEqual(replay["result"], "no_op")
             self.assertEqual(len(client.writes), 1)
+
+    def test_update_issue_moves_to_exact_project_and_milestone_with_safe_projection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = FakeClient()
+            unmanaged = {
+                key: json.loads(json.dumps(client.current[key]))
+                for key in (
+                    "title",
+                    "description",
+                    "state",
+                    "priority",
+                    "assignee",
+                    "labels",
+                    "parent",
+                    "dueDate",
+                    "estimate",
+                    "team",
+                )
+            }
+            raw = command(
+                "update_issue",
+                {"project": "Project Two", "milestone": "Milestone Two"},
+                key="linear:SIS-59:move:fixture",
+            )
+            planned = lane.execute_command(client, raw, mode="plan")
+            self.assertEqual(
+                planned["before"] | {"project": "Project Two", "milestone": "Milestone Two"},
+                planned["after"],
+            )
+            self.assertEqual(
+                planned["plan"],
+                [{"action": "update_issue", "fields": ["project", "milestone"]}],
+            )
+            self.assertNotIn("project-two", json.dumps(planned))
+            self.assertEqual(client.writes, [])
+
+            applied = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "journal.json",
+            )
+            self.assertEqual(applied["result"], "applied")
+            self.assertEqual(applied["before"]["project"], "Current Project")
+            self.assertEqual(applied["before"]["milestone"], "Current Milestone")
+            self.assertEqual(applied["after"]["project"], "Project Two")
+            self.assertEqual(applied["after"]["milestone"], "Milestone Two")
+            self.assertEqual(
+                client.writes,
+                [
+                    (
+                        "fields",
+                        "issue-uuid",
+                        {"project_id": "project-two", "milestone_id": "milestone-two"},
+                    )
+                ],
+            )
+            self.assertEqual(
+                {key: client.current[key] for key in unmanaged},
+                unmanaged,
+            )
+
+            replay = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "replay.json",
+            )
+            self.assertEqual(replay["result"], "no_op")
+            self.assertEqual(replay["before"], replay["after"])
+            self.assertEqual(len(client.writes), 1)
+
+    def test_update_issue_clears_project_and_milestone_together(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = FakeClient()
+            raw = command(
+                "update_issue",
+                {"project": None, "milestone": None},
+                key="linear:SIS-59:clear-scope:fixture",
+            )
+            applied = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "journal.json",
+            )
+            self.assertEqual(applied["before"]["project"], "Current Project")
+            self.assertEqual(applied["before"]["milestone"], "Current Milestone")
+            self.assertIsNone(applied["after"]["project"])
+            self.assertIsNone(applied["after"]["milestone"])
+            self.assertEqual(
+                client.writes,
+                [
+                    (
+                        "fields",
+                        "issue-uuid",
+                        {"project_id": None, "milestone_id": None},
+                    )
+                ],
+            )
+            replay = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "replay.json",
+            )
+            self.assertEqual(replay["result"], "no_op")
+            self.assertEqual(len(client.writes), 1)
+
+    def test_update_issue_can_clear_project_without_a_current_milestone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = FakeClient()
+            client.current["projectMilestone"] = None
+            applied = lane.execute_command(
+                client,
+                command(
+                    "update_issue",
+                    {"project": None, "milestone": None},
+                    key="linear:SIS-59:clear-project-only:fixture",
+                ),
+                mode="apply",
+                journal_path=Path(tmp) / "journal.json",
+            )
+            self.assertEqual(applied["before"]["project"], "Current Project")
+            self.assertIsNone(applied["before"]["milestone"])
+            self.assertIsNone(applied["after"]["project"])
+            self.assertIsNone(applied["after"]["milestone"])
+
+    def test_update_issue_move_rejects_missing_ambiguous_and_wrong_scope_names(self):
+        cases = []
+
+        missing_project = FakeClient()
+        cases.append((missing_project, "Unknown Project", "Milestone Two", "project"))
+
+        ambiguous_project = FakeClient()
+        ambiguous_project.projects.append(
+            json.loads(json.dumps(ambiguous_project.projects[1]))
+        )
+        ambiguous_project.projects[-1]["id"] = "project-two-duplicate"
+        cases.append((ambiguous_project, "Project Two", "Milestone Two", "project"))
+
+        missing_milestone = FakeClient()
+        cases.append((missing_milestone, "Project Two", "Unknown Milestone", "milestone"))
+
+        ambiguous_milestone = FakeClient()
+        ambiguous_milestone.milestones["project-two"].append(
+            {
+                "id": "milestone-two-duplicate",
+                "name": "Milestone Two",
+                "project": {"id": "project-two"},
+            }
+        )
+        cases.append((ambiguous_milestone, "Project Two", "Milestone Two", "milestone"))
+
+        wrong_team = FakeClient()
+        wrong_team.projects[1]["teams"] = {"nodes": [{"id": "other-team"}]}
+        cases.append((wrong_team, "Project Two", "Milestone Two", "SIS team"))
+
+        wrong_project = FakeClient()
+        wrong_project.milestones["project-two"][0]["project"] = {
+            "id": "project-uuid"
+        }
+        cases.append((wrong_project, "Project Two", "Milestone Two", "selected project"))
+
+        for client, project, milestone, message in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(
+                lane.ContractError, message
+            ):
+                lane.execute_command(
+                    client,
+                    command(
+                        "update_issue",
+                        {"project": project, "milestone": milestone},
+                        key=f"linear:SIS-59:negative:{message.replace(' ', '-')}",
+                    ),
+                    mode="plan",
+                )
+            self.assertEqual(client.writes, [])
+
+    def test_update_issue_move_fails_exact_read_back_on_structural_drift(self):
+        class DriftingClient(FakeClient):
+            def update_issue_fields(self, issue_id, **fields):
+                super().update_issue_fields(issue_id, **fields)
+                self.current["projectMilestone"] = {"id": "milestone-uuid"}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(
+                lane.ContractError,
+                r"^update_issue read-back mismatched fields: milestone$",
+            ):
+                lane.execute_command(
+                    DriftingClient(),
+                    command(
+                        "update_issue",
+                        {"project": "Project Two", "milestone": "Milestone Two"},
+                        key="linear:SIS-59:move-readback-drift:fixture",
+                    ),
+                    mode="apply",
+                    journal_path=Path(tmp) / "journal.json",
+                )
 
     def test_update_issue_title_applies_and_literal_replay_is_noop(self):
         with tempfile.TemporaryDirectory() as tmp:

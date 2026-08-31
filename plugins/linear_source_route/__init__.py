@@ -40,6 +40,9 @@ PUBLIC_BLOCK_REASON_PATTERNS = {
         re.compile(
             r"^exact workflow state not found: (?:Backlog|Todo|Research|In Progress|In Review)$"
         ),
+        re.compile(r"^exact Linear (?:project|milestone) not found or ambiguous$"),
+        re.compile(r"^project is not in the SIS team$"),
+        re.compile(r"^milestone does not belong to the selected project$"),
         re.compile(rf"^update_issue read-back mismatched fields: {PUBLIC_MISMATCH_LIST}$"),
     ),
     "create_issue": (
@@ -169,22 +172,42 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                 ]
             },
             "project": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "name": {"type": "string", "minLength": 1, "maxLength": 200},
-                    "description": {"type": "string", "maxLength": 10000},
-                },
-                "required": ["name"],
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "name": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 200,
+                            },
+                            "description": {"type": "string", "maxLength": 10000},
+                        },
+                        "required": ["name"],
+                    },
+                    {"type": "string", "minLength": 1, "maxLength": 200},
+                    {"type": "null"},
+                ]
             },
             "milestone": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "name": {"type": "string", "minLength": 1, "maxLength": 200},
-                    "description": {"type": "string", "maxLength": 10000},
-                },
-                "required": ["name"],
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "name": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 200,
+                            },
+                            "description": {"type": "string", "maxLength": 10000},
+                        },
+                        "required": ["name"],
+                    },
+                    {"type": "string", "minLength": 1, "maxLength": 200},
+                    {"type": "null"},
+                ]
             },
             "issue": {
                 "type": "object",
@@ -243,8 +266,23 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                     {"required": ["labels"]},
                     {"required": ["due_date"]},
                     {"required": ["estimate"]},
+                    {"required": ["project", "milestone"]},
                 ],
-                "properties": {"operation": {"const": "update_issue"}},
+                "properties": {
+                    "operation": {"const": "update_issue"},
+                    "project": {
+                        "oneOf": [
+                            {"type": "string", "minLength": 1, "maxLength": 200},
+                            {"type": "null"},
+                        ]
+                    },
+                    "milestone": {
+                        "oneOf": [
+                            {"type": "string", "minLength": 1, "maxLength": 200},
+                            {"type": "null"},
+                        ]
+                    },
+                },
             },
             {
                 "required": ["operation", "identifier"],
@@ -664,6 +702,25 @@ def _public_target(result: dict[str, Any]) -> tuple[dict[str, Any], dict[str, An
             ):
                 raise RouteError("verified issue update has an invalid public estimate")
             public_target["estimate"] = estimate
+        if operation == "update_issue" and (
+            ("project" in after) != ("milestone" in after)
+        ):
+            raise RouteError(
+                "verified issue update lacks a complete public project/milestone pair"
+            )
+        if operation == "update_issue" and "project" in after:
+            project = after.get("project")
+            milestone = after.get("milestone")
+            if (project is None) != (milestone is None):
+                raise RouteError(
+                    "verified issue update has an invalid public project/milestone pair"
+                )
+            public_target["project"] = (
+                None if project is None else _public_text(project, "project name")
+            )
+            public_target["milestone"] = (
+                None if milestone is None else _public_text(milestone, "milestone name")
+            )
     elif operation == "create_issue":
         if (
             after.get("identifier") != public_target["identifier"]
@@ -766,6 +823,8 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
                     "labels",
                     "due_date",
                     "estimate",
+                    "project",
+                    "milestone",
                 }
             )
             and set(args).issubset(
@@ -780,6 +839,8 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
                     "labels",
                     "due_date",
                     "estimate",
+                    "project",
+                    "milestone",
                 }
             )
         ):

@@ -274,6 +274,8 @@ def parse_linear_request(
                 "labels",
                 "due_date",
                 "estimate",
+                "project",
+                "milestone",
             }
             if (
                 not set(request).issubset(allowed)
@@ -297,6 +299,8 @@ def parse_linear_request(
                     "labels",
                     "due_date",
                     "estimate",
+                    "project",
+                    "milestone",
                 )
                 if key in request
             }
@@ -356,6 +360,20 @@ def parse_linear_request(
                     or estimate < 0
                 ):
                     raise RouteError("estimate must be a non-negative integer or null")
+            if ("project" in change) != ("milestone" in change):
+                raise RouteError("project and milestone must be supplied together")
+            if "project" in change:
+                project = change["project"]
+                milestone = change["milestone"]
+                if (project is None) != (milestone is None):
+                    raise RouteError("project and milestone must both be exact names or null")
+                if project is not None:
+                    _validate_clean_text(
+                        project, "project", maximum=200, required=True
+                    )
+                    _validate_clean_text(
+                        milestone, "milestone", maximum=200, required=True
+                    )
             target = {"type": "issue", "identifier": identifier}
         elif operation == "inventory_sub_issues":
             if set(request) != {"operation", "identifier"}:

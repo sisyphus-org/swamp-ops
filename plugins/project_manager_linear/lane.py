@@ -554,6 +554,8 @@ class LinearClient:
             "label_ids",
             "due_date",
             "estimate",
+            "project_id",
+            "milestone_id",
         }
         if not fields or not set(fields).issubset(allowed):
             raise ContractError("issue update has invalid managed fields")
@@ -574,6 +576,10 @@ class LinearClient:
             payload["dueDate"] = fields["due_date"]
         if "estimate" in fields:
             payload["estimate"] = fields["estimate"]
+        if "project_id" in fields:
+            payload["projectId"] = fields["project_id"]
+        if "milestone_id" in fields:
+            payload["projectMilestoneId"] = fields["milestone_id"]
         result = self.execute(ISSUE_UPDATE, {"id": issue_id, "input": payload})[
             "issueUpdate"
         ]
@@ -664,10 +670,12 @@ def validate_command(raw: Any) -> dict[str, Any]:
             "labels",
             "due_date",
             "estimate",
+            "project",
+            "milestone",
         }
         if not change or not set(change).issubset(allowed):
             raise ContractError(
-                "update_issue supports title, description, state, priority, assignee, labels, due_date, and estimate"
+                "update_issue supports title, description, state, priority, assignee, labels, due_date, estimate, project, and milestone"
             )
         if "title" in change:
             title = change["title"]
@@ -730,6 +738,37 @@ def validate_command(raw: Any) -> dict[str, Any]:
                 raise ContractError(
                     "update_issue estimate must be a non-negative integer or null"
                 )
+        if ("project" in change) != ("milestone" in change):
+            raise ContractError(
+                "update_issue project and milestone must be supplied together"
+            )
+        if "project" in change:
+            project = change["project"]
+            milestone = change["milestone"]
+            if (project is None) != (milestone is None):
+                raise ContractError(
+                    "update_issue project and milestone must both be exact names or null"
+                )
+            if project is not None:
+                values = (project, milestone)
+                if any(
+                    not isinstance(value, str)
+                    or not value.strip()
+                    or len(value) > MAX_TITLE_LENGTH
+                    for value in values
+                ):
+                    raise ContractError(
+                        "update_issue project and milestone must both be exact 1-200 character names or null"
+                    )
+                if any(
+                    any(ord(char) < 32 for char in value)
+                    or _VALIDATION.RESERVED_MARKER in value
+                    or any(pattern.search(value) for pattern in CREDENTIAL_SHAPES)
+                    for value in values
+                ):
+                    raise ContractError(
+                        "update_issue project or milestone name contains unsafe data"
+                    )
     elif operation == "inventory_sub_issues":
         if change:
             raise ContractError("inventory_sub_issues change must be empty")
@@ -1345,6 +1384,129 @@ def execute_command(
                 raise ContractError(f"exact workflow state not found: {change['state']}")
             state_id = states[0]["id"]
 
+        desired_project_id: str | None | object = ...
+        desired_milestone_id: str | None | object = ...
+        current_project_name: str | None = None
+        current_milestone_name: str | None = None
+        if "project" in change:
+            projects = client.list_team_projects(team["id"])
+            if not isinstance(projects, list) or len(projects) > 100:
+                raise ContractError("SIS team projects payload is invalid")
+
+            def checked_project(candidate: Any) -> dict[str, Any]:
+                teams = candidate.get("teams") if isinstance(candidate, dict) else None
+                team_nodes = teams.get("nodes") if isinstance(teams, dict) else None
+                if (
+                    not isinstance(candidate, dict)
+                    or not isinstance(candidate.get("id"), str)
+                    or not candidate["id"].strip()
+                    or not isinstance(candidate.get("name"), str)
+                    or not candidate["name"].strip()
+                    or not isinstance(team_nodes, list)
+                    or team["id"]
+                    not in {
+                        node.get("id")
+                        for node in team_nodes
+                        if isinstance(node, dict)
+                    }
+                ):
+                    raise ContractError("project is not in the SIS team")
+                return candidate
+
+            current_project = issue.get("project")
+            current_milestone = issue.get("projectMilestone")
+            if current_project is None and current_milestone is not None:
+                raise ContractError("issue project and milestone scope is malformed")
+            if current_project is not None:
+                current_project_id = (
+                    current_project.get("id")
+                    if isinstance(current_project, dict)
+                    else None
+                )
+                current_projects = [
+                    candidate
+                    for candidate in projects
+                    if isinstance(candidate, dict)
+                    and candidate.get("id") == current_project_id
+                ]
+                if len(current_projects) != 1:
+                    raise ContractError("current issue project is missing or ambiguous")
+                current_project_node = checked_project(current_projects[0])
+                current_project_name = current_project_node["name"]
+                if current_milestone is not None:
+                    current_milestone_id = (
+                        current_milestone.get("id")
+                        if isinstance(current_milestone, dict)
+                        else None
+                    )
+                    current_milestones = client.list_project_milestones(
+                        current_project_node["id"]
+                    )
+                    if (
+                        not isinstance(current_milestones, list)
+                        or len(current_milestones) > 100
+                    ):
+                        raise ContractError("current project milestones payload is invalid")
+                    current_matches = [
+                        candidate
+                        for candidate in current_milestones
+                        if isinstance(candidate, dict)
+                        and candidate.get("id") == current_milestone_id
+                    ]
+                    if len(current_matches) != 1:
+                        raise ContractError(
+                            "current issue milestone is missing or ambiguous"
+                        )
+                    current_milestone_node = current_matches[0]
+                    current_milestone_project = current_milestone_node.get("project")
+                    if (
+                        not isinstance(current_milestone_node.get("name"), str)
+                        or not current_milestone_node["name"].strip()
+                        or not isinstance(current_milestone_project, dict)
+                        or current_milestone_project.get("id")
+                        != current_project_node["id"]
+                    ):
+                        raise ContractError(
+                            "current issue milestone has the wrong project scope"
+                        )
+                    current_milestone_name = current_milestone_node["name"]
+
+            if change["project"] is None:
+                desired_project_id = None
+                desired_milestone_id = None
+            else:
+                named_projects = [
+                    candidate
+                    for candidate in projects
+                    if isinstance(candidate, dict)
+                    and candidate.get("name") == change["project"]
+                ]
+                if len(named_projects) != 1:
+                    raise ContractError("exact Linear project not found or ambiguous")
+                desired_project = checked_project(named_projects[0])
+                milestones = client.list_project_milestones(desired_project["id"])
+                if not isinstance(milestones, list) or len(milestones) > 100:
+                    raise ContractError("project milestones payload is invalid")
+                named_milestones = [
+                    candidate
+                    for candidate in milestones
+                    if isinstance(candidate, dict)
+                    and candidate.get("name") == change["milestone"]
+                ]
+                if len(named_milestones) != 1:
+                    raise ContractError("exact Linear milestone not found or ambiguous")
+                desired_milestone = named_milestones[0]
+                milestone_project = desired_milestone.get("project")
+                if (
+                    not isinstance(desired_milestone.get("id"), str)
+                    or not desired_milestone["id"].strip()
+                    or not isinstance(milestone_project, dict)
+                    or milestone_project.get("id") != desired_project["id"]
+                ):
+                    raise ContractError("milestone does not belong to the selected project")
+                desired_project_id = desired_project["id"]
+                desired_milestone_id = desired_milestone["id"]
+
         def update_mismatches(live: dict[str, Any]) -> list[str]:
             fields: list[str] = []
             if live.get("identifier") != identifier or live.get("id") != issue["id"]:
@@ -1420,13 +1582,28 @@ def execute_command(
                 fields.append("assignee")
             if "labels" not in change and live.get("labels") != issue.get("labels"):
                 fields.append("labels")
-            for live_name, mismatch_name in (
-                ("parent", "parent"),
-                ("project", "project"),
-                ("projectMilestone", "milestone"),
-            ):
-                if live.get(live_name) != issue.get(live_name):
-                    fields.append(mismatch_name)
+            if live.get("parent") != issue.get("parent"):
+                fields.append("parent")
+            if "project" in change:
+                live_project = live.get("project")
+                live_project_id = (
+                    live_project.get("id") if isinstance(live_project, dict) else None
+                )
+                live_milestone = live.get("projectMilestone")
+                live_milestone_id = (
+                    live_milestone.get("id")
+                    if isinstance(live_milestone, dict)
+                    else None
+                )
+                if live_project_id != desired_project_id:
+                    fields.append("project")
+                if live_milestone_id != desired_milestone_id:
+                    fields.append("milestone")
+            else:
+                if live.get("project") != issue.get("project"):
+                    fields.append("project")
+                if live.get("projectMilestone") != issue.get("projectMilestone"):
+                    fields.append("milestone")
             return _COMPARISON.ordered_mismatch_fields(fields)
 
         def update_snapshot(live: dict[str, Any]) -> dict[str, Any]:
@@ -1461,6 +1638,29 @@ def execute_command(
                 snapshot["due_date"] = live.get("dueDate")
             if "estimate" in change:
                 snapshot["estimate"] = live.get("estimate")
+            if "project" in change:
+                live_project = live.get("project")
+                live_project_id = (
+                    live_project.get("id") if isinstance(live_project, dict) else None
+                )
+                live_milestone = live.get("projectMilestone")
+                live_milestone_id = (
+                    live_milestone.get("id")
+                    if isinstance(live_milestone, dict)
+                    else None
+                )
+                if live_project_id is None and live_milestone_id is None:
+                    snapshot["project"] = None
+                    snapshot["milestone"] = None
+                elif (
+                    live_project_id == desired_project_id
+                    and live_milestone_id == desired_milestone_id
+                ):
+                    snapshot["project"] = change["project"]
+                    snapshot["milestone"] = change["milestone"]
+                else:
+                    snapshot["project"] = current_project_name
+                    snapshot["milestone"] = current_milestone_name
             return snapshot
 
         fields = update_mismatches(issue)
@@ -1486,6 +1686,8 @@ def execute_command(
                 "labels",
                 "due_date",
                 "estimate",
+                "project",
+                "milestone",
             )
             if field in change
         ]
@@ -1523,6 +1725,9 @@ def execute_command(
             mutation["due_date"] = change["due_date"]
         if "estimate" in change:
             mutation["estimate"] = change["estimate"]
+        if "project" in change:
+            mutation["project_id"] = desired_project_id
+            mutation["milestone_id"] = desired_milestone_id
         client.update_issue_fields(issue["id"], **mutation)
         verified_issue = client.get_issue(identifier)
         if not isinstance(verified_issue, dict):

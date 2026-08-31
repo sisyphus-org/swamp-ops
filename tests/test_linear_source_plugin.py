@@ -472,6 +472,21 @@ class PluginTests(unittest.TestCase):
                 ]
             },
         )
+        for field in ("project", "milestone"):
+            variants = parameters["properties"][field]["oneOf"]
+            self.assertEqual(
+                variants[1:],
+                [
+                    {"type": "string", "minLength": 1, "maxLength": 200},
+                    {"type": "null"},
+                ],
+            )
+            self.assertNotIn("id", variants[0]["properties"])
+        update_branch = parameters["oneOf"][2]
+        self.assertIn(
+            {"required": ["project", "milestone"]},
+            update_branch["anyOf"],
+        )
         self.assertEqual(len(parameters["oneOf"]), 9)
         self.assertEqual(
             parameters["properties"]["operation"]["enum"],
@@ -505,10 +520,9 @@ class PluginTests(unittest.TestCase):
                 branch["properties"]["issue"]["required"],
                 ["title", "description", "state", "priority"],
             )
-        for entity in ("project", "milestone", "issue"):
-            entity_schema = parameters["properties"][entity]
-            self.assertNotIn("id", entity_schema["properties"])
-            self.assertNotIn("id", entity_schema["required"])
+        entity_schema = parameters["properties"]["issue"]
+        self.assertNotIn("id", entity_schema["properties"])
+        self.assertNotIn("id", entity_schema["required"])
 
     def test_public_result_exposes_recursive_sub_issue_inventory_without_internal_ids(self):
         result = _public_result(
@@ -617,6 +631,49 @@ class PluginTests(unittest.TestCase):
         self.assertEqual(result["target"]["estimate"], 8)
         self.assertNotIn("description", result["target"])
 
+    def test_public_result_exposes_project_and_milestone_names_without_ids(self):
+        result = _public_result(
+            {
+                "status": "verified_no_op",
+                "linear_result": {
+                    "verified": True,
+                    "result": "applied",
+                    "operation": "update_issue",
+                    "target": {
+                        "type": "issue",
+                        "identifier": "SIS-94",
+                        "url": "https://linear.app/example/issue/SIS-94/fixture",
+                    },
+                    "after": {
+                        "project": "Project Two",
+                        "milestone": "Milestone Two",
+                    },
+                },
+            }
+        )
+        self.assertEqual(result["target"]["project"], "Project Two")
+        self.assertEqual(result["target"]["milestone"], "Milestone Two")
+        self.assertNotIn("project-two", json.dumps(result))
+
+        cleared = _public_result(
+            {
+                "status": "verified_no_op",
+                "linear_result": {
+                    "verified": True,
+                    "result": "applied",
+                    "operation": "update_issue",
+                    "target": {
+                        "type": "issue",
+                        "identifier": "SIS-94",
+                        "url": "https://linear.app/example/issue/SIS-94/fixture",
+                    },
+                    "after": {"project": None, "milestone": None},
+                },
+            }
+        )
+        self.assertIsNone(cleared["target"]["project"])
+        self.assertIsNone(cleared["target"]["milestone"])
+
     def test_public_result_rejects_invalid_due_date_or_estimate(self):
         for after in (
             {"due_date": "2026-02-30"},
@@ -677,6 +734,43 @@ class PluginTests(unittest.TestCase):
         self.assertEqual(result["status"], "completed")
         self.assertIsNone(result["target"]["due_date"])
         self.assertEqual(result["target"]["estimate"], 8)
+
+    def test_handler_accepts_exact_project_milestone_move_shape(self):
+        fake_board = mock.Mock()
+        set_existing_task(
+            fake_board,
+            {
+                "id": "t_1234abcd",
+                "status": "done",
+                "session_id": "20260828_120000_abcdef12",
+            },
+        )
+        session_values = {
+            "HERMES_SESSION_PROFILE": "default",
+            "HERMES_SESSION_PLATFORM": "telegram",
+            "HERMES_SESSION_CHAT_ID": "442308262",
+            "HERMES_SESSION_USER_ID": "442308262",
+            "HERMES_SESSION_CHAT_TYPE": "dm",
+            "HERMES_SESSION_THREAD_ID": "449233",
+            "HERMES_SESSION_ID": "20260828_120000_abcdef12",
+        }
+        result = json.loads(
+            handle_linear_source_request(
+                {
+                    "operation": "update_issue",
+                    "identifier": "SIS-94",
+                    "project": "Project Two",
+                    "milestone": "Milestone Two",
+                },
+                session_id="20260828_120000_abcdef12",
+                board_factory=lambda **_kwargs: fake_board,
+                session_getter=lambda name, default="": session_values.get(name, default),
+                runtime_profile_getter=lambda: "default",
+            )
+        )
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["target"]["project"], "Project Two")
+        self.assertEqual(result["target"]["milestone"], "Milestone Two")
 
     def test_handler_uses_request_scoped_gateway_identity(self):
         fake_board = mock.Mock()

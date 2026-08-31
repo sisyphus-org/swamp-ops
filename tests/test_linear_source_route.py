@@ -408,6 +408,63 @@ class ParseTests(unittest.TestCase):
             {"due_date": None, "estimate": None},
         )
 
+    def test_structured_issue_update_preserves_exact_project_and_milestone_names(self):
+        parsed = route.parse_linear_request(
+            {
+                "operation": "update_issue",
+                "identifier": "SIS-94",
+                "project": "Hermes Experience",
+                "milestone": "Personal productivity integrations",
+            },
+            source_profile="default",
+            uuid_factory=uuid_factory(),
+        )
+        self.assertEqual(
+            parsed.command["change"],
+            {
+                "project": "Hermes Experience",
+                "milestone": "Personal productivity integrations",
+            },
+        )
+
+    def test_structured_issue_update_preserves_null_project_and_milestone_clear(self):
+        parsed = route.parse_linear_request(
+            {
+                "operation": "update_issue",
+                "identifier": "SIS-94",
+                "project": None,
+                "milestone": None,
+            },
+            source_profile="default",
+            uuid_factory=uuid_factory(),
+        )
+        self.assertEqual(
+            parsed.command["change"],
+            {"project": None, "milestone": None},
+        )
+
+    def test_structured_issue_update_requires_a_complete_project_milestone_pair(self):
+        invalid = (
+            {"project": "Hermes Experience"},
+            {"milestone": "Personal productivity integrations"},
+            {"project": None, "milestone": "Personal productivity integrations"},
+            {"project": "Hermes Experience", "milestone": None},
+            {"project": "", "milestone": "Personal productivity integrations"},
+            {"project": "Hermes Experience", "milestone": ""},
+            {"project": {"id": "forbidden"}, "milestone": "Exact Name"},
+        )
+        for change in invalid:
+            with self.subTest(change=change), self.assertRaises(route.RouteError):
+                route.parse_linear_request(
+                    {
+                        "operation": "update_issue",
+                        "identifier": "SIS-94",
+                        **change,
+                    },
+                    source_profile="default",
+                    uuid_factory=uuid_factory(),
+                )
+
     def test_structured_issue_update_rejects_invalid_due_dates_and_estimates(self):
         invalid = (
             {"due_date": "2026-02-30"},
