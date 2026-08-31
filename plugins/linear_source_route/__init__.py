@@ -137,11 +137,20 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                     "converge_hierarchy",
                     "create_standalone_issue",
                     "converge_issue_tree",
+                    "create_issue_relation",
                 ],
             },
             "identifier": {
                 "type": "string",
                 "pattern": "^SIS-[1-9][0-9]*$",
+            },
+            "related_identifier": {
+                "type": "string",
+                "pattern": "^SIS-[1-9][0-9]*$",
+            },
+            "relation_type": {
+                "type": "string",
+                "enum": ["blocks", "blocked_by", "related"],
             },
             "state": {
                 "type": "string",
@@ -306,6 +315,17 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
             {
                 "required": ["operation", "identifier"],
                 "properties": {"operation": {"const": "inventory_sub_issues"}},
+            },
+            {
+                "required": [
+                    "operation",
+                    "identifier",
+                    "related_identifier",
+                    "relation_type",
+                ],
+                "properties": {
+                    "operation": {"const": "create_issue_relation"}
+                },
             },
             {
                 "required": ["operation", "identifier", "description"],
@@ -583,6 +603,37 @@ def _public_target(result: dict[str, Any]) -> tuple[dict[str, Any], dict[str, An
     """Return only validated user-relevant target facts from one PM result."""
     operation = result.get("operation")
     after = result.get("after")
+    if operation == "create_issue_relation":
+        target = result.get("target")
+        expected_fields = {
+            "type",
+            "identifier",
+            "related_identifier",
+            "relation_type",
+        }
+        if (
+            not isinstance(target, dict)
+            or set(target) != expected_fields
+            or target.get("type") != "issue_relation"
+            or not isinstance(after, dict)
+        ):
+            raise RouteError("verified issue relation lacks public completion facts")
+        identifier = target.get("identifier")
+        related_identifier = target.get("related_identifier")
+        relation_type = target.get("relation_type")
+        if (
+            not isinstance(identifier, str)
+            or not PUBLIC_ISSUE_IDENTIFIER.fullmatch(identifier)
+            or not isinstance(related_identifier, str)
+            or not PUBLIC_ISSUE_IDENTIFIER.fullmatch(related_identifier)
+            or related_identifier == identifier
+            or relation_type not in {"blocks", "blocked_by", "related"}
+            or after.get("identifier") != identifier
+            or after.get("related_identifier") != related_identifier
+            or after.get("relation_type") != relation_type
+        ):
+            raise RouteError("verified issue relation has invalid public facts")
+        return dict(target), None
     if operation == "converge_hierarchy":
         if not isinstance(after, dict):
             raise RouteError("verified hierarchy result lacks public completion facts")
@@ -837,6 +888,17 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
         elif (
             set(args) == {"operation", "identifier"}
             and args.get("operation") == "inventory_sub_issues"
+        ):
+            request = dict(args)
+        elif (
+            set(args)
+            == {
+                "operation",
+                "identifier",
+                "related_identifier",
+                "relation_type",
+            }
+            and args.get("operation") == "create_issue_relation"
         ):
             request = dict(args)
         elif (

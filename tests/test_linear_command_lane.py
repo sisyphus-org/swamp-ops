@@ -55,6 +55,18 @@ def create_command(key="linear:SIS:create:fixture"):
     return raw
 
 
+def relation_command(
+    relation_type="blocked_by", key="linear:SIS:relation:fixture"
+):
+    raw = command("create_issue_relation", {}, key)
+    raw["target"] = {"type": "issue", "identifier": "SIS-59"}
+    raw["change"] = {
+        "related_identifier": "SIS-56",
+        "relation_type": relation_type,
+    }
+    return raw
+
+
 def hierarchy_command(key="linear:SIS:hierarchy:health"):
     raw = command("read_issue", {}, key)
     raw["operation"] = "converge_hierarchy"
@@ -145,6 +157,7 @@ class FakeClient:
         self.related = {}
         self.comments = []
         self.children = []
+        self.issue_relations = []
         self.writes = []
         self.projects = [
             {
@@ -326,6 +339,50 @@ class FakeClient:
             }
         )
         self.children.append(created)
+
+    def list_issue_relations(self, identifier):
+        return json.loads(json.dumps(self.issue_relations))
+
+    def get_issue_relation(self, relation_id):
+        return next(
+            (
+                json.loads(json.dumps(item))
+                for item in self.issue_relations
+                if item["id"] == relation_id
+            ),
+            None,
+        )
+
+    def create_issue_relation(
+        self, *, relation_id, issue_id, related_issue_id, relation_type
+    ):
+        self.writes.append(
+            (
+                "create_issue_relation",
+                relation_id,
+                issue_id,
+                related_issue_id,
+                relation_type,
+            )
+        )
+        by_id = {
+            item["id"]: item
+            for item in (self.get_issue("SIS-59"), self.get_issue("SIS-56"))
+        }
+        self.issue_relations.append(
+            {
+                "id": relation_id,
+                "type": relation_type,
+                "issue": {
+                    "id": issue_id,
+                    "identifier": by_id[issue_id]["identifier"],
+                },
+                "relatedIssue": {
+                    "id": related_issue_id,
+                    "identifier": by_id[related_issue_id]["identifier"],
+                },
+            }
+        )
 
 
 class FakeHierarchyClient:
@@ -509,6 +566,15 @@ class FakeIssueTreeClient(FakeHierarchyClient):
 
 
 class ContractTests(unittest.TestCase):
+    def test_accepts_exact_bounded_issue_relation_command(self):
+        validated = lane.validate_command(relation_command())
+
+        self.assertEqual(validated["operation"], "create_issue_relation")
+        self.assertEqual(
+            validated["change"],
+            {"related_identifier": "SIS-56", "relation_type": "blocked_by"},
+        )
+
     def test_hierarchy_malformed_payloads_fail_before_any_preflight_or_write(self):
         malformed = hierarchy_command()
         malformed["change"]["issue"]["id"] = "caller-controlled-id"
@@ -997,6 +1063,143 @@ class ClientTests(unittest.TestCase):
 
 
 class ExecutionTests(unittest.TestCase):
+    def test_blocks_and_equivalent_blocked_by_share_canonical_relation_identity(self):
+        blocks = relation_command("blocks", "linear:SIS:relation:blocks")
+        blocked_by = relation_command(
+            "blocked_by", "linear:SIS:relation:blocked-by"
+        )
+        blocked_by["target"]["identifier"] = "SIS-56"
+        blocked_by["change"]["related_identifier"] = "SIS-59"
+        relation_ids = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for index, raw in enumerate((blocks, blocked_by)):
+                client = FakeClient()
+                lane.execute_command(
+                    client,
+                    raw,
+                    mode="apply",
+                    journal_path=Path(tmp) / f"{index}.json",
+                )
+                relation_ids.append(
+                    next(
+                        item[1]
+                        for item in client.writes
+                        if item[0] == "create_issue_relation"
+                    )
+                )
+
+        self.assertEqual(relation_ids[0], relation_ids[1])
+
+    def test_blocked_by_relation_maps_canonically_and_crash_replay_is_no_op(self):
+        client = FakeClient()
+        raw = relation_command()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            applied = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "first.json",
+            )
+            replay = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "crash-replay.json",
+            )
+
+        writes = [item for item in client.writes if item[0] == "create_issue_relation"]
+        self.assertEqual(len(writes), 1)
+        self.assertEqual(writes[0][2:], ("parent-uuid", "issue-uuid", "blocks"))
+        self.assertEqual(applied["result"], "applied")
+        self.assertEqual(replay["result"], "no_op")
+        self.assertEqual(
+            replay["after"],
+            {
+                "identifier": "SIS-59",
+                "related_identifier": "SIS-56",
+                "relation_type": "blocked_by",
+            },
+        )
+        self.assertNotIn("id", replay["after"])
+
+    def test_related_relation_is_canonical_and_reverse_inventory_replays_noop(self):
+        client = FakeClient()
+        raw = relation_command("related", "linear:SIS:relation:related")
+        with tempfile.TemporaryDirectory() as tmp:
+            applied = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "first.json",
+            )
+            relation = client.issue_relations[0]
+            relation["issue"], relation["relatedIssue"] = (
+                relation["relatedIssue"],
+                relation["issue"],
+            )
+            replay = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "replay.json",
+            )
+        self.assertEqual(applied["result"], "applied")
+        self.assertEqual(replay["result"], "no_op")
+        self.assertEqual(
+            [write[0] for write in client.writes].count("create_issue_relation"),
+            1,
+        )
+        self.assertEqual(client.writes[0][-1], "related")
+
+    def test_issue_relation_rejects_missing_or_wrong_team_related_issue(self):
+        missing = FakeClient()
+        missing_raw = relation_command("blocks", "linear:SIS:relation:missing")
+        missing_raw["change"]["related_identifier"] = "SIS-999"
+
+        wrong_team = FakeClient()
+        wrong = issue("Todo")
+        wrong.update(
+            {
+                "id": "wrong-team-uuid",
+                "identifier": "SIS-99",
+                "team": {"id": "other-team", "key": "OTHER"},
+            }
+        )
+        wrong_team.related[wrong["id"]] = wrong
+        wrong_raw = relation_command("blocks", "linear:SIS:relation:wrong-team")
+        wrong_raw["change"]["related_identifier"] = "SIS-99"
+
+        for client, raw, message in (
+            (missing, missing_raw, "exact related Linear issue not found"),
+            (wrong_team, wrong_raw, "related target is not in the SIS team"),
+        ):
+            with self.subTest(message=message), self.assertRaisesRegex(
+                lane.ContractError, message
+            ):
+                lane.execute_command(client, raw, mode="plan")
+            self.assertEqual(client.writes, [])
+
+    def test_issue_relation_fails_closed_on_readback_drift(self):
+        class DriftingRelationClient(FakeClient):
+            def get_issue_relation(self, relation_id):
+                relation = super().get_issue_relation(relation_id)
+                if relation is not None:
+                    relation["type"] = "related"
+                return relation
+
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(
+            lane.ContractError,
+            "read-back verification failed",
+        ):
+            lane.execute_command(
+                DriftingRelationClient(),
+                relation_command("blocks", "linear:SIS:relation:drift"),
+                mode="apply",
+                journal_path=Path(tmp) / "journal.json",
+            )
+
     def test_standalone_issue_reuses_exact_scope_and_replays_without_parent(self):
         class CanonicalizingClient(FakeIssueTreeClient):
             def create_project_issue(self, **kwargs):

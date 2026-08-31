@@ -33,11 +33,13 @@ OPERATIONS = {
     "converge_hierarchy",
     "create_standalone_issue",
     "converge_issue_tree",
+    "create_issue_relation",
 }
 OWNER_CONTROLLED_STATES = {"Done", "Canceled", "Duplicate"}
 OWNER_APPROVAL_PARENT_BLOCKER = (
     "owner approval required: clearing or replacing an issue parent"
 )
+ISSUE_RELATION_TYPES = {"blocks", "blocked_by", "related"}
 PRIORITIES = {"High": 2, "Medium": 3, "Low": 4}
 MAX_COMMENT_LENGTH = 4000
 MAX_TITLE_LENGTH = 200
@@ -105,6 +107,38 @@ mutation LaneState($id: String!, $input: IssueUpdateInput!) {
 COMMENT_CREATE = """
 mutation LaneComment($input: CommentCreateInput!) {
   commentCreate(input: $input) { success comment { id body issueId } }
+}
+"""
+ISSUE_RELATIONS_QUERY = """
+query LaneIssueRelations($id: String!) {
+  issue(id: $id) {
+    id identifier
+    relations(first: 100) {
+      nodes { id type issue { id identifier } relatedIssue { id identifier } }
+      pageInfo { hasNextPage }
+    }
+    inverseRelations(first: 100) {
+      nodes { id type issue { id identifier } relatedIssue { id identifier } }
+      pageInfo { hasNextPage }
+    }
+  }
+}
+"""
+ISSUE_RELATION_QUERY = """
+query LaneIssueRelation($id: String!) {
+  issueRelation(id: $id) {
+    id type issue { id identifier } relatedIssue { id identifier }
+  }
+}
+"""
+ISSUE_RELATION_CREATE = """
+mutation LaneIssueRelationCreate($input: IssueRelationCreateInput!) {
+  issueRelationCreate(input: $input) {
+    success
+    issueRelation {
+      id type issue { id identifier } relatedIssue { id identifier }
+    }
+  }
 }
 """
 PARENT_CHILDREN_QUERY = """
@@ -386,6 +420,55 @@ class LinearClient:
         )["commentCreate"]
         if result.get("success") is not True:
             raise ContractError("Linear comment mutation did not succeed")
+
+    def list_issue_relations(self, identifier: str) -> list[dict[str, Any]]:
+        """Inventory both relation directions for one exact issue."""
+        issue = self.execute(ISSUE_RELATIONS_QUERY, {"id": identifier}).get("issue")
+        if not isinstance(issue, dict) or issue.get("identifier") != identifier:
+            raise ContractError(f"exact Linear issue not found: {identifier}")
+        relations: dict[str, dict[str, Any]] = {}
+        for field in ("relations", "inverseRelations"):
+            nodes = self._bounded_connection(
+                issue.get(field), f"issue {field}"
+            )
+            for node in nodes:
+                relation_id = node.get("id") if isinstance(node, dict) else None
+                if not isinstance(relation_id, str) or not relation_id:
+                    raise ContractError("issue relation inventory payload is invalid")
+                previous = relations.get(relation_id)
+                if previous is not None and previous != node:
+                    raise ContractError("issue relation inventory contains conflicting duplicates")
+                relations[relation_id] = node
+        return list(relations.values())
+
+    def get_issue_relation(self, relation_id: str) -> dict[str, Any] | None:
+        """Read one deterministic relation for exact post-create verification."""
+        return self.execute(ISSUE_RELATION_QUERY, {"id": relation_id}).get(
+            "issueRelation"
+        )
+
+    def create_issue_relation(
+        self,
+        *,
+        relation_id: str,
+        issue_id: str,
+        related_issue_id: str,
+        relation_type: str,
+    ) -> None:
+        """Create one relation through the fixed caller-ID mutation."""
+        result = self.execute(
+            ISSUE_RELATION_CREATE,
+            {
+                "input": {
+                    "id": relation_id,
+                    "issueId": issue_id,
+                    "relatedIssueId": related_issue_id,
+                    "type": relation_type,
+                }
+            },
+        )["issueRelationCreate"]
+        if result.get("success") is not True:
+            raise ContractError("Linear issue relation creation did not succeed")
 
     def list_child_issues(self, parent_identifier: str) -> list[dict[str, Any]]:
         """Return bounded children of one exact parent for create replay detection."""
@@ -788,6 +871,24 @@ def validate_command(raw: Any) -> dict[str, Any]:
     elif operation == "inventory_sub_issues":
         if change:
             raise ContractError("inventory_sub_issues change must be empty")
+    elif operation == "create_issue_relation":
+        if set(change) != {"related_identifier", "relation_type"}:
+            raise ContractError(
+                "create_issue_relation supports exactly related_identifier and relation_type"
+            )
+        related_identifier = change.get("related_identifier")
+        if not isinstance(related_identifier, str) or not ISSUE_IDENTIFIER.fullmatch(
+            related_identifier
+        ):
+            raise ContractError(
+                "create_issue_relation related_identifier must be an exact SIS-N identifier"
+            )
+        if change.get("relation_type") not in ISSUE_RELATION_TYPES:
+            raise ContractError(
+                "create_issue_relation relation_type is not in the bounded allowlist"
+            )
+        if related_identifier == target["identifier"]:
+            raise ContractError("create_issue_relation cannot relate an issue to itself")
     elif operation == "update_sub_issues":
         if set(change) != {"description"}:
             raise ContractError("update_sub_issues supports exactly description")
@@ -1235,6 +1336,155 @@ def execute_command(
         raise ContractError(f"exact target is not in the SIS team: {identifier}")
     before = issue_snapshot(issue)
     base = result_base(command, issue, mode)
+    if command["operation"] == "create_issue_relation":
+        change = command["change"]
+        related_identifier = change["related_identifier"]
+        related = client.get_issue(related_identifier)
+        if (
+            not isinstance(related, dict)
+            or related.get("identifier") != related_identifier
+            or not isinstance(related.get("id"), str)
+            or not related["id"].strip()
+        ):
+            raise ContractError(
+                f"exact related Linear issue not found: {related_identifier}"
+            )
+        related_team = related.get("team")
+        if (
+            not isinstance(related_team, dict)
+            or related_team.get("id") != team["id"]
+            or related_team.get("key") != "SIS"
+        ):
+            raise ContractError(
+                f"exact related target is not in the SIS team: {related_identifier}"
+            )
+
+        user_type = change["relation_type"]
+        if user_type == "blocked_by":
+            source, destination, linear_type = related, issue, "blocks"
+        elif user_type == "blocks":
+            source, destination, linear_type = issue, related, "blocks"
+        else:
+            source, destination = sorted(
+                (issue, related), key=lambda item: item["identifier"]
+            )
+            linear_type = "related"
+        desired = {
+            "identifier": identifier,
+            "related_identifier": related_identifier,
+            "relation_type": user_type,
+        }
+        relation_target = {"type": "issue_relation", **desired}
+        relation_base = {
+            "schema_version": "linear-result.v2",
+            "command_id": command["command_id"],
+            "correlation_id": command["correlation_id"],
+            "idempotency_key": command["idempotency_key"],
+            "source_profile": command["source_profile"],
+            "operation": command["operation"],
+            "mode": mode,
+            "target": relation_target,
+        }
+
+        def relation_matches(candidate: Any, *, expected_id: str | None = None) -> bool:
+            if not isinstance(candidate, dict):
+                raise ContractError("issue relation inventory payload is invalid")
+            relation_id = candidate.get("id")
+            candidate_source = candidate.get("issue")
+            candidate_destination = candidate.get("relatedIssue")
+            if (
+                not isinstance(relation_id, str)
+                or not relation_id
+                or not isinstance(candidate_source, dict)
+                or not isinstance(candidate_destination, dict)
+                or not isinstance(candidate_source.get("id"), str)
+                or not isinstance(candidate_destination.get("id"), str)
+                or not isinstance(candidate_source.get("identifier"), str)
+                or not ISSUE_IDENTIFIER.fullmatch(candidate_source["identifier"])
+                or not isinstance(candidate_destination.get("identifier"), str)
+                or not ISSUE_IDENTIFIER.fullmatch(candidate_destination["identifier"])
+                or not isinstance(candidate.get("type"), str)
+            ):
+                raise ContractError("issue relation inventory payload is invalid")
+            if expected_id is not None and relation_id != expected_id:
+                return False
+            endpoints_match = (
+                candidate_source["id"] == source["id"]
+                and candidate_source["identifier"] == source["identifier"]
+                and candidate_destination["id"] == destination["id"]
+                and candidate_destination["identifier"] == destination["identifier"]
+            )
+            if linear_type == "related":
+                reverse_match = (
+                    candidate_source["id"] == destination["id"]
+                    and candidate_source["identifier"] == destination["identifier"]
+                    and candidate_destination["id"] == source["id"]
+                    and candidate_destination["identifier"] == source["identifier"]
+                )
+                endpoints_match = endpoints_match or reverse_match
+            return candidate.get("type") == linear_type and endpoints_match
+
+        inventory = client.list_issue_relations(identifier)
+        if not isinstance(inventory, list):
+            raise ContractError("issue relation inventory payload is invalid")
+        existing = [item for item in inventory if relation_matches(item)]
+        if len(existing) > 1:
+            raise ContractError("exact issue relation exists more than once")
+        if existing:
+            return finish(
+                {
+                    **relation_base,
+                    "result": "no_op",
+                    "before": desired,
+                    "after": desired,
+                    "plan": [],
+                    "no_op": True,
+                    "verified": True,
+                }
+            )
+        relation_semantic = json.dumps(
+            {
+                "issue_identifier": source["identifier"],
+                "related_identifier": destination["identifier"],
+                "type": linear_type,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        relation_id = deterministic_uuid4(
+            "linear-command:issue-relation:v2", relation_semantic
+        )
+        plan = [{"action": "create_issue_relation", **desired}]
+        if mode == "plan":
+            return {
+                **relation_base,
+                "result": "planned",
+                "before": None,
+                "after": desired,
+                "plan": plan,
+                "no_op": False,
+                "verified": False,
+            }
+        client.create_issue_relation(
+            relation_id=relation_id,
+            issue_id=source["id"],
+            related_issue_id=destination["id"],
+            relation_type=linear_type,
+        )
+        verified_relation = client.get_issue_relation(relation_id)
+        if not relation_matches(verified_relation, expected_id=relation_id):
+            raise ContractError("issue relation read-back verification failed")
+        return finish(
+            {
+                **relation_base,
+                "result": "applied",
+                "before": None,
+                "after": desired,
+                "plan": plan,
+                "no_op": False,
+                "verified": True,
+            }
+        )
     if command["operation"] == "read_issue":
         return {
             **base,

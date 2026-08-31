@@ -106,6 +106,16 @@ def set_existing_task(board, task):
                 "title": command["change"]["title"],
                 "state": command["change"]["state"],
             }
+        elif operation == "create_issue_relation":
+            target = {
+                "type": "issue_relation",
+                "identifier": command["target"]["identifier"],
+                **command["change"],
+            }
+            after = {
+                "identifier": command["target"]["identifier"],
+                **command["change"],
+            }
         else:
             target = {
                 "type": command["target"]["type"],
@@ -218,6 +228,30 @@ class FakeKanban:
 
 
 class AdapterTests(unittest.TestCase):
+    def test_tool_schema_exposes_only_exact_bounded_issue_relation_shape(self):
+        parameters = LINEAR_SOURCE_REQUEST_SCHEMA["parameters"]
+
+        self.assertEqual(
+            parameters["properties"]["related_identifier"],
+            {"type": "string", "pattern": "^SIS-[1-9][0-9]*$"},
+        )
+        self.assertEqual(
+            parameters["properties"]["relation_type"],
+            {"type": "string", "enum": ["blocks", "blocked_by", "related"]},
+        )
+        branch = next(
+            item
+            for item in parameters["oneOf"]
+            if item.get("properties", {}).get("operation", {}).get("const")
+            == "create_issue_relation"
+        )
+        self.assertEqual(
+            branch["required"],
+            ["operation", "identifier", "related_identifier", "relation_type"],
+        )
+        self.assertNotIn("id", parameters["properties"])
+        self.assertNotIn("graphql", parameters["properties"])
+
     def test_adapter_reads_latest_persisted_block_reason(self):
         from hermes_cli import kanban_db as kb
 
@@ -438,6 +472,8 @@ class PluginTests(unittest.TestCase):
                 "request",
                 "operation",
                 "identifier",
+                "related_identifier",
+                "relation_type",
                 "state",
                 "title",
                 "description",
@@ -510,7 +546,7 @@ class PluginTests(unittest.TestCase):
             create_branch["properties"]["parent_identifier"],
             {"type": "string", "pattern": "^SIS-[1-9][0-9]*$"},
         )
-        self.assertEqual(len(parameters["oneOf"]), 9)
+        self.assertEqual(len(parameters["oneOf"]), 10)
         self.assertEqual(
             parameters["properties"]["operation"]["enum"],
             [
@@ -522,6 +558,7 @@ class PluginTests(unittest.TestCase):
                 "converge_hierarchy",
                 "create_standalone_issue",
                 "converge_issue_tree",
+                "create_issue_relation",
             ],
         )
         self.assertEqual(
@@ -531,6 +568,7 @@ class PluginTests(unittest.TestCase):
                 "change_state",
                 "update_issue",
                 "inventory_sub_issues",
+                "create_issue_relation",
                 "update_sub_issues",
                 "create_issue",
                 "converge_hierarchy",
@@ -602,6 +640,45 @@ class PluginTests(unittest.TestCase):
             ],
         )
         self.assertNotIn("child-", json.dumps(result))
+
+    def test_public_result_exposes_issue_relation_identifiers_and_type_only(self):
+        result = _public_result(
+            {
+                "status": "verified_no_op",
+                "linear_result": {
+                    "verified": True,
+                    "result": "applied",
+                    "operation": "create_issue_relation",
+                    "target": {
+                        "type": "issue_relation",
+                        "identifier": "SIS-59",
+                        "related_identifier": "SIS-56",
+                        "relation_type": "blocked_by",
+                    },
+                    "after": {
+                        "identifier": "SIS-59",
+                        "related_identifier": "SIS-56",
+                        "relation_type": "blocked_by",
+                        "id": "must-not-leak",
+                    },
+                },
+            }
+        )
+
+        self.assertEqual(
+            result,
+            {
+                "status": "completed",
+                "changed": True,
+                "target": {
+                    "type": "issue_relation",
+                    "identifier": "SIS-59",
+                    "related_identifier": "SIS-56",
+                    "relation_type": "blocked_by",
+                },
+            },
+        )
+        self.assertNotIn("must-not-leak", json.dumps(result))
 
     def test_public_result_exposes_verified_assignee_name(self):
         result = _public_result(

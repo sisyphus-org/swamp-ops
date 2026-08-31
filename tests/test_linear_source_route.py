@@ -80,6 +80,53 @@ class FakeBoard:
 
 
 class ParseTests(unittest.TestCase):
+    def test_structured_issue_relation_request_becomes_bounded_command(self):
+        parsed = route.parse_linear_request(
+            {
+                "operation": "create_issue_relation",
+                "identifier": "SIS-77",
+                "related_identifier": "SIS-94",
+                "relation_type": "blocked_by",
+            },
+            source_profile="default",
+            uuid_factory=uuid_factory(),
+        )
+
+        self.assertEqual(parsed.command["operation"], "create_issue_relation")
+        self.assertEqual(
+            parsed.command["target"], {"type": "issue", "identifier": "SIS-77"}
+        )
+        self.assertEqual(
+            parsed.command["change"],
+            {"related_identifier": "SIS-94", "relation_type": "blocked_by"},
+        )
+
+    def test_issue_relation_source_shape_rejects_self_internal_ids_and_unbounded_types(self):
+        invalid = (
+            {
+                "identifier": "SIS-77",
+                "related_identifier": "SIS-77",
+                "relation_type": "blocks",
+            },
+            {
+                "identifier": "SIS-77",
+                "related_identifier": {"id": "internal"},
+                "relation_type": "blocks",
+            },
+            {
+                "identifier": "SIS-77",
+                "related_identifier": "SIS-94",
+                "relation_type": "duplicate",
+            },
+        )
+        for values in invalid:
+            with self.subTest(values=values), self.assertRaises(route.RouteError):
+                route.parse_linear_request(
+                    {"operation": "create_issue_relation", **values},
+                    source_profile="default",
+                    uuid_factory=uuid_factory(),
+                )
+
     def test_structured_standalone_and_issue_tree_requests_become_bounded_commands(self):
         standalone = {
             "operation": "create_standalone_issue",

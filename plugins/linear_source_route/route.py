@@ -34,6 +34,7 @@ RESERVED_MARKER = "<!-- linear-command"
 MAX_HIERARCHY_BYTES = 24_576
 MAX_ISSUE_TREE_BYTES = 65_536
 PRIORITIES = {"High", "Medium", "Low"}
+ISSUE_RELATION_TYPES = {"blocks", "blocked_by", "related"}
 
 
 class RouteError(RuntimeError):
@@ -396,6 +397,34 @@ def parse_linear_request(
                 raise RouteError("target must be an exact SIS-N identifier")
             target = {"type": "issue", "identifier": identifier}
             change = {}
+        elif operation == "create_issue_relation":
+            if set(request) != {
+                "operation",
+                "identifier",
+                "related_identifier",
+                "relation_type",
+            }:
+                raise RouteError("issue relation request has invalid fields")
+            identifier = request.get("identifier")
+            related_identifier = request.get("related_identifier")
+            if not isinstance(identifier, str) or not re.fullmatch(
+                r"SIS-[1-9][0-9]*", identifier
+            ):
+                raise RouteError("target must be an exact SIS-N identifier")
+            if not isinstance(related_identifier, str) or not re.fullmatch(
+                r"SIS-[1-9][0-9]*", related_identifier
+            ):
+                raise RouteError("related target must be an exact SIS-N identifier")
+            if related_identifier == identifier:
+                raise RouteError("an issue cannot be related to itself")
+            relation_type = request.get("relation_type")
+            if relation_type not in ISSUE_RELATION_TYPES:
+                raise RouteError("relation_type is not in the bounded allowlist")
+            target = {"type": "issue", "identifier": identifier}
+            change = {
+                "related_identifier": related_identifier,
+                "relation_type": relation_type,
+            }
         elif operation == "update_sub_issues":
             if set(request) != {"operation", "identifier", "description"}:
                 raise RouteError("sub-issue update request has invalid fields")
