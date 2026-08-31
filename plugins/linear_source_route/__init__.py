@@ -213,7 +213,12 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
             },
             {
                 "required": ["operation", "project", "milestone", "issue"],
-                "properties": {"operation": {"const": "create_standalone_issue"}},
+                "properties": {
+                    "operation": {"const": "create_standalone_issue"},
+                    "issue": {
+                        "required": ["title", "description", "state", "priority"]
+                    },
+                },
             },
             {
                 "required": [
@@ -223,7 +228,12 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                     "issue",
                     "sub_issues",
                 ],
-                "properties": {"operation": {"const": "converge_issue_tree"}},
+                "properties": {
+                    "operation": {"const": "converge_issue_tree"},
+                    "issue": {
+                        "required": ["title", "description", "state", "priority"]
+                    },
+                },
             },
         ],
     },

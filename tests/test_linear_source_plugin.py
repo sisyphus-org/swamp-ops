@@ -470,6 +470,11 @@ class PluginTests(unittest.TestCase):
                 "converge_issue_tree",
             ],
         )
+        for branch in parameters["oneOf"][-2:]:
+            self.assertEqual(
+                branch["properties"]["issue"]["required"],
+                ["title", "description", "state", "priority"],
+            )
         for entity in ("project", "milestone", "issue"):
             entity_schema = parameters["properties"][entity]
             self.assertNotIn("id", entity_schema["properties"])

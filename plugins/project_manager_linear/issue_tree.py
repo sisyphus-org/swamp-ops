@@ -323,6 +323,20 @@ def _snapshot(live: dict[str, Any], spec: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _require_issue_identity(
+    issue: dict[str, Any] | None,
+    operation: str,
+    error_cls: type[Exception],
+) -> None:
+    if issue is None:
+        return
+    if any(
+        not isinstance(issue.get(field), str) or not issue[field].strip()
+        for field in ("identifier", "url")
+    ):
+        _fail(error_cls, _COMPARISON.mismatch_message(operation, ["id/title"]))
+
+
 def _safe_result(
     command: dict[str, Any],
     *,
@@ -353,9 +367,12 @@ def _safe_result(
         "issue": _snapshot(issue, command["change"]["issue"]) if issue else None,
     }
     if command["operation"] == "converge_issue_tree":
+        by_title = {live.get("title"): live for live in children}
         after["sub_issues"] = [
-            _snapshot(live, spec)
-            for live, spec in zip(children, command["change"]["sub_issues"])
+            _snapshot(by_title[spec["title"]], spec)
+            if spec["title"] in by_title
+            else None
+            for spec in command["change"]["sub_issues"]
         ]
     return {
         "schema_version": "linear-result.v2",
@@ -430,6 +447,7 @@ def execute(
     issue, legacy = _select_issue(
         scope.issues, issue_id, change["issue"]["title"], error_cls
     )
+    _require_issue_identity(issue, operation, error_cls)
     before = {
         "project": {"id": scope.project["id"], "name": scope.project["name"]},
         "milestone": {"id": scope.milestone["id"], "name": scope.milestone["name"]},
@@ -473,6 +491,7 @@ def execute(
                 error_cls,
                 allow_legacy=False,
             )
+            _require_issue_identity(child, operation, error_cls)
             if child is None:
                 plan.append(_plan_action("create_sub_issue", spec["title"]))
             else:
@@ -538,6 +557,7 @@ def execute(
     )
     if issue is None:
         _fail(error_cls, _COMPARISON.mismatch_message(operation, ["id/title"]))
+    _require_issue_identity(issue, operation, error_cls)
     fields = _issue_mismatches(
         issue,
         change["issue"],
@@ -565,6 +585,7 @@ def execute(
             error_cls,
             allow_legacy=False,
         )
+        _require_issue_identity(child, operation, error_cls)
         if child is None:
             client.create_issue(
                 issue_id=child_id,
@@ -605,6 +626,7 @@ def execute(
             error_cls,
             allow_legacy=False,
         )
+        _require_issue_identity(child, operation, error_cls)
         if child is None:
             _fail(error_cls, _COMPARISON.mismatch_message(operation, ["id/title"]))
         child_fields = _issue_mismatches(

@@ -903,6 +903,53 @@ class ExecutionTests(unittest.TestCase):
                     journal_path=Path(tmp) / "replay.json",
                 )
 
+    def test_issue_tree_partial_plan_preserves_declared_child_positions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = FakeIssueTreeClient(
+                project_name="Книги", milestone_name="Английская литература"
+            )
+            raw = issue_tree_command()
+            lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "create.json",
+            )
+            client.issues = [client.issues[0], *client.issues[2:]]
+            planned = lane.execute_command(client, raw, mode="plan")
+            children = planned["after"]["sub_issues"]
+            self.assertEqual(len(children), 4)
+            self.assertIsNone(children[0])
+            self.assertEqual(children[1]["title"], "Макбет")
+
+    def test_scoped_issue_missing_identifier_returns_typed_field_blocker(self):
+        client = FakeIssueTreeClient()
+        client.issues.append(
+            {
+                "id": "legacy",
+                "title": "Выбрать и купить костюм",
+                "url": "https://linear.app/example/issue/SIS-150",
+                "description": "Варианты: https://example.com/suits",
+                "priority": lane.PRIORITIES["High"],
+                "state": {"id": "state-Todo", "name": "Todo"},
+                "team": {"id": "team-sis", "key": "SIS"},
+                "project": {"id": "project-existing"},
+                "projectMilestone": {"id": "milestone-existing"},
+                "parent": None,
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(
+                lane.ContractError,
+                r"^create_standalone_issue read-back mismatched fields: id/title$",
+            ):
+                lane.execute_command(
+                    client,
+                    standalone_command(),
+                    mode="apply",
+                    journal_path=Path(tmp) / "journal.json",
+                )
+
     def test_hierarchy_ids_are_internal_stable_distinct_and_not_command_uuid_bound(self):
         first = hierarchy_command("linear:SIS:hierarchy:stable")
         second = json.loads(json.dumps(first, ensure_ascii=False))
