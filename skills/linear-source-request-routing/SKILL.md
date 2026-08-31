@@ -1,7 +1,7 @@
 ---
 name: linear-source-request-routing
 description: Route Linear writes through broker and Project Manager.
-version: 0.4.1
+version: 0.5.0
 author: Alexey Petrov, Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -21,6 +21,8 @@ Use the typed Project Manager lane for every Linear creation or mutation. The so
 - Change one exact `SIS-N` issue to `Backlog`, `Todo`, `Research`, `In Progress`, or `In Review`.
 - Create one bounded issue in the `SIS` team under one exact uppercase `SIS-N` parent, with bounded title/description, safe state, and High/Medium/Low priority.
 - Converge one bounded create-only `SIS` hierarchy: one exact project, one milestone, and one top-level issue, with optional descriptions and a safe issue state.
+- Create one standalone top-level issue in one exact existing project/milestone with explicit description, safe state, and priority.
+- Converge one top-level issue plus 1–10 explicitly declared sub-issues; prose lists in a description never count as created children.
 
 Do not use this path for fuzzy/missing targets, bulk operations, terminal states, archive/delete, arbitrary teams, unrestricted structural changes, or per-task Telegram topics.
 
@@ -32,6 +34,8 @@ Do not use this path for fuzzy/missing targets, bulk operations, terminal states
    - state: `operation=change_state`, exact `identifier`, exact safe `state`;
    - create: `operation=create_issue`, bounded `title`, `description`, exact `parent_identifier`, safe `state`, and bounded `priority`.
    - hierarchy: `operation=converge_hierarchy` with exact `project`, `milestone`, and `issue` objects; names/titles are required, descriptions and a safe issue state are optional, and IDs are never supplied by the source.
+   - standalone: `operation=create_standalone_issue` with exact `project`/`milestone` names and optional supplied descriptions plus an `issue` containing exact `title`, `description`, safe `state`, and `priority`.
+   - issue tree: `operation=converge_issue_tree` with the standalone fields plus `sub_issues` containing 1–10 exact issue objects. Omit optional works from this list if they must remain uncreated.
 3. Do not call Linear MCP, GraphQL, `terminal`, Kanban inspection commands, or another mutation tool from the source profile.
 4. After `queued`, reply only that the requested action is being handled, then stop. Do not inspect the task, worker, protocol, or board while it runs.
 5. After `completed`, report only the user-visible outcome: what changed or was reused, the final issue identifier/title/state when relevant, and the canonical Linear URL. Do not narrate routing or verification machinery.

@@ -1,7 +1,7 @@
 name: project-manager-linear
-version: 0.5.3
+version: 0.6.0
 description: >-
-  Deterministic Project Manager Linear issue and bounded hierarchy convergence lane.
+  Deterministic Project Manager Linear issue, standalone, and bounded issue-tree lane.
 author: sisyphus-org
 kind: backend
 provides_tools:

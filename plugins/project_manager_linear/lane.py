@@ -27,6 +27,8 @@ OPERATIONS = {
     "add_comment",
     "create_issue",
     "converge_hierarchy",
+    "create_standalone_issue",
+    "converge_issue_tree",
 }
 OWNER_CONTROLLED_STATES = {"Done", "Canceled", "Duplicate"}
 PRIORITIES = {"High": 2, "Medium": 3, "Low": 4}
@@ -78,7 +80,14 @@ PARENT_CHILDREN_QUERY = """
 query LaneChildren($id: String!) {
   issue(id: $id) {
     children(first: 100) {
-      nodes { id identifier title url description priority state { id name type } team { id key } }
+      nodes {
+        id identifier title url description priority
+        state { id name type }
+        team { id key }
+        parent { id identifier }
+        project { id }
+        projectMilestone { id }
+      }
       pageInfo { hasNextPage }
     }
   }
@@ -121,12 +130,30 @@ PROJECT_ISSUES_QUERY = """
 query LaneProjectIssues($projectId: ID!) {
   issues(first: 100, filter: { project: { id: { eq: $projectId } } }) {
     nodes {
-      id identifier title url description
+      id identifier title url description priority
       team { id key }
       project { id }
       projectMilestone { id }
       state { id name }
-      parent { id }
+      parent { id identifier }
+    }
+    pageInfo { hasNextPage }
+  }
+}
+"""
+TEAM_ISSUES_BY_TITLE_QUERY = """
+query LaneTeamIssuesByTitle($teamId: ID!, $title: String!) {
+  issues(
+    first: 100
+    filter: { team: { id: { eq: $teamId } }, title: { eq: $title } }
+  ) {
+    nodes {
+      id identifier title url description priority
+      team { id key }
+      project { id }
+      projectMilestone { id }
+      state { id name }
+      parent { id identifier }
     }
     pageInfo { hasNextPage }
   }
@@ -191,7 +218,18 @@ def _load_hierarchy() -> Any:
     return _load_bundled_module("hierarchy.py", "project_manager_linear_hierarchy")
 
 
+def _load_comparison() -> Any:
+    """Load shared Linear comparison rules in every execution context."""
+    return _load_bundled_module("comparison.py", "project_manager_linear_comparison")
+
+
+def _load_issue_tree() -> Any:
+    """Load standalone/tree convergence in package and standalone contexts."""
+    return _load_bundled_module("issue_tree.py", "project_manager_linear_issue_tree")
+
+
 _VALIDATION = _load_validation()
+_COMPARISON = _load_comparison()
 SAFE_STATES = _VALIDATION.SAFE_STATES
 CREDENTIAL_SHAPES = _VALIDATION.CREDENTIAL_SHAPES
 RESERVED_COMMENT_MARKER = _VALIDATION.RESERVED_COMMENT_MARKER
@@ -347,6 +385,18 @@ class LinearClient:
             "project issues",
         )
 
+    def list_team_issues_by_title(
+        self, team_id: str, title: str
+    ) -> list[dict[str, Any]]:
+        """Return bounded exact-title candidates for legacy partial-write recovery."""
+        return self._bounded_connection(
+            self.execute(
+                TEAM_ISSUES_BY_TITLE_QUERY,
+                {"teamId": team_id, "title": title},
+            ).get("issues"),
+            "SIS exact-title issues",
+        )
+
     def create_project(self, *, project_id: str, team_id: str, name: str, **optional: Any) -> None:
         payload = {"id": project_id, "teamIds": [team_id], "name": name, **optional}
         result = self.execute(PROJECT_CREATE, {"input": payload})["projectCreate"]
@@ -372,6 +422,7 @@ class LinearClient:
         milestone_id: str,
         title: str,
         state_id: str | None = None,
+        priority: int | None = None,
         **optional: Any,
     ) -> None:
         payload = {
@@ -384,9 +435,44 @@ class LinearClient:
         }
         if state_id is not None:
             payload["stateId"] = state_id
+        if priority is not None:
+            payload["priority"] = priority
         result = self.execute(PROJECT_ISSUE_CREATE, {"input": payload})["issueCreate"]
         if result.get("success") is not True:
             raise ContractError("Linear hierarchy issue creation did not succeed")
+
+    def update_scoped_issue(
+        self,
+        issue_id: str,
+        *,
+        description: str | None = None,
+        state_id: str | None = None,
+        priority: int | None = None,
+        parent_id: str | None | object = ...,
+        project_id: str | None = None,
+        milestone_id: str | None = None,
+    ) -> None:
+        """Reconcile only allowlisted issue fields and structural links."""
+        payload: dict[str, Any] = {}
+        if description is not None:
+            payload["description"] = description
+        if state_id is not None:
+            payload["stateId"] = state_id
+        if priority is not None:
+            payload["priority"] = priority
+        if parent_id is not ...:
+            payload["parentId"] = parent_id
+        if project_id is not None:
+            payload["projectId"] = project_id
+        if milestone_id is not None:
+            payload["projectMilestoneId"] = milestone_id
+        if not payload:
+            raise ContractError("Linear scoped issue update has no managed fields")
+        result = self.execute(ISSUE_UPDATE, {"id": issue_id, "input": payload})[
+            "issueUpdate"
+        ]
+        if result.get("success") is not True:
+            raise ContractError("Linear scoped issue update did not succeed")
 
     def update_project_issue(
         self,
@@ -436,7 +522,12 @@ def validate_command(raw: Any) -> dict[str, Any]:
     target = raw["target"]
     if not isinstance(target, dict) or set(target) != {"type", "identifier"}:
         raise ContractError("target must contain exactly type and identifier")
-    if operation in {"create_issue", "converge_hierarchy"}:
+    if operation in {
+        "create_issue",
+        "converge_hierarchy",
+        "create_standalone_issue",
+        "converge_issue_tree",
+    }:
         if target != {"type": "team", "identifier": "SIS"}:
             raise ContractError(f"{operation} target must be the exact SIS team")
     elif target["type"] != "issue" or not ISSUE_IDENTIFIER.fullmatch(
@@ -505,6 +596,8 @@ def validate_command(raw: Any) -> dict[str, Any]:
             raise ContractError("create_issue fields contain credential-shaped data")
     elif operation == "converge_hierarchy":
         _load_hierarchy().validate_change(change, ContractError)
+    elif operation in {"create_standalone_issue", "converge_issue_tree"}:
+        _load_issue_tree().validate_change(change, operation, ContractError)
     if raw["policy"] != {"mode": "standard"}:
         raise ContractError("policy must be the standard fail-closed lane")
     return raw
@@ -661,6 +754,16 @@ def execute_command(
             )
         )
 
+    if command["operation"] in {"create_standalone_issue", "converge_issue_tree"}:
+        return finish(
+            _load_issue_tree().execute(
+                client,
+                command,
+                mode=mode,
+                error_cls=ContractError,
+            )
+        )
+
     if command["operation"] == "create_issue":
         change = command["change"]
         parent_identifier = change["parent_identifier"]
@@ -688,28 +791,36 @@ def execute_command(
 
         def verified_create_snapshot(issue: dict[str, Any]) -> dict[str, Any]:
             """Validate every bounded create field at the deterministic issue ID."""
-            snapshot = issue_snapshot(issue)
             issue_parent = issue.get("parent")
             issue_team = issue.get("team")
+            issue_state = issue.get("state")
+            fields = []
+            if issue.get("id") != issue_id or issue.get("title") != change["title"]:
+                fields.append("id/title")
+            if not _COMPARISON.description_matches(description, issue.get("description")):
+                fields.append("description")
+            if not isinstance(issue_state, dict) or issue_state.get("name") != change["state"]:
+                fields.append("state")
+            if issue.get("priority") != PRIORITIES[change["priority"]]:
+                fields.append("priority")
             if (
-                issue.get("id") != issue_id
-                or snapshot["title"] != change["title"]
-                or snapshot["state"] != change["state"]
-                or issue.get("description") != description
-                or issue.get("priority") != PRIORITIES[change["priority"]]
-                or not isinstance(issue_team, dict)
-                or issue_team.get("id") != team["id"]
-                or issue_team.get("key") != "SIS"
-                or not isinstance(issue_parent, dict)
+                not isinstance(issue_parent, dict)
                 or issue_parent.get("id") != parent["id"]
                 or issue_parent.get("identifier") != parent_identifier
             ):
-                raise ContractError(
-                    "create_issue bounded field read-back verification failed"
-                )
+                fields.append("parent")
+            if (
+                not isinstance(issue_team, dict)
+                or issue_team.get("id") != team["id"]
+                or issue_team.get("key") != "SIS"
+            ):
+                fields.append("team")
+            if fields:
+                raise ContractError(_COMPARISON.mismatch_message("create_issue", fields))
+            snapshot = issue_snapshot(issue)
             snapshot.update(
                 {
-                    "description": description,
+                    "description": issue.get("description"),
                     "priority": change["priority"],
                     "parent_identifier": parent_identifier,
                 }
@@ -740,12 +851,7 @@ def execute_command(
             else None
         )
         if existing is not None:
-            try:
-                snapshot = verified_create_snapshot(existing)
-            except ContractError as exc:
-                raise ContractError(
-                    "create_issue idempotency key conflicts with another request"
-                ) from exc
+            snapshot = verified_create_snapshot(existing)
             created = existing
             replay_base = result_base(command, created, mode)
             return finish(

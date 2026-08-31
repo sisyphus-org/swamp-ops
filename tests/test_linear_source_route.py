@@ -80,6 +80,46 @@ class FakeBoard:
 
 
 class ParseTests(unittest.TestCase):
+    def test_structured_standalone_and_issue_tree_requests_become_bounded_commands(self):
+        standalone = {
+            "operation": "create_standalone_issue",
+            "project": {"name": "Wardrobe & Style", "description": "Wardrobe"},
+            "milestone": {"name": "Autumn 2026", "description": "Autumn"},
+            "issue": {
+                "title": "Выбрать и купить костюм",
+                "description": "https://example.com/suits",
+                "state": "Todo",
+                "priority": "High",
+            },
+        }
+        tree = json.loads(json.dumps(standalone, ensure_ascii=False))
+        tree["operation"] = "converge_issue_tree"
+        tree["sub_issues"] = [
+            {
+                "title": title,
+                "description": f"Прочитать {title}",
+                "state": "Todo",
+                "priority": "Medium",
+            }
+            for title in ("Король Лир", "Макбет", "Гамлет", "Отелло")
+        ]
+
+        for request in (standalone, tree):
+            with self.subTest(operation=request["operation"]):
+                parsed = route.parse_linear_request(
+                    request,
+                    source_profile="books",
+                    uuid_factory=uuid_factory(),
+                )
+                self.assertEqual(parsed.command["operation"], request["operation"])
+                self.assertEqual(
+                    parsed.command["target"], {"type": "team", "identifier": "SIS"}
+                )
+                self.assertEqual(
+                    parsed.command["change"],
+                    {key: value for key, value in request.items() if key != "operation"},
+                )
+
     def test_structured_hierarchy_request_becomes_bounded_command(self):
         request = {
             "operation": "converge_hierarchy",

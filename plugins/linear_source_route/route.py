@@ -31,6 +31,8 @@ CREDENTIAL_SHAPES = (
 SAFE_STATES = {"Backlog", "Todo", "Research", "In Progress", "In Review"}
 RESERVED_MARKER = "<!-- linear-command"
 MAX_HIERARCHY_BYTES = 24_576
+MAX_ISSUE_TREE_BYTES = 65_536
+PRIORITIES = {"High", "Medium", "Low"}
 
 
 class RouteError(RuntimeError):
@@ -148,6 +150,78 @@ def _validate_hierarchy_request(request: dict[str, Any]) -> dict[str, Any]:
     return change
 
 
+def _validate_exact_issue_spec(spec: Any, path: str) -> dict[str, Any]:
+    if not isinstance(spec, dict) or set(spec) != {
+        "title",
+        "description",
+        "state",
+        "priority",
+    }:
+        raise RouteError(
+            f"{path} must contain exactly title, description, state, and priority"
+        )
+    _validate_clean_text(spec["title"], f"{path}.title", maximum=200, required=True)
+    _validate_clean_text(
+        spec["description"],
+        f"{path}.description",
+        maximum=10_000,
+        required=False,
+    )
+    if spec["state"] not in SAFE_STATES:
+        raise RouteError(f"{path}.state is not in the safe-state allowlist")
+    if spec["priority"] not in PRIORITIES:
+        raise RouteError(f"{path}.priority is not in the bounded allowlist")
+    return dict(spec)
+
+
+def _validate_scoped_issue_request(request: dict[str, Any]) -> dict[str, Any]:
+    operation = request.get("operation")
+    composite = operation == "converge_issue_tree"
+    expected = {
+        "operation",
+        "project",
+        "milestone",
+        "issue",
+        *(["sub_issues"] if composite else []),
+    }
+    if set(request) != expected:
+        raise RouteError("structured scoped issue request has invalid fields")
+    if len(json.dumps(request, ensure_ascii=False).encode()) > MAX_ISSUE_TREE_BYTES:
+        raise RouteError("structured scoped issue request exceeds the bounded size limit")
+    change: dict[str, Any] = {}
+    for kind in ("project", "milestone"):
+        spec = request.get(kind)
+        if not isinstance(spec, dict) or "name" not in spec or not set(spec).issubset(
+            {"name", "description"}
+        ):
+            raise RouteError(f"{kind} must contain name and optional description")
+        _validate_clean_text(
+            spec["name"], f"{kind}.name", maximum=200, required=True
+        )
+        if "description" in spec:
+            _validate_clean_text(
+                spec["description"],
+                f"{kind}.description",
+                maximum=10_000,
+                required=False,
+            )
+        change[kind] = dict(spec)
+    change["issue"] = _validate_exact_issue_spec(request.get("issue"), "issue")
+    if composite:
+        children = request.get("sub_issues")
+        if not isinstance(children, list) or not 1 <= len(children) <= 10:
+            raise RouteError("sub_issues must contain 1-10 issues")
+        validated_children = [
+            _validate_exact_issue_spec(item, f"sub_issues[{index}]")
+            for index, item in enumerate(children)
+        ]
+        titles = [change["issue"]["title"], *(item["title"] for item in validated_children)]
+        if len(set(titles)) != len(titles):
+            raise RouteError("issue tree titles must be unique")
+        change["sub_issues"] = validated_children
+    return change
+
+
 def parse_linear_request(
     request: Any,
     *,
@@ -226,6 +300,9 @@ def parse_linear_request(
         elif operation == "converge_hierarchy":
             target = {"type": "team", "identifier": "SIS"}
             change = _validate_hierarchy_request(request)
+        elif operation in {"create_standalone_issue", "converge_issue_tree"}:
+            target = {"type": "team", "identifier": "SIS"}
+            change = _validate_scoped_issue_request(request)
         else:
             raise RouteError("structured operation is not allowed")
     else:
@@ -394,19 +471,29 @@ def _verified_replay(
         }
         if target != expected_target:
             raise RouteError("completed replay target does not match persisted command")
-    elif operation == "create_issue":
+    elif operation in {
+        "create_issue",
+        "create_standalone_issue",
+        "converge_issue_tree",
+    }:
         after = result.get("after")
         identifier = target.get("identifier")
         url = target.get("url")
+        after_issue = (
+            after.get("issue")
+            if operation in {"create_standalone_issue", "converge_issue_tree"}
+            and isinstance(after, dict)
+            else after
+        )
         if (
-            not isinstance(after, dict)
+            not isinstance(after_issue, dict)
             or target.get("type") != "issue"
             or not isinstance(identifier, str)
             or not identifier.strip()
             or not isinstance(url, str)
             or not url.strip()
-            or identifier != after.get("identifier")
-            or url != after.get("url")
+            or identifier != after_issue.get("identifier")
+            or url != after_issue.get("url")
         ):
             raise RouteError("completed replay has an invalid verified target")
     elif (
