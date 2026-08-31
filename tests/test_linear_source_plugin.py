@@ -181,6 +181,52 @@ class FakeKanban:
 
 
 class AdapterTests(unittest.TestCase):
+    def test_adapter_reads_latest_persisted_block_reason(self):
+        from hermes_cli import kanban_db as kb
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "kanban.db"
+            with mock.patch.dict(os.environ, {"HERMES_KANBAN_DB": str(db_path)}):
+                kb.init_db(db_path=db_path)
+                board = HermesKanbanBoard(
+                    board="default", source_profile="default", kb=kb
+                )
+                delivery_key = "linear-delivery:v2:" + "b" * 32
+                task, _created = board.get_or_create_task(
+                    delivery_key,
+                    title="Linear create_issue SIS",
+                    body="{}",
+                    assignee="project-manager",
+                    triage=True,
+                    idempotency_key=delivery_key,
+                    session_id="20260828_120000_abcdef12",
+                    max_runtime_seconds=300,
+                )
+                board.release(task["id"], "test route verified")
+                conn = kb.connect(db_path=db_path)
+                try:
+                    self.assertTrue(
+                        kb.block_task(
+                            conn,
+                            task["id"],
+                            reason=(
+                                "Linear command failed: create_issue bounded field "
+                                "read-back verification failed"
+                            ),
+                            kind="capability",
+                        )
+                    )
+                finally:
+                    conn.close()
+
+                self.assertEqual(
+                    board.block_reason(task["id"]),
+                    (
+                        "Linear command failed: create_issue bounded field "
+                        "read-back verification failed"
+                    ),
+                )
+
     def test_atomic_get_or_create_race_persists_one_task_and_one_wake_subscription(self):
         from hermes_cli import kanban_db as kb
 
@@ -795,6 +841,60 @@ class PluginTests(unittest.TestCase):
             }, False
 
         fake_board.get_or_create_task.side_effect = get_or_create
+        fake_board.block_reason.return_value = (
+            "Linear command failed: create_issue bounded field read-back verification failed"
+        )
+        session_values = {
+            "HERMES_SESSION_PROFILE": "ideas",
+            "HERMES_SESSION_PLATFORM": "telegram",
+            "HERMES_SESSION_CHAT_ID": "442308262",
+            "HERMES_SESSION_USER_ID": "442308262",
+            "HERMES_SESSION_CHAT_TYPE": "dm",
+            "HERMES_SESSION_THREAD_ID": "449189",
+            "HERMES_SESSION_ID": "20260828_120000_abcdef12",
+        }
+        result = json.loads(
+            handle_linear_source_request(
+                {
+                    "operation": "create_issue",
+                    "title": "Bounded child",
+                    "description": "Bounded description",
+                    "parent_identifier": "SIS-68",
+                    "state": "In Progress",
+                    "priority": "High",
+                },
+                session_id="20260828_120000_abcdef12",
+                board_factory=lambda **_kwargs: fake_board,
+                session_getter=lambda name, default="": session_values.get(name, default),
+                runtime_profile_getter=lambda: "ideas",
+            )
+        )
+        self.assertEqual(
+            result,
+            {
+                "status": "blocked",
+                "message": (
+                    "Не удалось выполнить: create_issue bounded field read-back "
+                    "verification failed."
+                ),
+            },
+        )
+
+    def test_handler_hides_operation_mismatched_block_reason(self):
+        fake_board = mock.Mock()
+
+        def get_or_create(delivery_key, **kwargs):
+            return {
+                "id": "t_1234abcd",
+                "status": "blocked",
+                "session_id": kwargs["session_id"],
+                "idempotency_key": delivery_key,
+            }, False
+
+        fake_board.get_or_create_task.side_effect = get_or_create
+        fake_board.block_reason.return_value = (
+            "Linear command failed: create_issue bounded field read-back verification failed"
+        )
         session_values = {
             "HERMES_SESSION_PROFILE": "ideas",
             "HERMES_SESSION_PLATFORM": "telegram",
@@ -821,9 +921,94 @@ class PluginTests(unittest.TestCase):
             result,
             {
                 "status": "blocked",
-                "message": "Не удалось выполнить запрос. Проверьте исходные данные.",
+                "message": "Не удалось выполнить запрос: безопасная причина недоступна.",
             },
         )
+
+    def test_public_block_reason_allowlist_rejects_backend_and_invented_claims(self):
+        reasons = (
+            "Linear API HTTP 500: backend trace /internal/service.py:42",
+            "Linear GraphQL error: resolver failed",
+            "create_issue requires parent SIS-999",
+            "create_issue only supports a full new hierarchy",
+        )
+        for reason in reasons:
+            with self.subTest(reason=reason):
+                self.assertEqual(
+                    _public_result(
+                        {
+                            "status": "blocked",
+                            "operation": "create_issue",
+                            "reason": f"Linear command failed: {reason}",
+                        }
+                    ),
+                    {
+                        "status": "blocked",
+                        "message": (
+                            "Не удалось выполнить запрос: безопасная причина недоступна."
+                        ),
+                    },
+                )
+
+    def test_public_block_reason_preserves_factual_name_fallback_scope_failure(self):
+        reason = "project exact-name match conflicts with live scope or name"
+        self.assertEqual(
+            _public_result(
+                {
+                    "status": "blocked",
+                    "operation": "converge_hierarchy",
+                    "reason": f"Linear command failed: {reason}",
+                }
+            ),
+            {"status": "blocked", "message": f"Не удалось выполнить: {reason}."},
+        )
+
+    def test_handler_hides_unsafe_block_reason_without_inventing_another_reason(self):
+        fake_board = mock.Mock()
+
+        def get_or_create(delivery_key, **kwargs):
+            return {
+                "id": "t_1234abcd",
+                "status": "blocked",
+                "session_id": kwargs["session_id"],
+                "idempotency_key": delivery_key,
+            }, False
+
+        fake_board.get_or_create_task.side_effect = get_or_create
+        credential_fixture = "lin_api_" + "A" * 32
+        fake_board.block_reason.return_value = (
+            f"Linear command failed: {credential_fixture}"
+        )
+        session_values = {
+            "HERMES_SESSION_PROFILE": "ideas",
+            "HERMES_SESSION_PLATFORM": "telegram",
+            "HERMES_SESSION_CHAT_ID": "442308262",
+            "HERMES_SESSION_USER_ID": "442308262",
+            "HERMES_SESSION_CHAT_TYPE": "dm",
+            "HERMES_SESSION_THREAD_ID": "449189",
+            "HERMES_SESSION_ID": "20260828_120000_abcdef12",
+        }
+        result = json.loads(
+            handle_linear_source_request(
+                {
+                    "operation": "change_state",
+                    "identifier": "SIS-68",
+                    "state": "In Review",
+                },
+                session_id="20260828_120000_abcdef12",
+                board_factory=lambda **_kwargs: fake_board,
+                session_getter=lambda name, default="": session_values.get(name, default),
+                runtime_profile_getter=lambda: "ideas",
+            )
+        )
+        self.assertEqual(
+            result,
+            {
+                "status": "blocked",
+                "message": "Не удалось выполнить запрос: безопасная причина недоступна.",
+            },
+        )
+        self.assertNotIn(credential_fixture, json.dumps(result))
 
     def test_handler_rejects_session_id_mismatch_before_board_access(self):
         fake_board = mock.Mock()

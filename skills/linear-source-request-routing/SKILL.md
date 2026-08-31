@@ -1,7 +1,7 @@
 ---
 name: linear-source-request-routing
 description: Route Linear writes through broker and Project Manager.
-version: 0.4.0
+version: 0.4.1
 author: Alexey Petrov, Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -36,7 +36,11 @@ Do not use this path for fuzzy/missing targets, bulk operations, terminal states
 4. After `queued`, reply only that the requested action is being handled, then stop. Do not inspect the task, worker, protocol, or board while it runs.
 5. After `completed`, report only the user-visible outcome: what changed or was reused, the final issue identifier/title/state when relevant, and the canonical Linear URL. Do not narrate routing or verification machinery.
 6. On a Kanban wake, call `linear_source_request` once with the literal original semantic request to obtain the sanitized completion, then send one concise answer. Do not repeat raw lifecycle text.
-7. For rejection or blocker, state only the user-actionable reason. Do not expose internal identifiers unless the user explicitly asks for diagnostic detail.
+7. For a blocker, preserve the tool's sanitized factual `message`; never infer a
+   different capability limitation, required parent, hierarchy shape, or other
+   cause from the operation type. If the tool says the safe reason is
+   unavailable, say only that. Do not expose internal identifiers unless the
+   user explicitly asks for diagnostic detail.
 
 ## User-facing response contract
 
@@ -52,7 +56,8 @@ Use short factual responses:
 
 - queued: `Принято, выполняю.`
 - completed: `Готово: <результат>. <canonical Linear URL>`
-- blocked: `Не удалось выполнить: <что нужно исправить пользователю>.`
+- blocked: repeat the sanitized factual tool message concisely and without an
+  invented explanation.
 
 If the user asked only to create or change something, do not explain how the internal route works.
 

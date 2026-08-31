@@ -1,5 +1,5 @@
 name: linear-source-route
-version: 0.5.0
+version: 0.5.1
 description: >-
   Exact-session ingress for bounded Linear issue and hierarchy commands.
 author: sisyphus-org

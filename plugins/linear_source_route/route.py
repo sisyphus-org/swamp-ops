@@ -471,6 +471,8 @@ def route_request(
                 "idempotency_key": idempotency_key,
                 "delivery_key": delivery_key,
                 "replayed": True,
+                "operation": command["operation"],
+                "reason": board.block_reason(task["id"]),
             }
         if status in TERMINAL_IN_FLIGHT:
             return {

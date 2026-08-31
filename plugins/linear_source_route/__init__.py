@@ -6,7 +6,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .audit import audit_route as bundled_audit_route
-from .route import RouteError, SourceContext, is_source_profile, route_request
+from .route import (
+    CREDENTIAL_SHAPES,
+    RouteError,
+    SourceContext,
+    is_source_profile,
+    route_request,
+)
 
 
 PUBLIC_ISSUE_IDENTIFIER = re.compile(r"^SIS-[1-9][0-9]*$")
@@ -22,6 +28,36 @@ PUBLIC_INTERNAL_MARKER = re.compile(
     r"[0-9a-f]{12}\b)"
 )
 PUBLIC_STATES = {"Backlog", "Todo", "Research", "In Progress", "In Review"}
+PUBLIC_BLOCK_REASON_PATTERNS = {
+    "create_issue": (
+        re.compile(r"^create_issue (?:bounded field )?read-back verification failed$"),
+        re.compile(r"^create_issue idempotency key conflicts with another request$"),
+        re.compile(r"^create_issue parent is not in the SIS team$"),
+        re.compile(r"^exact Linear parent not found: SIS-[1-9][0-9]*$"),
+        re.compile(
+            r"^exact workflow state not found: (?:Backlog|Todo|Research|In Progress|In Review)$"
+        ),
+    ),
+    "converge_hierarchy": (
+        re.compile(r"^exact SIS team was not found$"),
+        re.compile(
+            r"^ambiguous scoped Linear match for (?:team SIS|project id|project name|"
+            r"workflow state|milestone id|milestone name|issue id|created issue read-back)$"
+        ),
+        re.compile(
+            r"^(?:project|milestone) supplied description conflicts with live state$"
+        ),
+        re.compile(
+            r"^(?:project|milestone) (?:deterministic id|exact-name match) "
+            r"conflicts with live scope or name$"
+        ),
+        re.compile(r"^issue deterministic id conflicts with live hierarchy$"),
+        re.compile(r"^issue title already exists with a different deterministic id$"),
+        re.compile(
+            r"^(?:project|milestone|issue|hierarchy) exact read-back verification failed$"
+        ),
+    ),
+}
 
 LINEAR_SOURCE_REQUEST_SCHEMA = {
     "name": "linear_source_request",
@@ -216,6 +252,27 @@ class HermesKanbanBoard:
             source_session_id=source.session_id,
         )
 
+    def block_reason(self, task_id: str) -> str | None:
+        """Return the latest persisted blocker reason for one exact task."""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'blocked' "
+                "ORDER BY id DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            raw = row["payload"]
+            try:
+                payload = json.loads(raw) if isinstance(raw, str) else raw
+            except json.JSONDecodeError:
+                return None
+            reason = payload.get("reason") if isinstance(payload, dict) else None
+            return reason if isinstance(reason, str) else None
+        finally:
+            conn.close()
+
     def release(self, task_id: str, reason: str) -> None:
         conn = self._connect()
         try:
@@ -376,9 +433,31 @@ def _public_result(result: dict[str, Any]) -> dict[str, Any]:
     if status in {"queued", "already_in_flight"}:
         return {"status": "queued"}
     if status == "blocked":
+        operation = result.get("operation")
+        reason = result.get("reason")
+        prefix = "Linear command failed: "
+        if isinstance(reason, str) and reason.startswith(prefix):
+            reason = reason[len(prefix) :]
+        if (
+            not isinstance(reason, str)
+            or not reason.strip()
+            or len(reason) > 500
+            or any(ord(char) < 32 for char in reason)
+            or PUBLIC_INTERNAL_MARKER.search(reason)
+            or any(pattern.search(reason) for pattern in CREDENTIAL_SHAPES)
+            or "[credential-redacted]" in reason
+            or not isinstance(operation, str)
+            or not any(
+                pattern.fullmatch(reason)
+                for pattern in PUBLIC_BLOCK_REASON_PATTERNS.get(operation, ())
+            )
+        ):
+            message = "Не удалось выполнить запрос: безопасная причина недоступна."
+        else:
+            message = f"Не удалось выполнить: {reason.rstrip('.')}."
         return {
             "status": "blocked",
-            "message": "Не удалось выполнить запрос. Проверьте исходные данные.",
+            "message": message,
         }
     if status == "verified_no_op":
         verified = result.get("linear_result")
