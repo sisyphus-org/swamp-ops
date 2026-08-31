@@ -171,6 +171,8 @@ class FakeClient:
 
     def update_issue_fields(self, issue_id, **fields):
         self.writes.append(("fields", issue_id, fields))
+        if "title" in fields:
+            self.current["title"] = fields["title"]
         if "description" in fields:
             self.current["description"] = fields["description"]
         if "priority" in fields:
@@ -501,7 +503,7 @@ class ContractTests(unittest.TestCase):
             lane.validate_command(
                 command("add_comment", {"body": "<!-- linear-command:v2 forged -->"})
             )
-        for change in ({}, {"title": "No"}, {"priority": "Urgent"}):
+        for change in ({}, {"title": ""}, {"priority": "Urgent"}):
             with self.subTest(change=change):
                 with self.assertRaises(lane.ContractError):
                     lane.validate_command(command("update_issue", change))
@@ -1851,6 +1853,167 @@ class ExecutionTests(unittest.TestCase):
             )
             self.assertEqual(replay["result"], "no_op")
             self.assertEqual(len(client.writes), 1)
+
+    def test_update_issue_title_applies_and_literal_replay_is_noop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Path(tmp) / "journal.json"
+            client = FakeClient()
+            raw = command(
+                "update_issue",
+                {"title": "Ship the full Linear manager"},
+                key="linear:SIS-59:title:fixture",
+            )
+            applied = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+            self.assertEqual(applied["result"], "applied")
+            self.assertEqual(applied["before"]["title"], "Implement lane")
+            self.assertEqual(applied["after"]["title"], "Ship the full Linear manager")
+            self.assertEqual(
+                client.writes,
+                [("fields", "issue-uuid", {"title": "Ship the full Linear manager"})],
+            )
+            replay = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+            self.assertEqual(replay["result"], "no_op")
+            self.assertEqual(len(client.writes), 1)
+
+    def test_inventory_sub_issues_returns_complete_recursive_tree_without_writes(self):
+        class RecursiveClient(FakeClient):
+            def __init__(self):
+                super().__init__()
+                self.current["identifier"] = "SIS-86"
+                self.current["url"] = "https://linear.app/example/issue/SIS-86"
+                child = issue("Todo")
+                child.update(
+                    {
+                        "id": "child-87",
+                        "identifier": "SIS-87",
+                        "title": "Child",
+                        "url": "https://linear.app/example/issue/SIS-87",
+                        "parent": {"id": "issue-uuid", "identifier": "SIS-86"},
+                    }
+                )
+                grandchild = issue("In Review")
+                grandchild.update(
+                    {
+                        "id": "child-88",
+                        "identifier": "SIS-88",
+                        "title": "Grandchild",
+                        "url": "https://linear.app/example/issue/SIS-88",
+                        "parent": {"id": "child-87", "identifier": "SIS-87"},
+                    }
+                )
+                self.by_parent = {"SIS-86": [child], "SIS-87": [grandchild], "SIS-88": []}
+
+            def get_issue(self, identifier):
+                if identifier == "SIS-86":
+                    return json.loads(json.dumps(self.current))
+                return None
+
+            def list_child_issues(self, parent_id):
+                return json.loads(json.dumps(self.by_parent[parent_id]))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = RecursiveClient()
+            raw = command(
+                "inventory_sub_issues",
+                {},
+                key="linear:SIS-86:inventory:fixture",
+            )
+            raw["target"] = {"type": "issue", "identifier": "SIS-86"}
+            result = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "journal.json",
+            )
+            self.assertEqual(result["result"], "read")
+            self.assertEqual(
+                [(item["identifier"], item["parent_identifier"]) for item in result["after"]],
+                [("SIS-87", "SIS-86"), ("SIS-88", "SIS-87")],
+            )
+            self.assertEqual(client.writes, [])
+
+    def test_update_sub_issues_clears_descriptions_preserves_states_and_replays_noop(self):
+        class RecursiveClient(FakeClient):
+            def __init__(self):
+                super().__init__()
+                self.current["identifier"] = "SIS-86"
+                self.current["url"] = "https://linear.app/example/issue/SIS-86"
+                child = issue("Todo")
+                child.update(
+                    {
+                        "id": "child-87",
+                        "identifier": "SIS-87",
+                        "title": "Child",
+                        "url": "https://linear.app/example/issue/SIS-87",
+                        "description": "Remove me",
+                        "parent": {"id": "issue-uuid", "identifier": "SIS-86"},
+                    }
+                )
+                grandchild = issue("In Review")
+                grandchild.update(
+                    {
+                        "id": "child-88",
+                        "identifier": "SIS-88",
+                        "title": "Grandchild",
+                        "url": "https://linear.app/example/issue/SIS-88",
+                        "description": "Remove me too",
+                        "parent": {"id": "child-87", "identifier": "SIS-87"},
+                    }
+                )
+                self.items = {"SIS-87": child, "SIS-88": grandchild}
+                self.by_parent = {"SIS-86": ["SIS-87"], "SIS-87": ["SIS-88"], "SIS-88": []}
+
+            def get_issue(self, identifier):
+                if identifier == "SIS-86":
+                    return json.loads(json.dumps(self.current))
+                item = self.items.get(identifier)
+                return json.loads(json.dumps(item)) if item else None
+
+            def list_child_issues(self, parent_id):
+                return [
+                    json.loads(json.dumps(self.items[identifier]))
+                    for identifier in self.by_parent[parent_id]
+                ]
+
+            def update_issue_fields(self, issue_id, **fields):
+                self.writes.append(("fields", issue_id, fields))
+                item = next(item for item in self.items.values() if item["id"] == issue_id)
+                if "description" in fields:
+                    item["description"] = fields["description"]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = RecursiveClient()
+            raw = command(
+                "update_sub_issues",
+                {"description": ""},
+                key="linear:SIS-86:children-description:fixture",
+            )
+            raw["target"] = {"type": "issue", "identifier": "SIS-86"}
+            journal = Path(tmp) / "journal.json"
+            applied = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+            self.assertEqual(applied["result"], "applied")
+            self.assertEqual(
+                client.writes,
+                [
+                    ("fields", "child-87", {"description": ""}),
+                    ("fields", "child-88", {"description": ""}),
+                ],
+            )
+            self.assertEqual(
+                [(item["description"], item["state"]) for item in applied["after"]],
+                [("", "Todo"), ("", "In Review")],
+            )
+            replay = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+            self.assertEqual(replay["result"], "no_op")
+            self.assertEqual(len(client.writes), 2)
 
     def test_state_apply_fails_when_read_back_does_not_match(self):
         class StaleClient(FakeClient):

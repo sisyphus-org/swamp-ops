@@ -448,12 +448,14 @@ class PluginTests(unittest.TestCase):
             },
         )
         self.assertFalse(parameters["additionalProperties"])
-        self.assertEqual(len(parameters["oneOf"]), 7)
+        self.assertEqual(len(parameters["oneOf"]), 9)
         self.assertEqual(
             parameters["properties"]["operation"]["enum"],
             [
                 "change_state",
                 "update_issue",
+                "inventory_sub_issues",
+                "update_sub_issues",
                 "create_issue",
                 "converge_hierarchy",
                 "create_standalone_issue",
@@ -466,6 +468,8 @@ class PluginTests(unittest.TestCase):
                 None,
                 "change_state",
                 "update_issue",
+                "inventory_sub_issues",
+                "update_sub_issues",
                 "create_issue",
                 "converge_hierarchy",
                 "create_standalone_issue",
@@ -481,6 +485,62 @@ class PluginTests(unittest.TestCase):
             entity_schema = parameters["properties"][entity]
             self.assertNotIn("id", entity_schema["properties"])
             self.assertNotIn("id", entity_schema["required"])
+
+    def test_public_result_exposes_recursive_sub_issue_inventory_without_internal_ids(self):
+        result = _public_result(
+            {
+                "status": "verified_no_op",
+                "linear_result": {
+                    "verified": True,
+                    "result": "read",
+                    "operation": "inventory_sub_issues",
+                    "target": {
+                        "type": "issue",
+                        "identifier": "SIS-86",
+                        "url": "https://linear.app/example/issue/SIS-86/parent",
+                    },
+                    "after": [
+                        {
+                            "identifier": "SIS-87",
+                            "title": "Child",
+                            "url": "https://linear.app/example/issue/SIS-87/child",
+                            "state": "Todo",
+                            "parent_identifier": "SIS-86",
+                        },
+                        {
+                            "identifier": "SIS-88",
+                            "title": "Grandchild",
+                            "url": "https://linear.app/example/issue/SIS-88/grandchild",
+                            "state": "Done",
+                            "parent_identifier": "SIS-87",
+                        },
+                    ],
+                },
+            }
+        )
+        self.assertEqual(result["target"]["identifier"], "SIS-86")
+        self.assertEqual(
+            result["context"]["sub_issues"],
+            [
+                {
+                    "type": "issue",
+                    "identifier": "SIS-87",
+                    "url": "https://linear.app/example/issue/SIS-87/child",
+                    "title": "Child",
+                    "state": "Todo",
+                    "parent_identifier": "SIS-86",
+                },
+                {
+                    "type": "issue",
+                    "identifier": "SIS-88",
+                    "url": "https://linear.app/example/issue/SIS-88/grandchild",
+                    "title": "Grandchild",
+                    "state": "Done",
+                    "parent_identifier": "SIS-87",
+                },
+            ],
+        )
+        self.assertNotIn("child-", json.dumps(result))
 
     def test_handler_uses_request_scoped_gateway_identity(self):
         fake_board = mock.Mock()

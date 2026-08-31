@@ -25,6 +25,8 @@ OPERATIONS = {
     "read_issue",
     "change_state",
     "update_issue",
+    "inventory_sub_issues",
+    "update_sub_issues",
     "add_comment",
     "create_issue",
     "converge_hierarchy",
@@ -477,10 +479,12 @@ class LinearClient:
 
     def update_issue_fields(self, issue_id: str, **fields: Any) -> None:
         """Apply only allowlisted issue fields through the fixed mutation."""
-        allowed = {"description", "state_id", "priority"}
+        allowed = {"title", "description", "state_id", "priority"}
         if not fields or not set(fields).issubset(allowed):
             raise ContractError("issue update has invalid managed fields")
         payload: dict[str, Any] = {}
+        if "title" in fields:
+            payload["title"] = fields["title"]
         if "description" in fields:
             payload["description"] = fields["description"]
         if "state_id" in fields:
@@ -568,9 +572,17 @@ def validate_command(raw: Any) -> dict[str, Any]:
         if state not in SAFE_STATES:
             raise ContractError("requested state is not in the exact safe-state allowlist")
     elif operation == "update_issue":
-        allowed = {"description", "state", "priority"}
+        allowed = {"title", "description", "state", "priority"}
         if not change or not set(change).issubset(allowed):
-            raise ContractError("update_issue supports description, state, and priority")
+            raise ContractError("update_issue supports title, description, state, and priority")
+        if "title" in change:
+            title = change["title"]
+            if not isinstance(title, str) or not title.strip() or len(title) > MAX_TITLE_LENGTH:
+                raise ContractError("update_issue title must be 1-200 characters")
+            if RESERVED_CREATE_MARKER in title or RESERVED_COMMENT_MARKER in title:
+                raise ContractError("update_issue title contains the reserved marker")
+            if any(pattern.search(title) for pattern in CREDENTIAL_SHAPES):
+                raise ContractError("update_issue title contains credential-shaped data")
         if "description" in change:
             description = change["description"]
             if not isinstance(description, str) or len(description) > MAX_DESCRIPTION_LENGTH:
@@ -586,6 +598,19 @@ def validate_command(raw: Any) -> dict[str, Any]:
                 raise ContractError("update_issue state is not in the safe-state allowlist")
         if "priority" in change and change["priority"] not in PRIORITIES:
             raise ContractError("update_issue priority is not in the bounded allowlist")
+    elif operation == "inventory_sub_issues":
+        if change:
+            raise ContractError("inventory_sub_issues change must be empty")
+    elif operation == "update_sub_issues":
+        if set(change) != {"description"}:
+            raise ContractError("update_sub_issues supports exactly description")
+        description = change["description"]
+        if not isinstance(description, str) or len(description) > MAX_DESCRIPTION_LENGTH:
+            raise ContractError("update_sub_issues description must be 0-10000 characters")
+        if RESERVED_CREATE_MARKER in description or RESERVED_COMMENT_MARKER in description:
+            raise ContractError("update_sub_issues description contains the reserved marker")
+        if any(pattern.search(description) for pattern in CREDENTIAL_SHAPES):
+            raise ContractError("update_sub_issues description contains credential-shaped data")
     elif operation == "add_comment":
         if set(change) != {"body"} or not isinstance(change.get("body"), str):
             raise ContractError("add_comment supports exactly one comment body")
@@ -656,6 +681,59 @@ def issue_snapshot(issue: dict[str, Any]) -> dict[str, Any]:
     ):
         raise ContractError("Linear issue payload is missing required bounded fields")
     return required_strings
+
+
+def recursive_sub_issue_inventory(
+    client: Any,
+    *,
+    parent: dict[str, Any],
+    team_id: str,
+) -> list[dict[str, Any]]:
+    """Read and validate every descendant in stable depth-first order."""
+    root_identifier = parent["identifier"]
+    seen_ids = {parent["id"]}
+    seen_identifiers = {root_identifier}
+    inventory: list[dict[str, Any]] = []
+
+    def visit(parent_identifier: str) -> None:
+        children = client.list_child_issues(parent_identifier)
+        if not isinstance(children, list):
+            raise ContractError("sub-issue inventory payload is invalid")
+        for child in children:
+            if not isinstance(child, dict):
+                raise ContractError("sub-issue inventory payload is invalid")
+            child_id = child.get("id")
+            child_identifier = child.get("identifier")
+            child_team = child.get("team")
+            child_parent = child.get("parent")
+            if (
+                not isinstance(child_id, str)
+                or not child_id
+                or not isinstance(child_identifier, str)
+                or not ISSUE_IDENTIFIER.fullmatch(child_identifier)
+                or not isinstance(child_team, dict)
+                or child_team.get("id") != team_id
+                or child_team.get("key") != "SIS"
+                or not isinstance(child_parent, dict)
+                or child_parent.get("identifier") != parent_identifier
+            ):
+                raise ContractError("sub-issue inventory relationship verification failed")
+            if child_id in seen_ids or child_identifier in seen_identifiers:
+                raise ContractError("sub-issue inventory contains a cycle or duplicate")
+            seen_ids.add(child_id)
+            seen_identifiers.add(child_identifier)
+            inventory.append(
+                {
+                    "id": child_id,
+                    **issue_snapshot(child),
+                    "description": child.get("description"),
+                    "parent_identifier": parent_identifier,
+                }
+            )
+            visit(child_identifier)
+
+    visit(root_identifier)
+    return inventory
 
 
 def result_base(command: dict[str, Any], issue: dict[str, Any], mode: str) -> dict[str, Any]:
@@ -980,6 +1058,106 @@ def execute_command(
             "no_op": True,
             "verified": True,
         }
+    if command["operation"] == "inventory_sub_issues":
+        inventory = recursive_sub_issue_inventory(
+            client,
+            parent=issue,
+            team_id=team["id"],
+        )
+        return {
+            **base,
+            "result": "read",
+            "before": inventory,
+            "after": inventory,
+            "plan": [],
+            "no_op": True,
+            "verified": True,
+        }
+    if command["operation"] == "update_sub_issues":
+        change = command["change"]
+        inventory = recursive_sub_issue_inventory(
+            client,
+            parent=issue,
+            team_id=team["id"],
+        )
+        desired_description = change["description"]
+        pending = [
+            item
+            for item in inventory
+            if not _COMPARISON.description_matches(
+                desired_description,
+                item.get("description"),
+            )
+        ]
+        if not pending:
+            return finish(
+                {
+                    **base,
+                    "result": "no_op",
+                    "before": inventory,
+                    "after": inventory,
+                    "plan": [],
+                    "no_op": True,
+                    "verified": True,
+                }
+            )
+        plan = [
+            {
+                "action": "update_sub_issue",
+                "identifier": item["identifier"],
+                "fields": ["description"],
+            }
+            for item in pending
+        ]
+        desired = [
+            {
+                **item,
+                "description": desired_description,
+            }
+            for item in inventory
+        ]
+        if mode == "plan":
+            return {
+                **base,
+                "result": "planned",
+                "before": inventory,
+                "after": desired,
+                "plan": plan,
+                "no_op": False,
+                "verified": False,
+            }
+        for item in pending:
+            client.update_issue_fields(
+                item["id"],
+                description=desired_description,
+            )
+        verified_inventory = recursive_sub_issue_inventory(
+            client,
+            parent=issue,
+            team_id=team["id"],
+        )
+        immutable_fields = ("id", "identifier", "title", "url", "state", "parent_identifier")
+        if len(verified_inventory) != len(inventory):
+            raise ContractError("update_sub_issues read-back changed tree cardinality")
+        for before_item, after_item in zip(inventory, verified_inventory, strict=True):
+            if any(before_item[field] != after_item[field] for field in immutable_fields):
+                raise ContractError("update_sub_issues read-back changed unmanaged fields")
+            if not _COMPARISON.description_matches(
+                desired_description,
+                after_item.get("description"),
+            ):
+                raise ContractError("update_sub_issues read-back mismatched description")
+        return finish(
+            {
+                **base,
+                "result": "applied",
+                "before": inventory,
+                "after": verified_inventory,
+                "plan": plan,
+                "no_op": False,
+                "verified": True,
+            }
+        )
     if command["operation"] == "update_issue":
         change = command["change"]
         state_id = None
@@ -996,6 +1174,8 @@ def execute_command(
         def update_mismatches(live: dict[str, Any]) -> list[str]:
             fields: list[str] = []
             if live.get("identifier") != identifier or live.get("id") != issue["id"]:
+                fields.append("id/title")
+            if "title" in change and live.get("title") != change["title"]:
                 fields.append("id/title")
             live_team = live.get("team")
             if (
@@ -1042,7 +1222,7 @@ def execute_command(
                 "verified": True,
             })
         managed_fields = [
-            field for field in ("description", "state", "priority") if field in change
+            field for field in ("title", "description", "state", "priority") if field in change
         ]
         plan = [{"action": "update_issue", "fields": managed_fields}]
         after_update = dict(before_update)
@@ -1058,6 +1238,8 @@ def execute_command(
                 "verified": False,
             }
         mutation: dict[str, Any] = {}
+        if "title" in change:
+            mutation["title"] = change["title"]
         if "description" in change:
             mutation["description"] = change["description"]
         if state_id is not None:

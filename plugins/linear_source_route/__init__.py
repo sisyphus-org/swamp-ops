@@ -120,6 +120,8 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                 "enum": [
                     "change_state",
                     "update_issue",
+                    "inventory_sub_issues",
+                    "update_sub_issues",
                     "create_issue",
                     "converge_hierarchy",
                     "create_standalone_issue",
@@ -208,11 +210,20 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
             {
                 "required": ["operation", "identifier"],
                 "anyOf": [
+                    {"required": ["title"]},
                     {"required": ["description"]},
                     {"required": ["state"]},
                     {"required": ["priority"]},
                 ],
                 "properties": {"operation": {"const": "update_issue"}},
+            },
+            {
+                "required": ["operation", "identifier"],
+                "properties": {"operation": {"const": "inventory_sub_issues"}},
+            },
+            {
+                "required": ["operation", "identifier", "description"],
+                "properties": {"operation": {"const": "update_sub_issues"}},
             },
             {
                 "required": [
@@ -546,6 +557,32 @@ def _public_target(result: dict[str, Any]) -> tuple[dict[str, Any], dict[str, An
             context["sub_issues"] = public_children
         return public_target, context
 
+    if operation in {"inventory_sub_issues", "update_sub_issues"}:
+        public_target = _public_issue_target(result.get("target"))
+        if not isinstance(after, list):
+            raise RouteError("verified sub-issue inventory lacks public completion facts")
+        seen = {public_target["identifier"]}
+        public_children: list[dict[str, Any]] = []
+        for child in after:
+            if not isinstance(child, dict):
+                raise RouteError("verified sub-issue inventory has invalid facts")
+            target = _public_issue_target({"type": "issue", **child})
+            if target["identifier"] in seen:
+                raise RouteError("verified sub-issue inventory contains duplicates")
+            parent_identifier = child.get("parent_identifier")
+            if (
+                not isinstance(parent_identifier, str)
+                or not PUBLIC_ISSUE_IDENTIFIER.fullmatch(parent_identifier)
+                or parent_identifier not in seen
+            ):
+                raise RouteError("verified sub-issue inventory has an invalid parent")
+            target["title"] = _public_text(child.get("title"), "sub-issue title")
+            target["state"] = _public_text(child.get("state"), "sub-issue state", maximum=100)
+            target["parent_identifier"] = parent_identifier
+            public_children.append(target)
+            seen.add(target["identifier"])
+        return public_target, {"sub_issues": public_children}
+
     public_target = _public_issue_target(result.get("target"))
     if not isinstance(after, dict):
         raise RouteError("verified result lacks public completion facts")
@@ -636,11 +673,21 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
         elif set(args) == {"operation", "identifier", "state"}:
             request = dict(args)
         elif (
+            set(args) == {"operation", "identifier"}
+            and args.get("operation") == "inventory_sub_issues"
+        ):
+            request = dict(args)
+        elif (
+            set(args) == {"operation", "identifier", "description"}
+            and args.get("operation") == "update_sub_issues"
+        ):
+            request = dict(args)
+        elif (
             args.get("operation") == "update_issue"
             and "identifier" in args
-            and bool(set(args) & {"description", "state", "priority"})
+            and bool(set(args) & {"title", "description", "state", "priority"})
             and set(args).issubset(
-                {"operation", "identifier", "description", "state", "priority"}
+                {"operation", "identifier", "title", "description", "state", "priority"}
             )
         ):
             request = dict(args)

@@ -324,6 +324,54 @@ class ParseTests(unittest.TestCase):
             {"description": "Школа на Яр валу.", "priority": "Medium"},
         )
 
+    def test_structured_issue_update_preserves_exact_title(self):
+        parsed = route.parse_linear_request(
+            {
+                "operation": "update_issue",
+                "identifier": "SIS-94",
+                "title": "Записаться на урок фортепиано",
+            },
+            source_profile="default",
+            uuid_factory=uuid_factory(),
+        )
+        self.assertEqual(
+            parsed.command["change"],
+            {"title": "Записаться на урок фортепиано"},
+        )
+
+    def test_sub_issue_inventory_request_targets_exact_parent(self):
+        parsed = route.parse_linear_request(
+            {
+                "operation": "inventory_sub_issues",
+                "identifier": "SIS-86",
+            },
+            source_profile="default",
+            uuid_factory=uuid_factory(),
+        )
+        self.assertEqual(parsed.command["operation"], "inventory_sub_issues")
+        self.assertEqual(
+            parsed.command["target"],
+            {"type": "issue", "identifier": "SIS-86"},
+        )
+        self.assertEqual(parsed.command["change"], {})
+
+    def test_sub_issue_update_request_preserves_exact_description(self):
+        parsed = route.parse_linear_request(
+            {
+                "operation": "update_sub_issues",
+                "identifier": "SIS-86",
+                "description": "",
+            },
+            source_profile="default",
+            uuid_factory=uuid_factory(),
+        )
+        self.assertEqual(parsed.command["operation"], "update_sub_issues")
+        self.assertEqual(
+            parsed.command["target"],
+            {"type": "issue", "identifier": "SIS-86"},
+        )
+        self.assertEqual(parsed.command["change"], {"description": ""})
+
     def test_structured_create_request_becomes_bounded_team_command(self):
         parsed = route.parse_linear_request(
             {

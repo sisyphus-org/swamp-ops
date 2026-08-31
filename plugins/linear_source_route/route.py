@@ -262,7 +262,7 @@ def parse_linear_request(
             target = {"type": "issue", "identifier": identifier}
             change = {"state": state}
         elif operation == "update_issue":
-            allowed = {"operation", "identifier", "description", "state", "priority"}
+            allowed = {"operation", "identifier", "title", "description", "state", "priority"}
             if (
                 not set(request).issubset(allowed)
                 or "identifier" not in request
@@ -274,7 +274,18 @@ def parse_linear_request(
                 r"SIS-[1-9][0-9]*", identifier
             ):
                 raise RouteError("target must be an exact SIS-N identifier")
-            change = {key: request[key] for key in ("description", "state", "priority") if key in request}
+            change = {
+                key: request[key]
+                for key in ("title", "description", "state", "priority")
+                if key in request
+            }
+            if "title" in change:
+                _validate_clean_text(
+                    change["title"],
+                    "title",
+                    maximum=200,
+                    required=True,
+                )
             if "description" in change:
                 _validate_clean_text(
                     change["description"],
@@ -287,6 +298,32 @@ def parse_linear_request(
             if "priority" in change and change["priority"] not in PRIORITIES:
                 raise RouteError("priority is not in the bounded allowlist")
             target = {"type": "issue", "identifier": identifier}
+        elif operation == "inventory_sub_issues":
+            if set(request) != {"operation", "identifier"}:
+                raise RouteError("sub-issue inventory request has invalid fields")
+            identifier = request.get("identifier")
+            if not isinstance(identifier, str) or not re.fullmatch(
+                r"SIS-[1-9][0-9]*", identifier
+            ):
+                raise RouteError("target must be an exact SIS-N identifier")
+            target = {"type": "issue", "identifier": identifier}
+            change = {}
+        elif operation == "update_sub_issues":
+            if set(request) != {"operation", "identifier", "description"}:
+                raise RouteError("sub-issue update request has invalid fields")
+            identifier = request.get("identifier")
+            if not isinstance(identifier, str) or not re.fullmatch(
+                r"SIS-[1-9][0-9]*", identifier
+            ):
+                raise RouteError("target must be an exact SIS-N identifier")
+            _validate_clean_text(
+                request.get("description"),
+                "description",
+                maximum=10_000,
+                required=False,
+            )
+            target = {"type": "issue", "identifier": identifier}
+            change = {"description": request["description"]}
         elif operation == "create_issue":
             expected = {
                 "operation",
