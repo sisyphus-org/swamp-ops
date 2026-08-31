@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import date
 from pathlib import Path
 from typing import Any, Callable
 
@@ -29,7 +30,7 @@ PUBLIC_INTERNAL_MARKER = re.compile(
 )
 PUBLIC_STATES = {"Backlog", "Todo", "Research", "In Progress", "In Review"}
 PUBLIC_MISMATCH_FIELDS = (
-    r"(?:id/title|description|state|priority|assignee|labels|parent|project|milestone|team)"
+    r"(?:id/title|description|state|priority|assignee|labels|due_date|estimate|parent|project|milestone|team)"
 )
 PUBLIC_MISMATCH_LIST = rf"{PUBLIC_MISMATCH_FIELDS}(?:, {PUBLIC_MISMATCH_FIELDS})*"
 PUBLIC_BLOCK_REASON_PATTERNS = {
@@ -155,6 +156,18 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                 "uniqueItems": True,
                 "items": {"type": "string", "minLength": 1, "maxLength": 200},
             },
+            "due_date": {
+                "oneOf": [
+                    {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+                    {"type": "null"},
+                ]
+            },
+            "estimate": {
+                "oneOf": [
+                    {"type": "integer", "minimum": 0},
+                    {"type": "null"},
+                ]
+            },
             "project": {
                 "type": "object",
                 "additionalProperties": False,
@@ -228,6 +241,8 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                     {"required": ["priority"]},
                     {"required": ["assignee"]},
                     {"required": ["labels"]},
+                    {"required": ["due_date"]},
+                    {"required": ["estimate"]},
                 ],
                 "properties": {"operation": {"const": "update_issue"}},
             },
@@ -626,6 +641,29 @@ def _public_target(result: dict[str, Any]) -> tuple[dict[str, Any], dict[str, An
             public_target["labels"] = [
                 _public_text(label, "label name") for label in labels
             ]
+        if operation == "update_issue" and "due_date" in after:
+            due_date = after.get("due_date")
+            if due_date is not None:
+                if not isinstance(due_date, str) or not re.fullmatch(
+                    r"[0-9]{4}-[0-9]{2}-[0-9]{2}", due_date
+                ):
+                    raise RouteError("verified issue update has an invalid public due date")
+                try:
+                    date.fromisoformat(due_date)
+                except ValueError as exc:
+                    raise RouteError(
+                        "verified issue update has an invalid public due date"
+                    ) from exc
+            public_target["due_date"] = due_date
+        if operation == "update_issue" and "estimate" in after:
+            estimate = after.get("estimate")
+            if estimate is not None and (
+                isinstance(estimate, bool)
+                or not isinstance(estimate, int)
+                or estimate < 0
+            ):
+                raise RouteError("verified issue update has an invalid public estimate")
+            public_target["estimate"] = estimate
     elif operation == "create_issue":
         if (
             after.get("identifier") != public_target["identifier"]
@@ -719,7 +757,16 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
             and "identifier" in args
             and bool(
                 set(args)
-                & {"title", "description", "state", "priority", "assignee", "labels"}
+                & {
+                    "title",
+                    "description",
+                    "state",
+                    "priority",
+                    "assignee",
+                    "labels",
+                    "due_date",
+                    "estimate",
+                }
             )
             and set(args).issubset(
                 {
@@ -731,6 +778,8 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
                     "priority",
                     "assignee",
                     "labels",
+                    "due_date",
+                    "estimate",
                 }
             )
         ):

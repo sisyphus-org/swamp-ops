@@ -8,6 +8,7 @@ import json
 import re
 import uuid
 from dataclasses import dataclass
+from datetime import date
 from typing import Any, Callable
 
 
@@ -271,6 +272,8 @@ def parse_linear_request(
                 "priority",
                 "assignee",
                 "labels",
+                "due_date",
+                "estimate",
             }
             if (
                 not set(request).issubset(allowed)
@@ -292,6 +295,8 @@ def parse_linear_request(
                     "priority",
                     "assignee",
                     "labels",
+                    "due_date",
+                    "estimate",
                 )
                 if key in request
             }
@@ -333,6 +338,24 @@ def parse_linear_request(
                     )
                 if len(set(labels)) != len(labels):
                     raise RouteError("labels must contain unique exact names")
+            if "due_date" in change and change["due_date"] is not None:
+                due_date = change["due_date"]
+                if not isinstance(due_date, str) or not re.fullmatch(
+                    r"[0-9]{4}-[0-9]{2}-[0-9]{2}", due_date
+                ):
+                    raise RouteError("due_date must be ISO YYYY-MM-DD or null")
+                try:
+                    date.fromisoformat(due_date)
+                except ValueError as exc:
+                    raise RouteError("due_date must be a valid calendar date") from exc
+            if "estimate" in change:
+                estimate = change["estimate"]
+                if estimate is not None and (
+                    isinstance(estimate, bool)
+                    or not isinstance(estimate, int)
+                    or estimate < 0
+                ):
+                    raise RouteError("estimate must be a non-negative integer or null")
             target = {"type": "issue", "identifier": identifier}
         elif operation == "inventory_sub_issues":
             if set(request) != {"operation", "identifier"}:

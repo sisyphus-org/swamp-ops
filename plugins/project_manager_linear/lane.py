@@ -14,6 +14,7 @@ import urllib.error
 import urllib.request
 import uuid
 from contextlib import contextmanager
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -43,12 +44,14 @@ COMMAND_ROOT = Path(__file__).parents[2] / "commands" / "linear"
 ISSUE_QUERY = """
 query LaneIssue($id: String!) {
   issue(id: $id) {
-    id identifier title url description priority
+    id identifier title url description priority dueDate estimate
     state { id name type }
     assignee { id name email }
     labels { nodes { id name } }
     team { id key }
     parent { id identifier }
+    project { id }
+    projectMilestone { id }
   }
 }
 """
@@ -549,6 +552,8 @@ class LinearClient:
             "priority",
             "assignee_id",
             "label_ids",
+            "due_date",
+            "estimate",
         }
         if not fields or not set(fields).issubset(allowed):
             raise ContractError("issue update has invalid managed fields")
@@ -565,6 +570,10 @@ class LinearClient:
             payload["stateId"] = fields["state_id"]
         if "priority" in fields:
             payload["priority"] = fields["priority"]
+        if "due_date" in fields:
+            payload["dueDate"] = fields["due_date"]
+        if "estimate" in fields:
+            payload["estimate"] = fields["estimate"]
         result = self.execute(ISSUE_UPDATE, {"id": issue_id, "input": payload})[
             "issueUpdate"
         ]
@@ -646,10 +655,19 @@ def validate_command(raw: Any) -> dict[str, Any]:
         if state not in SAFE_STATES:
             raise ContractError("requested state is not in the exact safe-state allowlist")
     elif operation == "update_issue":
-        allowed = {"title", "description", "state", "priority", "assignee", "labels"}
+        allowed = {
+            "title",
+            "description",
+            "state",
+            "priority",
+            "assignee",
+            "labels",
+            "due_date",
+            "estimate",
+        }
         if not change or not set(change).issubset(allowed):
             raise ContractError(
-                "update_issue supports title, description, state, priority, assignee, and labels"
+                "update_issue supports title, description, state, priority, assignee, labels, due_date, and estimate"
             )
         if "title" in change:
             title = change["title"]
@@ -690,6 +708,28 @@ def validate_command(raw: Any) -> dict[str, Any]:
                 )
             ):
                 raise ContractError("update_issue labels must be 0-100 unique exact names")
+        if "due_date" in change and change["due_date"] is not None:
+            due_date = change["due_date"]
+            if not isinstance(due_date, str) or not re.fullmatch(
+                r"[0-9]{4}-[0-9]{2}-[0-9]{2}", due_date
+            ):
+                raise ContractError("update_issue due_date must be ISO YYYY-MM-DD or null")
+            try:
+                date.fromisoformat(due_date)
+            except ValueError as exc:
+                raise ContractError(
+                    "update_issue due_date must be a valid calendar date"
+                ) from exc
+        if "estimate" in change:
+            estimate = change["estimate"]
+            if estimate is not None and (
+                isinstance(estimate, bool)
+                or not isinstance(estimate, int)
+                or estimate < 0
+            ):
+                raise ContractError(
+                    "update_issue estimate must be a non-negative integer or null"
+                )
     elif operation == "inventory_sub_issues":
         if change:
             raise ContractError("inventory_sub_issues change must be empty")
@@ -1349,6 +1389,44 @@ def execute_command(
                 )
                 if live_label_ids != set(label_ids):
                     fields.append("labels")
+            if "due_date" in change and live.get("dueDate") != change["due_date"]:
+                fields.append("due_date")
+            if "estimate" in change:
+                live_estimate = live.get("estimate")
+                if change["estimate"] is None:
+                    if live_estimate is not None:
+                        fields.append("estimate")
+                elif (
+                    isinstance(live_estimate, bool)
+                    or not isinstance(live_estimate, int)
+                    or live_estimate < 0
+                    or live_estimate != change["estimate"]
+                ):
+                    fields.append("estimate")
+
+            unmanaged_scalars = (
+                ("title", "title", "id/title"),
+                ("description", "description", "description"),
+                ("priority", "priority", "priority"),
+                ("due_date", "dueDate", "due_date"),
+                ("estimate", "estimate", "estimate"),
+            )
+            for change_name, live_name, mismatch_name in unmanaged_scalars:
+                if change_name not in change and live.get(live_name) != issue.get(live_name):
+                    fields.append(mismatch_name)
+            if "state" not in change and live.get("state") != issue.get("state"):
+                fields.append("state")
+            if "assignee" not in change and live.get("assignee") != issue.get("assignee"):
+                fields.append("assignee")
+            if "labels" not in change and live.get("labels") != issue.get("labels"):
+                fields.append("labels")
+            for live_name, mismatch_name in (
+                ("parent", "parent"),
+                ("project", "project"),
+                ("projectMilestone", "milestone"),
+            ):
+                if live.get(live_name) != issue.get(live_name):
+                    fields.append(mismatch_name)
             return _COMPARISON.ordered_mismatch_fields(fields)
 
         def update_snapshot(live: dict[str, Any]) -> dict[str, Any]:
@@ -1379,6 +1457,10 @@ def execute_command(
                     for item in live_nodes
                     if isinstance(item, dict) and isinstance(item.get("name"), str)
                 )
+            if "due_date" in change:
+                snapshot["due_date"] = live.get("dueDate")
+            if "estimate" in change:
+                snapshot["estimate"] = live.get("estimate")
             return snapshot
 
         fields = update_mismatches(issue)
@@ -1402,6 +1484,8 @@ def execute_command(
                 "priority",
                 "assignee",
                 "labels",
+                "due_date",
+                "estimate",
             )
             if field in change
         ]
@@ -1435,6 +1519,10 @@ def execute_command(
             mutation["assignee_id"] = assignee_id
         if "labels" in change:
             mutation["label_ids"] = label_ids
+        if "due_date" in change:
+            mutation["due_date"] = change["due_date"]
+        if "estimate" in change:
+            mutation["estimate"] = change["estimate"]
         client.update_issue_fields(issue["id"], **mutation)
         verified_issue = client.get_issue(identifier)
         if not isinstance(verified_issue, dict):

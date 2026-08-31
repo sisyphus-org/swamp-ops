@@ -129,6 +129,13 @@ def issue(state="In Progress"):
         "team": {"id": "team-uuid", "key": "SIS"},
         "description": "Old description",
         "priority": lane.PRIORITIES["Low"],
+        "dueDate": None,
+        "estimate": None,
+        "assignee": None,
+        "labels": {"nodes": []},
+        "parent": {"id": "parent-uuid", "identifier": "SIS-1"},
+        "project": {"id": "project-uuid"},
+        "projectMilestone": {"id": "milestone-uuid"},
     }
 
 
@@ -196,6 +203,10 @@ class FakeClient:
                 "name": state_id.removeprefix("state-"),
                 "type": "started",
             }
+        if "due_date" in fields:
+            self.current["dueDate"] = fields["due_date"]
+        if "estimate" in fields:
+            self.current["estimate"] = fields["estimate"]
 
     def list_users(self):
         return [
@@ -519,6 +530,12 @@ class ContractTests(unittest.TestCase):
             )
         )
         lane.validate_command(command("add_comment", {"body": "Bounded note"}))
+        lane.validate_command(
+            command("update_issue", {"due_date": "2026-09-30", "estimate": 8})
+        )
+        lane.validate_command(
+            command("update_issue", {"due_date": None, "estimate": None})
+        )
         for state in ("Done", "Canceled", "Duplicate"):
             with self.assertRaisesRegex(lane.ContractError, "owner-controlled"):
                 lane.validate_command(command("change_state", {"state": state}))
@@ -534,6 +551,19 @@ class ContractTests(unittest.TestCase):
             with self.subTest(change=change):
                 with self.assertRaises(lane.ContractError):
                     lane.validate_command(command("update_issue", change))
+
+    def test_update_issue_contract_rejects_invalid_due_dates_and_estimates(self):
+        invalid = (
+            {"due_date": "2026-02-30"},
+            {"due_date": "2026-9-01"},
+            {"due_date": 20260901},
+            {"estimate": -1},
+            {"estimate": 1.5},
+            {"estimate": True},
+        )
+        for change in invalid:
+            with self.subTest(change=change), self.assertRaises(lane.ContractError):
+                lane.validate_command(command("update_issue", change))
 
     def test_comment_contract_rejects_credential_shaped_bodies(self):
         bodies = (
@@ -718,6 +748,28 @@ class ClientTests(unittest.TestCase):
         hierarchy_input = calls[lane.PROJECT_ISSUE_CREATE]["input"]
         self.assertEqual(hierarchy_input["stateId"], "state-uuid")
         self.assertNotIn("state_id", hierarchy_input)
+
+    def test_client_issue_query_and_mutation_map_due_date_and_estimate(self):
+        client = self.StubClient()
+        client.get_issue("SIS-59")
+        client.update_issue_fields(
+            "issue-uuid",
+            due_date=None,
+            estimate=8,
+        )
+        self.assertIn("dueDate estimate", lane.ISSUE_QUERY)
+        self.assertIn("project { id }", lane.ISSUE_QUERY)
+        self.assertIn("projectMilestone { id }", lane.ISSUE_QUERY)
+        self.assertEqual(
+            client.calls[-1],
+            (
+                lane.ISSUE_UPDATE,
+                {
+                    "id": "issue-uuid",
+                    "input": {"dueDate": None, "estimate": 8},
+                },
+            ),
+        )
 
     def test_client_project_issue_update_uses_fixed_managed_graphql_shape(self):
         client = self.StubClient()
@@ -1989,6 +2041,134 @@ class ExecutionTests(unittest.TestCase):
             )
             self.assertEqual(replay["result"], "no_op")
             self.assertEqual(len(client.writes), 1)
+
+    def test_update_issue_plans_and_applies_due_date_and_estimate_then_replays_noop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = FakeClient()
+            raw = command(
+                "update_issue",
+                {"due_date": "2026-09-30", "estimate": 8},
+                key="linear:SIS-59:due-estimate:fixture",
+            )
+            planned = lane.execute_command(client, raw, mode="plan")
+            self.assertEqual(planned["after"]["due_date"], "2026-09-30")
+            self.assertEqual(planned["after"]["estimate"], 8)
+            self.assertEqual(
+                planned["plan"],
+                [
+                    {
+                        "action": "update_issue",
+                        "fields": ["due_date", "estimate"],
+                    }
+                ],
+            )
+            self.assertEqual(client.writes, [])
+
+            journal = Path(tmp) / "journal.json"
+            applied = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+            self.assertEqual(applied["result"], "applied")
+            self.assertEqual(applied["after"]["due_date"], "2026-09-30")
+            self.assertEqual(applied["after"]["estimate"], 8)
+            self.assertEqual(
+                client.writes,
+                [
+                    (
+                        "fields",
+                        "issue-uuid",
+                        {"due_date": "2026-09-30", "estimate": 8},
+                    )
+                ],
+            )
+            replay = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+            self.assertEqual(replay["result"], "no_op")
+            self.assertEqual(replay["before"], replay["after"])
+            self.assertEqual(len(client.writes), 1)
+
+    def test_update_issue_clears_due_date_and_estimate_without_changing_unmanaged_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = FakeClient()
+            client.current["dueDate"] = "2026-09-30"
+            client.current["estimate"] = 8
+            unmanaged_before = {
+                key: json.loads(json.dumps(client.current[key]))
+                for key in (
+                    "title",
+                    "description",
+                    "state",
+                    "priority",
+                    "assignee",
+                    "labels",
+                    "parent",
+                    "project",
+                    "projectMilestone",
+                    "team",
+                )
+            }
+            raw = command(
+                "update_issue",
+                {"due_date": None, "estimate": None},
+                key="linear:SIS-59:clear-due-estimate:fixture",
+            )
+            applied = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "journal.json",
+            )
+            self.assertIsNone(applied["after"]["due_date"])
+            self.assertIsNone(applied["after"]["estimate"])
+            self.assertEqual(
+                {key: client.current[key] for key in unmanaged_before},
+                unmanaged_before,
+            )
+
+    def test_update_issue_fails_read_back_when_due_estimate_write_changes_project(self):
+        class DriftingClient(FakeClient):
+            def update_issue_fields(self, issue_id, **fields):
+                super().update_issue_fields(issue_id, **fields)
+                self.current["project"] = {"id": "different-project"}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(
+                lane.ContractError,
+                r"update_issue read-back mismatched fields: project",
+            ):
+                lane.execute_command(
+                    DriftingClient(),
+                    command(
+                        "update_issue",
+                        {"estimate": 8},
+                        key="linear:SIS-59:estimate-project-drift:fixture",
+                    ),
+                    mode="apply",
+                    journal_path=Path(tmp) / "journal.json",
+                )
+
+    def test_update_issue_rejects_boolean_estimate_read_back_as_mismatch(self):
+        class BooleanEstimateClient(FakeClient):
+            def update_issue_fields(self, issue_id, **fields):
+                super().update_issue_fields(issue_id, **fields)
+                self.current["estimate"] = True
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(
+                lane.ContractError,
+                r"update_issue read-back mismatched fields: estimate",
+            ):
+                lane.execute_command(
+                    BooleanEstimateClient(),
+                    command(
+                        "update_issue",
+                        {"estimate": 1},
+                        key="linear:SIS-59:boolean-estimate-readback:fixture",
+                    ),
+                    mode="apply",
+                    journal_path=Path(tmp) / "journal.json",
+                )
 
     def test_inventory_sub_issues_returns_complete_recursive_tree_without_writes(self):
         class RecursiveClient(FakeClient):

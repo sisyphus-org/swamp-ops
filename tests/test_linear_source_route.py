@@ -376,6 +376,60 @@ class ParseTests(unittest.TestCase):
             {"labels": ["area:linear", "priority:owner"]},
         )
 
+    def test_structured_issue_update_preserves_due_date_and_estimate_values(self):
+        parsed = route.parse_linear_request(
+            {
+                "operation": "update_issue",
+                "identifier": "SIS-94",
+                "due_date": "2026-09-30",
+                "estimate": 8,
+            },
+            source_profile="default",
+            uuid_factory=uuid_factory(),
+        )
+        self.assertEqual(
+            parsed.command["change"],
+            {"due_date": "2026-09-30", "estimate": 8},
+        )
+
+    def test_structured_issue_update_preserves_null_due_date_and_estimate_clears(self):
+        parsed = route.parse_linear_request(
+            {
+                "operation": "update_issue",
+                "identifier": "SIS-94",
+                "due_date": None,
+                "estimate": None,
+            },
+            source_profile="default",
+            uuid_factory=uuid_factory(),
+        )
+        self.assertEqual(
+            parsed.command["change"],
+            {"due_date": None, "estimate": None},
+        )
+
+    def test_structured_issue_update_rejects_invalid_due_dates_and_estimates(self):
+        invalid = (
+            {"due_date": "2026-02-30"},
+            {"due_date": "2026-9-01"},
+            {"due_date": 20260901},
+            {"estimate": -1},
+            {"estimate": 1.5},
+            {"estimate": True},
+        )
+        for change in invalid:
+            with self.subTest(change=change):
+                with self.assertRaises(route.RouteError):
+                    route.parse_linear_request(
+                        {
+                            "operation": "update_issue",
+                            "identifier": "SIS-94",
+                            **change,
+                        },
+                        source_profile="default",
+                        uuid_factory=uuid_factory(),
+                    )
+
     def test_sub_issue_inventory_request_targets_exact_parent(self):
         parsed = route.parse_linear_request(
             {

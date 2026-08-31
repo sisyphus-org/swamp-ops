@@ -13,6 +13,8 @@ SAFE_MISMATCH_FIELDS = (
     "priority",
     "assignee",
     "labels",
+    "due_date",
+    "estimate",
     "parent",
     "project",
     "milestone",

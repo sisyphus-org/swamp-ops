@@ -118,6 +118,8 @@ def set_existing_task(board, task):
             after = (
                 {"state": command["change"]["state"]}
                 if operation == "change_state"
+                else dict(command["change"])
+                if operation == "update_issue"
                 else {}
             )
         result = {
@@ -443,6 +445,8 @@ class PluginTests(unittest.TestCase):
                 "priority",
                 "assignee",
                 "labels",
+                "due_date",
+                "estimate",
                 "project",
                 "milestone",
                 "issue",
@@ -450,6 +454,24 @@ class PluginTests(unittest.TestCase):
             },
         )
         self.assertFalse(parameters["additionalProperties"])
+        self.assertEqual(
+            parameters["properties"]["due_date"],
+            {
+                "oneOf": [
+                    {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+                    {"type": "null"},
+                ]
+            },
+        )
+        self.assertEqual(
+            parameters["properties"]["estimate"],
+            {
+                "oneOf": [
+                    {"type": "integer", "minimum": 0},
+                    {"type": "null"},
+                ]
+            },
+        )
         self.assertEqual(len(parameters["oneOf"]), 9)
         self.assertEqual(
             parameters["properties"]["operation"]["enum"],
@@ -569,6 +591,92 @@ class PluginTests(unittest.TestCase):
             result["target"]["labels"],
             ["area:linear", "priority:owner"],
         )
+
+    def test_public_result_exposes_only_validated_due_date_and_estimate(self):
+        result = _public_result(
+            {
+                "status": "verified_no_op",
+                "linear_result": {
+                    "verified": True,
+                    "result": "applied",
+                    "operation": "update_issue",
+                    "target": {
+                        "type": "issue",
+                        "identifier": "SIS-94",
+                        "url": "https://linear.app/example/issue/SIS-94/fixture",
+                    },
+                    "after": {
+                        "due_date": "2026-09-30",
+                        "estimate": 8,
+                        "description": "must stay private",
+                    },
+                },
+            }
+        )
+        self.assertEqual(result["target"]["due_date"], "2026-09-30")
+        self.assertEqual(result["target"]["estimate"], 8)
+        self.assertNotIn("description", result["target"])
+
+    def test_public_result_rejects_invalid_due_date_or_estimate(self):
+        for after in (
+            {"due_date": "2026-02-30"},
+            {"estimate": -1},
+            {"estimate": True},
+        ):
+            with self.subTest(after=after), self.assertRaises(RouteError):
+                _public_result(
+                    {
+                        "status": "verified_no_op",
+                        "linear_result": {
+                            "verified": True,
+                            "result": "applied",
+                            "operation": "update_issue",
+                            "target": {
+                                "type": "issue",
+                                "identifier": "SIS-94",
+                                "url": "https://linear.app/example/issue/SIS-94/fixture",
+                            },
+                            "after": after,
+                        },
+                    }
+                )
+
+    def test_handler_accepts_due_date_and_estimate_update_shape(self):
+        fake_board = mock.Mock()
+        set_existing_task(
+            fake_board,
+            {
+                "id": "t_1234abcd",
+                "status": "done",
+                "session_id": "20260828_120000_abcdef12",
+            },
+        )
+        session_values = {
+            "HERMES_SESSION_PROFILE": "default",
+            "HERMES_SESSION_PLATFORM": "telegram",
+            "HERMES_SESSION_CHAT_ID": "442308262",
+            "HERMES_SESSION_USER_ID": "442308262",
+            "HERMES_SESSION_CHAT_TYPE": "dm",
+            "HERMES_SESSION_THREAD_ID": "449233",
+            "HERMES_SESSION_ID": "20260828_120000_abcdef12",
+        }
+        result = json.loads(
+            handle_linear_source_request(
+                {
+                    "operation": "update_issue",
+                    "identifier": "SIS-94",
+                    "due_date": None,
+                    "estimate": 8,
+                },
+                session_id="20260828_120000_abcdef12",
+                board_factory=lambda **_kwargs: fake_board,
+                session_getter=lambda name, default="": session_values.get(name, default),
+                runtime_profile_getter=lambda: "default",
+            )
+        )
+        self.assertEqual(result["status"], "completed")
+        self.assertIsNone(result["target"]["due_date"])
+        self.assertEqual(result["target"]["estimate"], 8)
 
     def test_handler_uses_request_scoped_gateway_identity(self):
         fake_board = mock.Mock()
