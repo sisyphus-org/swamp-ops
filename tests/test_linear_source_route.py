@@ -642,6 +642,101 @@ class ParseTests(unittest.TestCase):
                 with self.assertRaises(route.RouteError):
                     route.parse_linear_request(text, uuid_factory=uuid_factory())
 
+    def test_initiative_update_preserves_exact_managed_fields_and_null_date(self):
+        parsed = route.parse_linear_request(
+            {
+                "operation": "update_initiative",
+                "name": "Personal operating system",
+                "new_name": "Personal systems",
+                "description": "Unified personal systems",
+                "target_date": None,
+            },
+            source_profile="default",
+            uuid_factory=uuid_factory(),
+        )
+        self.assertEqual(
+            parsed.command["target"],
+            {"type": "workspace", "identifier": "current"},
+        )
+        self.assertEqual(
+            parsed.command["change"],
+            {
+                "name": "Personal operating system",
+                "new_name": "Personal systems",
+                "description": "Unified personal systems",
+                "target_date": None,
+            },
+        )
+
+    def test_destructive_or_broad_initiative_operations_remain_unexposed(self):
+        for operation in (
+            "unlink_project_from_initiative",
+            "archive_initiative",
+            "delete_initiative",
+            "reparent_initiative",
+            "search_initiatives",
+            "bulk_update_initiatives",
+        ):
+            with self.subTest(operation=operation), self.assertRaisesRegex(
+                route.RouteError, "not allowed"
+            ):
+                route.parse_linear_request(
+                    {
+                        "operation": operation,
+                        "name": "Personal operating system",
+                    },
+                    source_profile="default",
+                    uuid_factory=uuid_factory(),
+                )
+
+    def test_initiative_link_request_uses_exact_project_and_initiative_names(self):
+        parsed = route.parse_linear_request(
+            {
+                "operation": "link_project_to_initiative",
+                "project": "Hermes Experience",
+                "initiative": "Personal operating system",
+            },
+            source_profile="default",
+            uuid_factory=uuid_factory(),
+        )
+
+        self.assertEqual(parsed.command["operation"], "link_project_to_initiative")
+        self.assertEqual(
+            parsed.command["target"], {"type": "team", "identifier": "SIS"}
+        )
+        self.assertEqual(
+            parsed.command["change"],
+            {
+                "project": "Hermes Experience",
+                "initiative": "Personal operating system",
+            },
+        )
+
+    def test_initiative_create_request_preserves_only_exact_bounded_fields(self):
+        request = {
+            "operation": "create_initiative",
+            "name": "Personal operating system",
+            "description": "Connected personal systems",
+            "target_date": "2026-12-31",
+        }
+
+        parsed = route.parse_linear_request(
+            request, source_profile="default", uuid_factory=uuid_factory()
+        )
+
+        self.assertEqual(parsed.command["operation"], "create_initiative")
+        self.assertEqual(
+            parsed.command["target"], {"type": "workspace", "identifier": "current"}
+        )
+        self.assertEqual(
+            parsed.command["change"],
+            {key: value for key, value in request.items() if key != "operation"},
+        )
+        self.assertFalse(
+            set(parsed.command["change"])
+            & {"id", "owner", "status", "labels", "parent", "team"}
+        )
+
     def test_project_management_requests_preserve_only_exact_bounded_fields(self):
         requests = (
             {"operation": "create_project", "name": "Hermes Experience", "description": "Integrations", "target_date": "2026-12-31"},
@@ -765,6 +860,76 @@ class DispatchTests(unittest.TestCase):
                 uuid_factory=uuid_factory(),
             )
         self.assertEqual([call[0] for call in board.calls], ["get_or_create", "route", "audit"])
+
+    def test_completed_initiative_replay_binds_exact_names(self):
+        cases = (
+            (
+                {
+                    "operation": "create_initiative",
+                    "name": "Personal operating system",
+                    "target_date": "2026-12-31",
+                },
+                {"type": "initiative", "identifier": "Personal operating system"},
+                {"name": "Personal operating system", "target_date": "2026-12-31"},
+            ),
+            (
+                {
+                    "operation": "link_project_to_initiative",
+                    "project": "Hermes Experience",
+                    "initiative": "Personal operating system",
+                },
+                {
+                    "type": "initiative_project",
+                    "initiative": "Personal operating system",
+                    "project": "Hermes Experience",
+                },
+                {
+                    "initiative": "Personal operating system",
+                    "project": "Hermes Experience",
+                },
+            ),
+        )
+        for request, target, after in cases:
+            with self.subTest(operation=request["operation"]):
+                persisted = route.parse_linear_request(
+                    request,
+                    source_profile=source_context().profile,
+                    uuid_factory=uuid_factory(),
+                ).command
+                result = {
+                    "schema_version": "linear-result.v2",
+                    "command_id": persisted["command_id"],
+                    "correlation_id": persisted["correlation_id"],
+                    "idempotency_key": persisted["idempotency_key"],
+                    "source_profile": persisted["source_profile"],
+                    "operation": persisted["operation"],
+                    "mode": "apply",
+                    "target": target,
+                    "result": "applied",
+                    "before": None,
+                    "after": after,
+                    "plan": [{"action": persisted["operation"]}],
+                    "no_op": False,
+                    "verified": True,
+                }
+                board = FakeBoard(
+                    existing={
+                        "id": "t_1234abcd",
+                        "status": "done",
+                        "session_id": source_context().session_id,
+                        "body": route.build_task_body(persisted),
+                        "result": json.dumps(result),
+                    }
+                )
+
+                replay = route.route_request(
+                    request,
+                    source=source_context(),
+                    board=board,
+                    uuid_factory=uuid_factory(),
+                )
+                self.assertEqual(replay["status"], "verified_no_op")
+                self.assertEqual([call[0] for call in board.calls], ["get_or_create"])
 
     def test_completed_v2_replay_is_verified_noop_without_new_task_or_route_write(self):
         request = "Добавь к SIS-61 комментарий: SIS-61 E2E proof A."

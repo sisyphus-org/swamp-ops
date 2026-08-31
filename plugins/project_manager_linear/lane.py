@@ -38,6 +38,9 @@ OPERATIONS = {
     "create_milestone",
     "update_project",
     "update_milestone",
+    "create_initiative",
+    "update_initiative",
+    "link_project_to_initiative",
 }
 OWNER_CONTROLLED_STATES = {"Done", "Canceled", "Duplicate"}
 OWNER_APPROVAL_PARENT_BLOCKER = (
@@ -248,6 +251,39 @@ mutation LaneUpdateProjectMilestone($id: String!, $input: ProjectMilestoneUpdate
   projectMilestoneUpdate(id: $id, input: $input) { success }
 }
 """
+INITIATIVES_QUERY = """
+query LaneInitiatives {
+  initiatives(first: 100, includeArchived: false) {
+    nodes { id name description targetDate }
+    pageInfo { hasNextPage }
+  }
+}
+"""
+INITIATIVE_PROJECTS_QUERY = """
+query LaneInitiativeProjects($initiativeId: String!) {
+  initiative(id: $initiativeId) {
+    projects(first: 100, includeArchived: false) {
+      nodes { id name teams { nodes { id } } }
+      pageInfo { hasNextPage }
+    }
+  }
+}
+"""
+INITIATIVE_CREATE = """
+mutation LaneCreateInitiative($input: InitiativeCreateInput!) {
+  initiativeCreate(input: $input) { success initiative { id } }
+}
+"""
+INITIATIVE_UPDATE = """
+mutation LaneUpdateInitiative($id: String!, $input: InitiativeUpdateInput!) {
+  initiativeUpdate(id: $id, input: $input) { success }
+}
+"""
+INITIATIVE_PROJECT_CREATE = """
+mutation LaneLinkInitiativeProject($input: InitiativeToProjectCreateInput!) {
+  initiativeToProjectCreate(input: $input) { success initiativeToProject { id } }
+}
+"""
 PROJECT_ISSUE_CREATE = """
 mutation LaneCreateProjectIssue($input: IssueCreateInput!) {
   issueCreate(input: $input) { success issue { id identifier } }
@@ -310,6 +346,12 @@ def _load_issue_tree() -> Any:
 def _load_project_management() -> Any:
     return _load_bundled_module(
         "project_management.py", "project_manager_linear_project_management"
+    )
+
+
+def _load_initiative_management() -> Any:
+    return _load_bundled_module(
+        "initiative_management.py", "project_manager_linear_initiative_management"
     )
 
 
@@ -632,6 +674,67 @@ class LinearClient:
         if result.get("success") is not True:
             raise ContractError("Linear milestone update did not succeed")
 
+    def list_initiatives(self) -> list[dict[str, Any]]:
+        return self._bounded_connection(
+            self.execute(INITIATIVES_QUERY).get("initiatives"),
+            "workspace initiatives",
+        )
+
+    def list_initiative_projects(self, initiative_id: str) -> list[dict[str, Any]]:
+        initiative = self.execute(
+            INITIATIVE_PROJECTS_QUERY, {"initiativeId": initiative_id}
+        ).get("initiative")
+        if not isinstance(initiative, dict):
+            raise ContractError("exact preflighted initiative disappeared")
+        return self._bounded_connection(
+            initiative.get("projects"), "initiative projects"
+        )
+
+    def create_initiative(
+        self, *, initiative_id: str, name: str, **optional: Any
+    ) -> None:
+        if not set(optional).issubset({"description", "target_date"}):
+            raise ContractError("initiative create has invalid managed fields")
+        if "target_date" in optional:
+            optional["targetDate"] = optional.pop("target_date")
+        payload = {"id": initiative_id, "name": name, **optional}
+        result = self.execute(INITIATIVE_CREATE, {"input": payload})[
+            "initiativeCreate"
+        ]
+        if result.get("success") is not True:
+            raise ContractError("Linear initiative creation did not succeed")
+
+    def update_initiative(self, initiative_id: str, **fields: Any) -> None:
+        allowed = {"new_name", "description", "target_date"}
+        if not fields or not set(fields).issubset(allowed):
+            raise ContractError("initiative update has invalid managed fields")
+        payload: dict[str, Any] = {}
+        if "new_name" in fields:
+            payload["name"] = fields["new_name"]
+        if "description" in fields:
+            payload["description"] = fields["description"]
+        if "target_date" in fields:
+            payload["targetDate"] = fields["target_date"]
+        result = self.execute(
+            INITIATIVE_UPDATE, {"id": initiative_id, "input": payload}
+        )["initiativeUpdate"]
+        if result.get("success") is not True:
+            raise ContractError("Linear initiative update did not succeed")
+
+    def create_initiative_project_link(
+        self, *, link_id: str, initiative_id: str, project_id: str
+    ) -> None:
+        payload = {
+            "id": link_id,
+            "initiativeId": initiative_id,
+            "projectId": project_id,
+        }
+        result = self.execute(INITIATIVE_PROJECT_CREATE, {"input": payload})[
+            "initiativeToProjectCreate"
+        ]
+        if result.get("success") is not True:
+            raise ContractError("Linear initiative project link did not succeed")
+
     def create_project_issue(
         self,
         *,
@@ -796,9 +899,15 @@ def validate_command(raw: Any) -> dict[str, Any]:
         "create_milestone",
         "update_project",
         "update_milestone",
+        "link_project_to_initiative",
     }:
         if target != {"type": "team", "identifier": "SIS"}:
             raise ContractError(f"{operation} target must be the exact SIS team")
+    elif operation in {"create_initiative", "update_initiative"}:
+        if target != {"type": "workspace", "identifier": "current"}:
+            raise ContractError(
+                f"{operation} target must be the current workspace"
+            )
     elif target["type"] != "issue" or not ISSUE_IDENTIFIER.fullmatch(
         str(target["identifier"])
     ):
@@ -1024,6 +1133,14 @@ def validate_command(raw: Any) -> dict[str, Any]:
         "update_milestone",
     }:
         _load_project_management().validate_change(change, operation, ContractError)
+    elif operation in {
+        "create_initiative",
+        "update_initiative",
+        "link_project_to_initiative",
+    }:
+        _load_initiative_management().validate_change(
+            change, operation, ContractError
+        )
     if raw["policy"] != {"mode": "standard"}:
         raise ContractError("policy must be the standard fail-closed lane")
     return raw
@@ -1251,6 +1368,17 @@ def execute_command(
     }:
         return finish(
             _load_project_management().execute(
+                client, command, mode=mode, error_cls=ContractError
+            )
+        )
+
+    if command["operation"] in {
+        "create_initiative",
+        "update_initiative",
+        "link_project_to_initiative",
+    }:
+        return finish(
+            _load_initiative_management().execute(
                 client, command, mode=mode, error_cls=ContractError
             )
         )

@@ -201,6 +201,12 @@ def human_summary(result: dict[str, Any]) -> str:
         lead = "Проект Linear обновлён."
     elif operation == "update_milestone":
         lead = "Этап проекта Linear обновлён."
+    elif operation == "create_initiative":
+        lead = "Инициатива Linear создана или уже существует."
+    elif operation == "update_initiative":
+        lead = "Инициатива Linear обновлена."
+    elif operation == "link_project_to_initiative":
+        lead = "Проект Linear добавлен в инициативу."
     elif operation == "change_state":
         lead = "Статус Linear изменён."
     elif operation == "update_issue":

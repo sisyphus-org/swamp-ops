@@ -214,6 +214,26 @@ class ExecutionTests(unittest.TestCase):
         }
         self.assertEqual(human_summary(result), "Иерархия Linear готова.")
 
+    def test_human_summary_distinguishes_initiative_management(self):
+        expected = {
+            "create_initiative": "Инициатива Linear создана или уже существует.",
+            "update_initiative": "Инициатива Linear обновлена.",
+            "link_project_to_initiative": "Проект Linear добавлен в инициативу.",
+        }
+        for operation, summary in expected.items():
+            with self.subTest(operation=operation):
+                self.assertEqual(
+                    human_summary(
+                        {
+                            "operation": operation,
+                            "result": "applied",
+                            "verified": True,
+                            "target": {"type": "initiative", "identifier": "safe-name"},
+                        }
+                    ),
+                    summary,
+                )
+
     def test_human_summary_distinguishes_project_and_milestone_management(self):
         expected = {
             "create_project": "Проект Linear создан или уже существует.",

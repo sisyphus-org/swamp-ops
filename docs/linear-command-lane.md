@@ -13,7 +13,7 @@ Required envelope:
   "correlation_id": "UUIDv4",
   "idempotency_key": "linear:SIS-59:read:2026-08-28",
   "source_profile": "swe",
-  "operation": "read_issue | change_state | update_issue | add_comment | create_issue | converge_hierarchy | create_standalone_issue | converge_issue_tree | create_project | create_milestone | update_project | update_milestone",
+  "operation": "read_issue | change_state | update_issue | add_comment | create_issue | converge_hierarchy | create_standalone_issue | converge_issue_tree | create_project | create_milestone | update_project | update_milestone | create_initiative | update_initiative | link_project_to_initiative",
   "target": {"type": "issue", "identifier": "SIS-N"},
   "change": {},
   "policy": {"mode": "standard"}
@@ -39,8 +39,11 @@ The lane accepts only `linear-command.v2` and emits/accepts only `linear-result.
 - `create_project`: creates or reuses one exact-name project in the fixed `SIS` team. Optional managed fields are `description` and `target_date`; creates use an internal deterministic UUIDv4 and exact scoped read-back.
 - `create_milestone`: creates or reuses one exact-name milestone inside one exact existing project. It supports the same optional managed fields and deterministic create identity.
 - `update_project` / `update_milestone`: select one exact existing entity by its current `name` (and exact `project` for a milestone), then update a non-empty subset of `new_name`, `description`, and `target_date`. `target_date` accepts a valid ISO date or `null`. No other project fields or lifecycle operations are exposed.
+- `create_initiative`: creates or reuses one unique exact-name workspace initiative. Optional managed fields are `description` and `target_date`; creation uses an internal deterministic UUIDv4 and exact bounded read-back.
+- `update_initiative`: selects one exact existing initiative by current `name`, then updates a non-empty subset of `new_name`, `description`, and `target_date` with exact read-back and no-op replay.
+- `link_project_to_initiative`: adds one unique exact existing `SIS` project to one unique exact existing initiative. The relation uses a deterministic caller UUIDv4 and exact initiative-project read-back. Unlink is intentionally unavailable. Live schema introspection confirmed `InitiativeCreateInput.id`, nullable `InitiativeCreateInput.targetDate` / `InitiativeUpdateInput.targetDate`, and `InitiativeToProjectCreateInput.id`, `initiativeId`, and `projectId`.
 
-`Done`, `Canceled`, `Duplicate`, archive, delete, bulk and unrestricted structure changes are unavailable and fail closed. They remain owner-controlled instead of being enabled by an untrusted command field.
+`Done`, `Canceled`, `Duplicate`, initiative unlink/reparenting/status/owner/labels/search, archive, delete, approval, bulk and unrestricted structure changes are unavailable and fail closed. Destructive actions remain owner-controlled instead of being enabled by an untrusted command field.
 
 ### SIS-77 hierarchy tracer contract (live proof post-deploy)
 

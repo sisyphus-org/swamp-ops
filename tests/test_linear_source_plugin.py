@@ -447,6 +447,41 @@ class AdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "triage release failed"):
             board.release("t_1234abcd", "verified")
 
+    def test_tool_schema_exposes_only_non_destructive_initiative_shapes(self):
+        parameters = LINEAR_SOURCE_REQUEST_SCHEMA["parameters"]
+        operations = parameters["properties"]["operation"]["enum"]
+        for operation in (
+            "create_initiative",
+            "update_initiative",
+            "link_project_to_initiative",
+        ):
+            self.assertIn(operation, operations)
+            branch = next(
+                item
+                for item in parameters["oneOf"]
+                if item.get("properties", {}).get("operation", {}).get("const")
+                == operation
+            )
+            self.assertNotIn("id", branch.get("required", []))
+        self.assertEqual(
+            parameters["properties"]["initiative"],
+            {"type": "string", "minLength": 1, "maxLength": 200},
+        )
+        serialized = json.dumps(parameters, sort_keys=True).lower()
+        for forbidden in (
+            "unlink",
+            "archive_initiative",
+            "delete_initiative",
+            "parent_initiative",
+            "initiative_status",
+            "initiative_owner",
+            "initiative_labels",
+            "approval",
+            "bulk",
+            "search_initiative",
+        ):
+            self.assertNotIn(forbidden, serialized)
+
     def test_tool_schema_exposes_only_bounded_project_management_shapes(self):
         parameters = LINEAR_SOURCE_REQUEST_SCHEMA["parameters"]
         for operation in ("create_project", "create_milestone", "update_project", "update_milestone"):
@@ -461,7 +496,7 @@ class AdapterTests(unittest.TestCase):
                 )
         self.assertEqual(parameters["properties"]["target_date"]["oneOf"][1], {"type": "null"})
         serialized = json.dumps(parameters, sort_keys=True)
-        for forbidden in ("archive", "delete", "lead", "member", "initiative", "approval"):
+        for forbidden in ("archive", "delete", "lead", "member", "approval"):
             self.assertNotIn(forbidden, serialized.lower())
 
 
@@ -495,6 +530,7 @@ class PluginTests(unittest.TestCase):
                 "title",
                 "name",
                 "new_name",
+                "initiative",
                 "description",
                 "target_date",
                 "parent_identifier",
@@ -566,7 +602,7 @@ class PluginTests(unittest.TestCase):
             create_branch["properties"]["parent_identifier"],
             {"type": "string", "pattern": "^SIS-[1-9][0-9]*$"},
         )
-        self.assertEqual(len(parameters["oneOf"]), 14)
+        self.assertEqual(len(parameters["oneOf"]), 17)
         self.assertEqual(
             parameters["properties"]["operation"]["enum"],
             [
@@ -583,6 +619,9 @@ class PluginTests(unittest.TestCase):
                 "create_milestone",
                 "update_project",
                 "update_milestone",
+                "create_initiative",
+                "update_initiative",
+                "link_project_to_initiative",
             ],
         )
         self.assertEqual(
@@ -602,6 +641,9 @@ class PluginTests(unittest.TestCase):
                 "create_milestone",
                 "update_project",
                 "update_milestone",
+                "create_initiative",
+                "update_initiative",
+                "link_project_to_initiative",
             ],
         )
         for branch in (
@@ -870,6 +912,65 @@ class PluginTests(unittest.TestCase):
                         },
                     }
                 )
+
+    def test_handler_accepts_all_bounded_initiative_shapes(self):
+        session_values = {
+            "HERMES_SESSION_PROFILE": "default",
+            "HERMES_SESSION_PLATFORM": "telegram",
+            "HERMES_SESSION_CHAT_ID": "442308262",
+            "HERMES_SESSION_USER_ID": "442308262",
+            "HERMES_SESSION_CHAT_TYPE": "dm",
+            "HERMES_SESSION_THREAD_ID": "449233",
+            "HERMES_SESSION_ID": "20260828_120000_abcdef12",
+        }
+        requests = (
+            {
+                "operation": "create_initiative",
+                "name": "Personal operating system",
+                "description": "Connected systems",
+                "target_date": "2026-12-31",
+            },
+            {
+                "operation": "update_initiative",
+                "name": "Personal operating system",
+                "new_name": "Personal systems",
+                "target_date": None,
+            },
+            {
+                "operation": "link_project_to_initiative",
+                "project": "Hermes Experience",
+                "initiative": "Personal operating system",
+            },
+        )
+        for request in requests:
+            with self.subTest(operation=request["operation"]):
+                fake_board = mock.Mock()
+
+                def create_task(_delivery_key, **kwargs):
+                    return (
+                        {
+                            "id": "t_1234abcd",
+                            "status": "triage",
+                            "session_id": kwargs["session_id"],
+                            "idempotency_key": kwargs["idempotency_key"],
+                        },
+                        True,
+                    )
+
+                fake_board.get_or_create_task.side_effect = create_task
+                fake_board.audit_route.return_value = {"result": "pass"}
+                result = json.loads(
+                    handle_linear_source_request(
+                        request,
+                        session_id="20260828_120000_abcdef12",
+                        board_factory=lambda **_kwargs: fake_board,
+                        session_getter=lambda name, default="": session_values.get(
+                            name, default
+                        ),
+                        runtime_profile_getter=lambda: "default",
+                    )
+                )
+                self.assertEqual(result["status"], "queued")
 
     def test_handler_accepts_due_date_and_estimate_update_shape(self):
         fake_board = mock.Mock()
@@ -1724,6 +1825,75 @@ class PluginTests(unittest.TestCase):
         )
         fake_board.get_or_create_task.assert_not_called()
 
+    def test_initiative_public_projection_contains_names_and_dates_only(self):
+        for operation, target, after, expected in (
+            (
+                "create_initiative",
+                {"type": "initiative", "identifier": "Personal operating system"},
+                {
+                    "id": "initiative-secret",
+                    "name": "Personal operating system",
+                    "description": "private",
+                    "target_date": "2026-12-31",
+                },
+                {
+                    "type": "initiative",
+                    "name": "Personal operating system",
+                    "target_date": "2026-12-31",
+                },
+            ),
+            (
+                "update_initiative",
+                {"type": "initiative", "identifier": "Personal systems"},
+                {
+                    "id": "initiative-secret",
+                    "name": "Personal systems",
+                    "description": "private",
+                    "target_date": None,
+                },
+                {
+                    "type": "initiative",
+                    "name": "Personal systems",
+                    "target_date": None,
+                },
+            ),
+            (
+                "link_project_to_initiative",
+                {
+                    "type": "initiative_project",
+                    "initiative": "Personal operating system",
+                    "project": "Hermes Experience",
+                },
+                {
+                    "initiative": "Personal operating system",
+                    "project": "Hermes Experience",
+                    "id": "link-secret",
+                },
+                {
+                    "type": "initiative_project",
+                    "initiative": "Personal operating system",
+                    "project": "Hermes Experience",
+                },
+            ),
+        ):
+            with self.subTest(operation=operation):
+                result = _public_result(
+                    {
+                        "status": "verified_no_op",
+                        "linear_result": {
+                            "verified": True,
+                            "result": "applied",
+                            "operation": operation,
+                            "target": target,
+                            "after": after,
+                        },
+                    }
+                )
+                self.assertEqual(result["target"], expected)
+                serialized = json.dumps(result)
+                self.assertNotIn("secret", serialized)
+                self.assertNotIn("description", serialized)
+
     def test_project_management_public_projection_contains_names_and_dates_only(self):
         for operation, after, expected in (
             ("create_project", {"id": "project-secret", "name": "Hermes Experience", "description": "secret", "target_date": "2026-12-31"}, {"type": "project", "name": "Hermes Experience", "target_date": "2026-12-31"}),
@@ -1742,6 +1912,36 @@ class PluginTests(unittest.TestCase):
             self.assertNotIn("secret", serialized)
             self.assertNotIn("description", serialized)
             self.assertNotIn('"id"', serialized)
+
+    def test_initiative_public_blocker_preserves_only_safe_exact_name_reason(self):
+        safe = _public_result(
+            {
+                "status": "blocked",
+                "operation": "update_initiative",
+                "reason": (
+                    "Linear command failed: exact Linear initiative not found: "
+                    "Personal operating system"
+                ),
+            }
+        )
+        self.assertEqual(
+            safe,
+            {
+                "status": "blocked",
+                "message": (
+                    "Не удалось выполнить: exact Linear initiative not found: "
+                    "Personal operating system."
+                ),
+            },
+        )
+        hidden = _public_result(
+            {
+                "status": "blocked",
+                "operation": "link_project_to_initiative",
+                "reason": "Linear command failed: raw internal GraphQL diagnostics",
+            }
+        )
+        self.assertNotIn("GraphQL", json.dumps(hidden))
 
     def test_project_management_public_blocker_preserves_safe_exact_name_reason(self):
         result = _public_result({

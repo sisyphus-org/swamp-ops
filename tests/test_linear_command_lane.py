@@ -131,6 +131,36 @@ def issue_tree_command(key="linear:SIS:tree:shakespeare"):
     return raw
 
 
+def initiative_link_command(key="linear:SIS:initiative-link:fixture"):
+    raw = command("link_project_to_initiative", {}, key)
+    raw["target"] = {"type": "team", "identifier": "SIS"}
+    raw["change"] = {
+        "project": "Hermes Experience",
+        "initiative": "Personal operating system",
+    }
+    return raw
+
+
+def initiative_command(
+    operation="create_initiative", key="linear:workspace:initiative:fixture"
+):
+    raw = command(operation, {}, key)
+    raw["target"] = {"type": "workspace", "identifier": "current"}
+    raw["change"] = {
+        "name": "Personal operating system",
+        "description": "Connected personal systems",
+        "target_date": "2026-12-31",
+    }
+    if operation == "update_initiative":
+        raw["change"] = {
+            "name": "Personal operating system",
+            "new_name": "Personal systems",
+            "description": "Unified personal systems",
+            "target_date": None,
+        }
+    return raw
+
+
 def project_command(operation="create_project", key="linear:SIS:project:fixture"):
     raw = command(operation, {}, key)
     raw["target"] = {"type": "team", "identifier": "SIS"}
@@ -988,6 +1018,37 @@ class ClientTests(unittest.TestCase):
                 )
             ],
         )
+
+    def test_initiative_inventory_avoids_nested_connection_complexity(self):
+        self.assertNotIn("projects(", lane.INITIATIVES_QUERY)
+        self.assertIn("initiative(id: $initiativeId)", lane.INITIATIVE_PROJECTS_QUERY)
+        client = object.__new__(lane.LinearClient)
+        calls = []
+
+        def execute(query, variables=None):
+            calls.append((query, variables))
+            if query == lane.INITIATIVES_QUERY:
+                return {
+                    "initiatives": {
+                        "nodes": [{"id": "initiative", "name": "Exact"}],
+                        "pageInfo": {"hasNextPage": False},
+                    }
+                }
+            return {
+                "initiative": {
+                    "projects": {
+                        "nodes": [{"id": "project", "name": "Exact"}],
+                        "pageInfo": {"hasNextPage": False},
+                    }
+                }
+            }
+
+        client.execute = execute
+        self.assertEqual(client.list_initiatives()[0]["id"], "initiative")
+        self.assertEqual(
+            client.list_initiative_projects("initiative")[0]["id"], "project"
+        )
+        self.assertEqual(calls[1][1], {"initiativeId": "initiative"})
 
     def test_client_issue_move_emits_only_exact_structural_ids(self):
         client = self.StubClient()
@@ -3486,6 +3547,380 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(len(stored), 1)
             self.assertNotIn("In Review", journal.read_text())
             self.assertNotIn("stable-key", journal.read_text())
+
+    def test_initiative_management_fails_closed_on_ambiguity_scope_and_conflict(self):
+        class InitiativeClient:
+            def __init__(self):
+                self.initiatives = [
+                    {
+                        "id": "initiative-one",
+                        "name": "Personal operating system",
+                        "description": "conflict",
+                        "targetDate": "2026-12-31",
+                        "projects": {"nodes": [], "pageInfo": {"hasNextPage": False}},
+                    }
+                ]
+
+            def list_initiatives(self):
+                return json.loads(json.dumps(self.initiatives))
+
+        with self.assertRaisesRegex(
+            lane.ContractError, "conflicts with managed fields"
+        ):
+            lane.execute_command(InitiativeClient(), initiative_command(), mode="plan")
+
+        ambiguous = InitiativeClient()
+        ambiguous.initiatives.append(
+            {**ambiguous.initiatives[0], "id": "initiative-two"}
+        )
+        with self.assertRaisesRegex(lane.ContractError, "ambiguous.*initiative name"):
+            lane.execute_command(ambiguous, initiative_command(), mode="plan")
+
+        class LinkClient(InitiativeClient):
+            def list_teams(self):
+                return [{"id": "team-sis", "key": "SIS"}]
+
+            def list_team_projects(self, team_id):
+                return [
+                    {
+                        "id": "project-existing",
+                        "name": "Hermes Experience",
+                        "teams": {"nodes": [{"id": "other-team"}]},
+                    }
+                ]
+
+        with self.assertRaisesRegex(lane.ContractError, "SIS team scope"):
+            lane.execute_command(LinkClient(), initiative_link_command(), mode="plan")
+
+    def test_linear_client_initiative_writes_use_minimal_fixed_graphql_payloads(self):
+        client = object.__new__(lane.LinearClient)
+        calls = []
+
+        def execute(query, variables=None):
+            calls.append((query, variables))
+            if "initiativeToProjectCreate" in query:
+                return {"initiativeToProjectCreate": {"success": True}}
+            if "initiativeUpdate" in query:
+                return {"initiativeUpdate": {"success": True}}
+            return {"initiativeCreate": {"success": True}}
+
+        client.execute = execute
+        client.create_initiative(
+            initiative_id="11111111-1111-4111-8111-111111111111",
+            name="Personal operating system",
+            description="Connected systems",
+            target_date="2026-12-31",
+        )
+        client.update_initiative(
+            "initiative-existing", new_name="Personal systems", target_date=None
+        )
+        client.create_initiative_project_link(
+            link_id="22222222-2222-4222-8222-222222222222",
+            initiative_id="initiative-existing",
+            project_id="project-existing",
+        )
+        self.assertEqual(
+            calls[0][1],
+            {
+                "input": {
+                    "id": "11111111-1111-4111-8111-111111111111",
+                    "name": "Personal operating system",
+                    "description": "Connected systems",
+                    "targetDate": "2026-12-31",
+                }
+            },
+        )
+        self.assertEqual(
+            calls[1][1],
+            {
+                "id": "initiative-existing",
+                "input": {"name": "Personal systems", "targetDate": None},
+            },
+        )
+        self.assertEqual(
+            calls[2][1],
+            {
+                "input": {
+                    "id": "22222222-2222-4222-8222-222222222222",
+                    "initiativeId": "initiative-existing",
+                    "projectId": "project-existing",
+                }
+            },
+        )
+        for query, _variables in calls:
+            self.assertNotIn("Delete", query)
+            self.assertNotIn("Archive", query)
+
+    def test_initiative_project_link_rejects_initiative_identity_drift_on_readback(self):
+        class DriftingLinkClient:
+            def __init__(self):
+                self.initiative_reads = 0
+                self.projects = []
+
+            def list_teams(self):
+                return [{"id": "team-sis", "key": "SIS"}]
+
+            def list_team_projects(self, team_id):
+                return [
+                    {
+                        "id": "project-existing",
+                        "name": "Hermes Experience",
+                        "teams": {"nodes": [{"id": "team-sis"}]},
+                    }
+                ]
+
+            def list_initiatives(self):
+                self.initiative_reads += 1
+                return [
+                    {
+                        "id": (
+                            "initiative-existing"
+                            if self.initiative_reads == 1
+                            else "initiative-replaced"
+                        ),
+                        "name": "Personal operating system",
+                        "description": None,
+                        "targetDate": None,
+                    }
+                ]
+
+            def list_initiative_projects(self, initiative_id):
+                return json.loads(json.dumps(self.projects))
+
+            def create_initiative_project_link(
+                self, *, link_id, initiative_id, project_id
+            ):
+                self.projects = [{"id": project_id, "name": "Hermes Experience"}]
+
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(
+            lane.ContractError, "exact read-back"
+        ):
+            lane.execute_command(
+                DriftingLinkClient(),
+                initiative_link_command(),
+                mode="apply",
+                journal_path=Path(tmp) / "initiative-link-drift.json",
+            )
+
+    def test_exact_sis_project_link_to_initiative_applies_and_replays(self):
+        class LinkClient:
+            def __init__(self):
+                self.projects = [
+                    {
+                        "id": "project-existing",
+                        "name": "Hermes Experience",
+                        "teams": {"nodes": [{"id": "team-sis"}]},
+                    }
+                ]
+                self.initiatives = [
+                    {
+                        "id": "initiative-existing",
+                        "name": "Personal operating system",
+                        "description": None,
+                        "targetDate": None,
+                        "projects": {"nodes": [], "pageInfo": {"hasNextPage": False}},
+                    }
+                ]
+                self.writes = []
+
+            def list_teams(self):
+                return [{"id": "team-sis", "key": "SIS", "name": "Sisyphus"}]
+
+            def list_team_projects(self, team_id):
+                return json.loads(json.dumps(self.projects))
+
+            def list_initiatives(self):
+                return json.loads(json.dumps(self.initiatives))
+
+            def list_initiative_projects(self, initiative_id):
+                return json.loads(
+                    json.dumps(self.initiatives[0]["projects"]["nodes"])
+                )
+
+            def create_initiative_project_link(
+                self, *, link_id, initiative_id, project_id
+            ):
+                self.writes.append(
+                    {
+                        "link_id": link_id,
+                        "initiative_id": initiative_id,
+                        "project_id": project_id,
+                    }
+                )
+                self.initiatives[0]["projects"]["nodes"].append(
+                    json.loads(json.dumps(self.projects[0]))
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = LinkClient()
+            raw = initiative_link_command()
+            planned = lane.execute_command(client, raw, mode="plan")
+            self.assertEqual(
+                planned["plan"],
+                [
+                    {
+                        "action": "link_project_to_initiative",
+                        "project": "Hermes Experience",
+                        "initiative": "Personal operating system",
+                    }
+                ],
+            )
+            self.assertEqual(client.writes, [])
+
+            applied = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "initiative-link.json",
+            )
+            self.assertEqual(applied["result"], "applied")
+            self.assertEqual(
+                applied["after"],
+                {
+                    "initiative": "Personal operating system",
+                    "project": "Hermes Experience",
+                },
+            )
+            self.assertEqual(uuid.UUID(client.writes[0]["link_id"]).version, 4)
+
+            replay = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "initiative-link-replay.json",
+            )
+            self.assertEqual(replay["result"], "no_op")
+            self.assertEqual(len(client.writes), 1)
+
+    def test_initiative_update_exact_selector_applies_minimal_fields_and_replays(self):
+        class InitiativeClient:
+            def __init__(self):
+                self.initiatives = [
+                    {
+                        "id": "initiative-existing",
+                        "name": "Personal operating system",
+                        "description": "Old",
+                        "targetDate": "2026-01-01",
+                    }
+                ]
+                self.writes = []
+
+            def list_initiatives(self):
+                return json.loads(json.dumps(self.initiatives))
+
+            def update_initiative(self, initiative_id, **fields):
+                self.writes.append((initiative_id, fields))
+                current = self.initiatives[0]
+                current["name"] = fields.get("new_name", current["name"])
+                if "description" in fields:
+                    current["description"] = fields["description"]
+                if "target_date" in fields:
+                    current["targetDate"] = fields["target_date"]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = InitiativeClient()
+            raw = initiative_command("update_initiative")
+            planned = lane.execute_command(client, raw, mode="plan")
+            self.assertEqual(
+                planned["plan"],
+                [
+                    {
+                        "action": "update_initiative",
+                        "name": "Personal systems",
+                        "fields": ["new_name", "description", "target_date"],
+                        "target_date": None,
+                    }
+                ],
+            )
+            self.assertEqual(client.writes, [])
+
+            journal = Path(tmp) / "initiative-update.json"
+            applied = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+            self.assertEqual(
+                client.writes,
+                [
+                    (
+                        "initiative-existing",
+                        {
+                            "new_name": "Personal systems",
+                            "description": "Unified personal systems",
+                            "target_date": None,
+                        },
+                    )
+                ],
+            )
+            self.assertEqual(
+                applied["after"], {"name": "Personal systems", "target_date": None}
+            )
+            replay = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+            self.assertEqual(replay["result"], "no_op")
+            self.assertEqual(len(client.writes), 1)
+
+    def test_initiative_create_plans_applies_exact_readback_and_replays(self):
+        class InitiativeClient:
+            def __init__(self):
+                self.initiatives = []
+                self.writes = []
+
+            def list_initiatives(self):
+                return json.loads(json.dumps(self.initiatives))
+
+            def create_initiative(self, **values):
+                self.writes.append(("create_initiative", values))
+                self.initiatives.append(
+                    {
+                        "id": values["initiative_id"],
+                        "name": values["name"],
+                        "description": values.get("description"),
+                        "targetDate": values.get("target_date"),
+                    }
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = InitiativeClient()
+            raw = initiative_command()
+            planned = lane.execute_command(client, raw, mode="plan")
+            self.assertEqual(
+                planned["plan"],
+                [
+                    {
+                        "action": "create_initiative",
+                        "name": "Personal operating system",
+                        "target_date": "2026-12-31",
+                    }
+                ],
+            )
+            self.assertEqual(client.writes, [])
+
+            applied = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "initiative.json",
+            )
+            self.assertEqual(applied["result"], "applied")
+            self.assertEqual(
+                applied["after"],
+                {
+                    "name": "Personal operating system",
+                    "target_date": "2026-12-31",
+                },
+            )
+            self.assertEqual(uuid.UUID(client.writes[0][1]["initiative_id"]).version, 4)
+
+            replay = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "initiative-replay.json",
+            )
+            self.assertEqual(replay["result"], "no_op")
+            self.assertEqual(len(client.writes), 1)
+            self.assertEqual(len(client.initiatives), 1)
 
     def test_project_management_validates_exact_bounded_shapes_and_dates(self):
         for raw in (

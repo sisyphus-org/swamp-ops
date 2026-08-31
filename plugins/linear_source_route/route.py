@@ -152,6 +152,36 @@ def _validate_hierarchy_request(request: dict[str, Any]) -> dict[str, Any]:
     return change
 
 
+def _validate_initiative_management_request(request: dict[str, Any]) -> dict[str, Any]:
+    operation = request.get("operation")
+    updating = operation == "update_initiative"
+    allowed = {"operation", "name", "description", "target_date"}
+    if updating:
+        allowed.add("new_name")
+        if not (set(request) & {"new_name", "description", "target_date"}):
+            raise RouteError("update_initiative requires at least one managed field")
+    if "name" not in request or not set(request).issubset(allowed):
+        raise RouteError("structured initiative management request has invalid fields")
+    for field in ("name", "new_name"):
+        if field in request:
+            _validate_clean_text(request[field], field, maximum=200, required=True)
+    if "description" in request:
+        _validate_clean_text(
+            request["description"], "description", maximum=10_000, required=False
+        )
+    if "target_date" in request and request["target_date"] is not None:
+        target_date = request["target_date"]
+        if not isinstance(target_date, str) or not re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}", target_date
+        ):
+            raise RouteError("target_date must be ISO YYYY-MM-DD or null")
+        try:
+            date.fromisoformat(target_date)
+        except ValueError as exc:
+            raise RouteError("target_date must be a valid calendar date") from exc
+    return {key: value for key, value in request.items() if key != "operation"}
+
+
 def _validate_project_management_request(request: dict[str, Any]) -> dict[str, Any]:
     operation = request.get("operation")
     milestone = operation in {"create_milestone", "update_milestone"}
@@ -516,6 +546,23 @@ def parse_linear_request(
         elif operation in {"create_standalone_issue", "converge_issue_tree"}:
             target = {"type": "team", "identifier": "SIS"}
             change = _validate_scoped_issue_request(request)
+        elif operation == "link_project_to_initiative":
+            if set(request) != {"operation", "project", "initiative"}:
+                raise RouteError("structured initiative project link has invalid fields")
+            _validate_clean_text(
+                request.get("project"), "project", maximum=200, required=True
+            )
+            _validate_clean_text(
+                request.get("initiative"), "initiative", maximum=200, required=True
+            )
+            target = {"type": "team", "identifier": "SIS"}
+            change = {
+                "project": request["project"],
+                "initiative": request["initiative"],
+            }
+        elif operation in {"create_initiative", "update_initiative"}:
+            target = {"type": "workspace", "identifier": "current"}
+            change = _validate_initiative_management_request(request)
         elif operation in {
             "create_project",
             "create_milestone",
@@ -689,6 +736,22 @@ def _verified_replay(
         expected_target = {
             "type": "project",
             "identifier": persisted["change"]["project"]["name"],
+        }
+        if target != expected_target:
+            raise RouteError("completed replay target does not match persisted command")
+    elif operation in {"create_initiative", "update_initiative"}:
+        change = persisted["change"]
+        expected_target = {
+            "type": "initiative",
+            "identifier": change.get("new_name", change["name"]),
+        }
+        if target != expected_target:
+            raise RouteError("completed replay target does not match persisted command")
+    elif operation == "link_project_to_initiative":
+        expected_target = {
+            "type": "initiative_project",
+            "initiative": persisted["change"]["initiative"],
+            "project": persisted["change"]["project"],
         }
         if target != expected_target:
             raise RouteError("completed replay target does not match persisted command")
