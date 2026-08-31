@@ -34,6 +34,10 @@ OPERATIONS = {
     "create_standalone_issue",
     "converge_issue_tree",
     "create_issue_relation",
+    "create_project",
+    "create_milestone",
+    "update_project",
+    "update_milestone",
 }
 OWNER_CONTROLLED_STATES = {"Done", "Canceled", "Duplicate"}
 OWNER_APPROVAL_PARENT_BLOCKER = (
@@ -175,7 +179,7 @@ TEAM_PROJECTS_QUERY = """
 query LaneTeamProjects($teamId: String!) {
   team(id: $teamId) {
     projects(first: 100, includeArchived: false) {
-      nodes { id name description teams { nodes { id } } }
+      nodes { id name description targetDate teams { nodes { id } } }
       pageInfo { hasNextPage }
     }
   }
@@ -185,7 +189,7 @@ PROJECT_MILESTONES_QUERY = """
 query LaneProjectMilestones($projectId: String!) {
   project(id: $projectId) {
     projectMilestones(first: 100) {
-      nodes { id name description project { id } }
+      nodes { id name description targetDate project { id } }
       pageInfo { hasNextPage }
     }
   }
@@ -232,6 +236,16 @@ mutation LaneCreateProject($input: ProjectCreateInput!) {
 PROJECT_MILESTONE_CREATE = """
 mutation LaneCreateProjectMilestone($input: ProjectMilestoneCreateInput!) {
   projectMilestoneCreate(input: $input) { success projectMilestone { id } }
+}
+"""
+PROJECT_UPDATE = """
+mutation LaneUpdateProject($id: String!, $input: ProjectUpdateInput!) {
+  projectUpdate(id: $id, input: $input) { success }
+}
+"""
+PROJECT_MILESTONE_UPDATE = """
+mutation LaneUpdateProjectMilestone($id: String!, $input: ProjectMilestoneUpdateInput!) {
+  projectMilestoneUpdate(id: $id, input: $input) { success }
 }
 """
 PROJECT_ISSUE_CREATE = """
@@ -291,6 +305,12 @@ def _load_comparison() -> Any:
 def _load_issue_tree() -> Any:
     """Load standalone/tree convergence in package and standalone contexts."""
     return _load_bundled_module("issue_tree.py", "project_manager_linear_issue_tree")
+
+
+def _load_project_management() -> Any:
+    return _load_bundled_module(
+        "project_management.py", "project_manager_linear_project_management"
+    )
 
 
 _VALIDATION = _load_validation()
@@ -553,6 +573,10 @@ class LinearClient:
         )
 
     def create_project(self, *, project_id: str, team_id: str, name: str, **optional: Any) -> None:
+        if not set(optional).issubset({"description", "target_date"}):
+            raise ContractError("project create has invalid managed fields")
+        if "target_date" in optional:
+            optional["targetDate"] = optional.pop("target_date")
         payload = {"id": project_id, "teamIds": [team_id], "name": name, **optional}
         result = self.execute(PROJECT_CREATE, {"input": payload})["projectCreate"]
         if result.get("success") is not True:
@@ -561,12 +585,52 @@ class LinearClient:
     def create_project_milestone(
         self, *, milestone_id: str, project_id: str, name: str, **optional: Any
     ) -> None:
+        if not set(optional).issubset({"description", "target_date"}):
+            raise ContractError("milestone create has invalid managed fields")
+        if "target_date" in optional:
+            optional["targetDate"] = optional.pop("target_date")
         payload = {"id": milestone_id, "projectId": project_id, "name": name, **optional}
         result = self.execute(PROJECT_MILESTONE_CREATE, {"input": payload})[
             "projectMilestoneCreate"
         ]
         if result.get("success") is not True:
             raise ContractError("Linear milestone creation did not succeed")
+
+    def update_project(self, project_id: str, **fields: Any) -> None:
+        """Update only the three standalone managed project fields."""
+        allowed = {"new_name", "description", "target_date"}
+        if not fields or not set(fields).issubset(allowed):
+            raise ContractError("project update has invalid managed fields")
+        payload = {}
+        if "new_name" in fields:
+            payload["name"] = fields["new_name"]
+        if "description" in fields:
+            payload["description"] = fields["description"]
+        if "target_date" in fields:
+            payload["targetDate"] = fields["target_date"]
+        result = self.execute(PROJECT_UPDATE, {"id": project_id, "input": payload})[
+            "projectUpdate"
+        ]
+        if result.get("success") is not True:
+            raise ContractError("Linear project update did not succeed")
+
+    def update_project_milestone(self, milestone_id: str, **fields: Any) -> None:
+        """Update only the three standalone managed milestone fields."""
+        allowed = {"new_name", "description", "target_date"}
+        if not fields or not set(fields).issubset(allowed):
+            raise ContractError("milestone update has invalid managed fields")
+        payload = {}
+        if "new_name" in fields:
+            payload["name"] = fields["new_name"]
+        if "description" in fields:
+            payload["description"] = fields["description"]
+        if "target_date" in fields:
+            payload["targetDate"] = fields["target_date"]
+        result = self.execute(
+            PROJECT_MILESTONE_UPDATE, {"id": milestone_id, "input": payload}
+        )["projectMilestoneUpdate"]
+        if result.get("success") is not True:
+            raise ContractError("Linear milestone update did not succeed")
 
     def create_project_issue(
         self,
@@ -728,6 +792,10 @@ def validate_command(raw: Any) -> dict[str, Any]:
         "converge_hierarchy",
         "create_standalone_issue",
         "converge_issue_tree",
+        "create_project",
+        "create_milestone",
+        "update_project",
+        "update_milestone",
     }:
         if target != {"type": "team", "identifier": "SIS"}:
             raise ContractError(f"{operation} target must be the exact SIS team")
@@ -949,6 +1017,13 @@ def validate_command(raw: Any) -> dict[str, Any]:
         _load_hierarchy().validate_change(change, ContractError)
     elif operation in {"create_standalone_issue", "converge_issue_tree"}:
         _load_issue_tree().validate_change(change, operation, ContractError)
+    elif operation in {
+        "create_project",
+        "create_milestone",
+        "update_project",
+        "update_milestone",
+    }:
+        _load_project_management().validate_change(change, operation, ContractError)
     if raw["policy"] != {"mode": "standard"}:
         raise ContractError("policy must be the standard fail-closed lane")
     return raw
@@ -1165,6 +1240,18 @@ def execute_command(
                 command,
                 mode=mode,
                 error_cls=ContractError,
+            )
+        )
+
+    if command["operation"] in {
+        "create_project",
+        "create_milestone",
+        "update_project",
+        "update_milestone",
+    }:
+        return finish(
+            _load_project_management().execute(
+                client, command, mode=mode, error_cls=ContractError
             )
         )
 

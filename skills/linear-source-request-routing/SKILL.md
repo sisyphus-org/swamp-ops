@@ -24,6 +24,7 @@ Use the typed Project Manager lane for every Linear creation or mutation. The so
 - Converge one bounded create-only `SIS` hierarchy: one exact project, one milestone, and one top-level issue, with optional descriptions and a safe issue state.
 - Create one standalone top-level issue in one exact existing project/milestone with explicit description, safe state, and priority.
 - Converge one top-level issue plus 1–10 explicitly declared sub-issues; prose lists in a description never count as created children.
+- Create/reuse one exact-name `SIS` project, create/reuse one exact-name milestone in an exact project, or edit one exact existing project/milestone. Managed fields are only `new_name`, `description`, and `target_date` (ISO date or `null`).
 
 Do not use this path for fuzzy/missing targets, bulk operations, terminal states, archive/delete, arbitrary teams, unrestricted structural changes, or per-task Telegram topics.
 
@@ -38,6 +39,8 @@ Do not use this path for fuzzy/missing targets, bulk operations, terminal states
    - hierarchy: `operation=converge_hierarchy` with exact `project`, `milestone`, and `issue` objects; names/titles are required, descriptions and a safe issue state are optional, and IDs are never supplied by the source.
    - standalone: `operation=create_standalone_issue` with exact `project`/`milestone` names and optional supplied descriptions plus an `issue` containing exact `title`, `description`, safe `state`, and `priority`.
    - issue tree: `operation=converge_issue_tree` with the standalone fields plus `sub_issues` containing 1–10 exact issue objects. Omit optional works from this list if they must remain uncreated.
+   - project: `operation=create_project` with exact `name` and optional `description`/`target_date`, or `operation=update_project` with exact current `name` plus a non-empty subset of `new_name`, `description`, and `target_date`;
+   - milestone: `operation=create_milestone` with exact `project` and `name` plus optional `description`/`target_date`, or `operation=update_milestone` with exact `project`, exact current `name`, and a non-empty managed-field subset.
 3. Do not call Linear MCP, GraphQL, `terminal`, Kanban inspection commands, or another mutation tool from the source profile.
 4. After `queued`, reply only that the requested action is being handled, then stop. Do not inspect the task, worker, protocol, or board while it runs.
 5. After `completed`, report only the user-visible outcome: what changed or was reused, the final issue identifier/title/state when relevant, and the canonical Linear URL. Do not narrate routing or verification machinery.

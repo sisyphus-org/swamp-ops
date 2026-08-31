@@ -447,6 +447,23 @@ class AdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "triage release failed"):
             board.release("t_1234abcd", "verified")
 
+    def test_tool_schema_exposes_only_bounded_project_management_shapes(self):
+        parameters = LINEAR_SOURCE_REQUEST_SCHEMA["parameters"]
+        for operation in ("create_project", "create_milestone", "update_project", "update_milestone"):
+            self.assertIn(operation, parameters["properties"]["operation"]["enum"])
+            branch = next(item for item in parameters["oneOf"] if item.get("properties", {}).get("operation", {}).get("const") == operation)
+            self.assertNotIn("id", branch.get("required", []))
+            self.assertNotIn("team", branch.get("required", []))
+            if operation.endswith("milestone"):
+                self.assertEqual(
+                    branch["properties"]["project"],
+                    {"type": "string", "minLength": 1, "maxLength": 200},
+                )
+        self.assertEqual(parameters["properties"]["target_date"]["oneOf"][1], {"type": "null"})
+        serialized = json.dumps(parameters, sort_keys=True)
+        for forbidden in ("archive", "delete", "lead", "member", "initiative", "approval"):
+            self.assertNotIn(forbidden, serialized.lower())
+
 
 class PluginTests(unittest.TestCase):
     def test_default_runtime_profile_comes_from_resolved_profile_home(self):
@@ -476,7 +493,10 @@ class PluginTests(unittest.TestCase):
                 "relation_type",
                 "state",
                 "title",
+                "name",
+                "new_name",
                 "description",
+                "target_date",
                 "parent_identifier",
                 "priority",
                 "assignee",
@@ -546,7 +566,7 @@ class PluginTests(unittest.TestCase):
             create_branch["properties"]["parent_identifier"],
             {"type": "string", "pattern": "^SIS-[1-9][0-9]*$"},
         )
-        self.assertEqual(len(parameters["oneOf"]), 10)
+        self.assertEqual(len(parameters["oneOf"]), 14)
         self.assertEqual(
             parameters["properties"]["operation"]["enum"],
             [
@@ -559,6 +579,10 @@ class PluginTests(unittest.TestCase):
                 "create_standalone_issue",
                 "converge_issue_tree",
                 "create_issue_relation",
+                "create_project",
+                "create_milestone",
+                "update_project",
+                "update_milestone",
             ],
         )
         self.assertEqual(
@@ -574,9 +598,18 @@ class PluginTests(unittest.TestCase):
                 "converge_hierarchy",
                 "create_standalone_issue",
                 "converge_issue_tree",
+                "create_project",
+                "create_milestone",
+                "update_project",
+                "update_milestone",
             ],
         )
-        for branch in parameters["oneOf"][-2:]:
+        for branch in (
+            item
+            for item in parameters["oneOf"]
+            if item.get("properties", {}).get("operation", {}).get("const")
+            in {"create_standalone_issue", "converge_issue_tree"}
+        ):
             self.assertEqual(
                 branch["properties"]["issue"]["required"],
                 ["title", "description", "state", "priority"],
@@ -1690,6 +1723,39 @@ class PluginTests(unittest.TestCase):
             },
         )
         fake_board.get_or_create_task.assert_not_called()
+
+    def test_project_management_public_projection_contains_names_and_dates_only(self):
+        for operation, after, expected in (
+            ("create_project", {"id": "project-secret", "name": "Hermes Experience", "description": "secret", "target_date": "2026-12-31"}, {"type": "project", "name": "Hermes Experience", "target_date": "2026-12-31"}),
+            ("update_milestone", {"id": "milestone-secret", "project": "Hermes Experience", "name": "Calendar", "description": "secret", "target_date": None}, {"type": "milestone", "project": "Hermes Experience", "name": "Calendar", "target_date": None}),
+        ):
+            result = _public_result({
+                "status": "verified_no_op",
+                "linear_result": {
+                    "verified": True, "result": "applied", "operation": operation,
+                    "target": {"type": "internal", "identifier": "secret-id"},
+                    "after": after,
+                },
+            })
+            self.assertEqual(result, {"status": "completed", "changed": True, "target": expected})
+            serialized = json.dumps(result)
+            self.assertNotIn("secret", serialized)
+            self.assertNotIn("description", serialized)
+            self.assertNotIn('"id"', serialized)
+
+    def test_project_management_public_blocker_preserves_safe_exact_name_reason(self):
+        result = _public_result({
+            "status": "blocked",
+            "operation": "update_milestone",
+            "reason": "Linear command failed: exact Linear project not found: Hermes Experience",
+        })
+        self.assertEqual(
+            result,
+            {
+                "status": "blocked",
+                "message": "Не удалось выполнить: exact Linear project not found: Hermes Experience.",
+            },
+        )
 
 
 if __name__ == "__main__":

@@ -152,6 +152,39 @@ def _validate_hierarchy_request(request: dict[str, Any]) -> dict[str, Any]:
     return change
 
 
+def _validate_project_management_request(request: dict[str, Any]) -> dict[str, Any]:
+    operation = request.get("operation")
+    milestone = operation in {"create_milestone", "update_milestone"}
+    updating = operation in {"update_project", "update_milestone"}
+    allowed = {"operation", "name", "description", "target_date"}
+    required = {"operation", "name"}
+    if milestone:
+        allowed.add("project")
+        required.add("project")
+    if updating:
+        allowed.add("new_name")
+        if not (set(request) & {"new_name", "description", "target_date"}):
+            raise RouteError(f"{operation} requires at least one managed field")
+    if not required.issubset(request) or not set(request).issubset(allowed):
+        raise RouteError("structured project management request has invalid fields")
+    for field in ("project", "name", "new_name"):
+        if field in request:
+            _validate_clean_text(request[field], field, maximum=200, required=True)
+    if "description" in request:
+        _validate_clean_text(request["description"], "description", maximum=10_000, required=False)
+    if "target_date" in request and request["target_date"] is not None:
+        target_date = request["target_date"]
+        if not isinstance(target_date, str) or not re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}", target_date
+        ):
+            raise RouteError("target_date must be ISO YYYY-MM-DD or null")
+        try:
+            date.fromisoformat(target_date)
+        except ValueError as exc:
+            raise RouteError("target_date must be a valid calendar date") from exc
+    return {key: value for key, value in request.items() if key != "operation"}
+
+
 def _validate_exact_issue_spec(spec: Any, path: str) -> dict[str, Any]:
     if not isinstance(spec, dict) or set(spec) != {
         "title",
@@ -483,6 +516,14 @@ def parse_linear_request(
         elif operation in {"create_standalone_issue", "converge_issue_tree"}:
             target = {"type": "team", "identifier": "SIS"}
             change = _validate_scoped_issue_request(request)
+        elif operation in {
+            "create_project",
+            "create_milestone",
+            "update_project",
+            "update_milestone",
+        }:
+            target = {"type": "team", "identifier": "SIS"}
+            change = _validate_project_management_request(request)
         else:
             raise RouteError("structured operation is not allowed")
     else:
@@ -649,6 +690,22 @@ def _verified_replay(
             "type": "project",
             "identifier": persisted["change"]["project"]["name"],
         }
+        if target != expected_target:
+            raise RouteError("completed replay target does not match persisted command")
+    elif operation in {
+        "create_project",
+        "create_milestone",
+        "update_project",
+        "update_milestone",
+    }:
+        change = persisted["change"]
+        milestone = operation.endswith("milestone")
+        expected_target = {
+            "type": "milestone" if milestone else "project",
+            "identifier": change.get("new_name", change["name"]),
+        }
+        if milestone:
+            expected_target["project"] = change["project"]
         if target != expected_target:
             raise RouteError("completed replay target does not match persisted command")
     elif operation in {

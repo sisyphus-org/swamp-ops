@@ -13,7 +13,7 @@ Required envelope:
   "correlation_id": "UUIDv4",
   "idempotency_key": "linear:SIS-59:read:2026-08-28",
   "source_profile": "swe",
-  "operation": "read_issue | change_state | update_issue | add_comment | create_issue | converge_hierarchy | create_standalone_issue | converge_issue_tree",
+  "operation": "read_issue | change_state | update_issue | add_comment | create_issue | converge_hierarchy | create_standalone_issue | converge_issue_tree | create_project | create_milestone | update_project | update_milestone",
   "target": {"type": "issue", "identifier": "SIS-N"},
   "change": {},
   "policy": {"mode": "standard"}
@@ -36,6 +36,9 @@ The lane accepts only `linear-command.v2` and emits/accepts only `linear-result.
 - `converge_hierarchy`: `target` is exactly `{"type":"team","identifier":"SIS"}` and `change` contains exactly one `project`, one `milestone`, and one top-level `issue`, with no entity UUID fields. Names/titles are 1–200 characters; optional descriptions are at most 10,000 characters; optional issue state uses the safe-state allowlist. The trusted PM lane derives candidate UUIDv4 IDs internally from the semantic idempotency key with separate project/milestone/issue domain strings. Team identity is the unique exact Linear key `SIS`; its mutable display name is not an identity field. Project and milestone resolution first checks candidate IDs, then may reuse one unambiguous exact-name entity only after exact `SIS` team-ID scope/project and supplied-description verification. Issue resolution remains deterministic-ID-only; a same-title issue with another ID fails closed. Missing entities are created, supplied-field drift fails closed, and omitted optional fields are neither sent nor compared.
 - `create_standalone_issue`: requires one exact existing `SIS` project and one exact milestone inside it. The issue has exact title/description, safe state, and `High|Medium|Low` priority; its parent is explicitly absent. Unique exact-name project/milestone reuse requires scope and any supplied description to match. A unique exact-title legacy issue may be adopted only inside that verified scope, then safely reconciled to top-level; ambiguous title matches, team drift, or title drift fail closed.
 - `converge_issue_tree`: uses the same exact existing scope and top-level issue contract plus an explicit list of 1–10 sub-issues. Every child has exact title/description/state/priority, a domain-separated deterministic ID, and exact parent/team read-back. Children inherit project grouping through the parent and are never inferred from prose in a description.
+- `create_project`: creates or reuses one exact-name project in the fixed `SIS` team. Optional managed fields are `description` and `target_date`; creates use an internal deterministic UUIDv4 and exact scoped read-back.
+- `create_milestone`: creates or reuses one exact-name milestone inside one exact existing project. It supports the same optional managed fields and deterministic create identity.
+- `update_project` / `update_milestone`: select one exact existing entity by its current `name` (and exact `project` for a milestone), then update a non-empty subset of `new_name`, `description`, and `target_date`. `target_date` accepts a valid ISO date or `null`. No other project fields or lifecycle operations are exposed.
 
 `Done`, `Canceled`, `Duplicate`, archive, delete, bulk and unrestricted structure changes are unavailable and fail closed. They remain owner-controlled instead of being enabled by an untrusted command field.
 

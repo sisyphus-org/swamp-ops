@@ -214,6 +214,20 @@ class ExecutionTests(unittest.TestCase):
         }
         self.assertEqual(human_summary(result), "Иерархия Linear готова.")
 
+    def test_human_summary_distinguishes_project_and_milestone_management(self):
+        expected = {
+            "create_project": "Проект Linear создан или уже существует.",
+            "create_milestone": "Этап проекта Linear создан или уже существует.",
+            "update_project": "Проект Linear обновлён.",
+            "update_milestone": "Этап проекта Linear обновлён.",
+        }
+        for operation, summary in expected.items():
+            with self.subTest(operation=operation):
+                self.assertEqual(
+                    human_summary({"operation": operation, "result": "applied", "verified": True, "target": {"type": "project", "identifier": "safe-name"}}),
+                    summary,
+                )
+
     def test_human_summary_renders_read_before_noop(self):
         read = {
             "operation": "read_issue",

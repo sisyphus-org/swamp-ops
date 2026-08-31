@@ -193,6 +193,14 @@ def human_summary(result: dict[str, Any]) -> str:
         lead = "Дерево задач Linear готово."
     elif operation == "converge_hierarchy":
         lead = "Иерархия Linear готова."
+    elif operation == "create_project":
+        lead = "Проект Linear создан или уже существует."
+    elif operation == "create_milestone":
+        lead = "Этап проекта Linear создан или уже существует."
+    elif operation == "update_project":
+        lead = "Проект Linear обновлён."
+    elif operation == "update_milestone":
+        lead = "Этап проекта Linear обновлён."
     elif operation == "change_state":
         lead = "Статус Linear изменён."
     elif operation == "update_issue":

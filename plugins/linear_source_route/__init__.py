@@ -104,6 +104,16 @@ PUBLIC_BLOCK_REASON_PATTERNS = {
         ),
     ),
 }
+_PROJECT_MANAGEMENT_BLOCK_REASONS = (
+    re.compile(r"^exact SIS team was not found$"),
+    re.compile(r"^exact Linear (?:project|milestone) not found: [^\x00-\x1f]{1,200}$"),
+    re.compile(r"^ambiguous scoped Linear match for (?:team SIS|project name|project id|milestone name|milestone id)$"),
+    re.compile(r"^exact (?:project|milestone) match conflicts with (?:SIS team|project) scope$"),
+    re.compile(r"^exact existing (?:project|milestone) conflicts with managed fields$"),
+    re.compile(r"^(?:create|update)_(?:project|milestone) exact read-back verification failed$"),
+)
+for _operation in ("create_project", "create_milestone", "update_project", "update_milestone"):
+    PUBLIC_BLOCK_REASON_PATTERNS[_operation] = _PROJECT_MANAGEMENT_BLOCK_REASONS
 
 LINEAR_SOURCE_REQUEST_SCHEMA = {
     "name": "linear_source_request",
@@ -111,8 +121,9 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
         "Route one bounded Linear request from an allowed user-facing profile "
         "through the project-manager Kanban lane. Accepts an exact comment text, "
         "a structured state/field/child request, one bounded hierarchy request, one "
-        "standalone issue in an exact existing scope, or one top-level issue "
-        "plus 1-10 explicit sub-issues. The calling profile never mutates Linear "
+        "standalone issue in an exact existing scope, one exact project or milestone "
+        "create/edit request, or one top-level issue plus 1-10 explicit sub-issues. "
+        "The calling profile never mutates Linear "
         "directly; the tool creates or replays one audited wake-only task and "
         "returns its state."
     ),
@@ -138,6 +149,10 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                     "create_standalone_issue",
                     "converge_issue_tree",
                     "create_issue_relation",
+                    "create_project",
+                    "create_milestone",
+                    "update_project",
+                    "update_milestone",
                 ],
             },
             "identifier": {
@@ -157,7 +172,15 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                 "enum": ["Backlog", "Todo", "Research", "In Progress", "In Review"],
             },
             "title": {"type": "string", "minLength": 1, "maxLength": 200},
+            "name": {"type": "string", "minLength": 1, "maxLength": 200},
+            "new_name": {"type": "string", "minLength": 1, "maxLength": 200},
             "description": {"type": "string", "maxLength": 10000},
+            "target_date": {
+                "oneOf": [
+                    {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+                    {"type": "null"},
+                ]
+            },
             "parent_identifier": {
                 "oneOf": [
                     {"type": "string", "pattern": "^SIS-[1-9][0-9]*$"},
@@ -374,6 +397,38 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                     "issue": {
                         "required": ["title", "description", "state", "priority"]
                     },
+                },
+            },
+            {
+                "required": ["operation", "name"],
+                "properties": {"operation": {"const": "create_project"}},
+            },
+            {
+                "required": ["operation", "project", "name"],
+                "properties": {
+                    "operation": {"const": "create_milestone"},
+                    "project": {"type": "string", "minLength": 1, "maxLength": 200},
+                },
+            },
+            {
+                "required": ["operation", "name"],
+                "anyOf": [
+                    {"required": ["new_name"]},
+                    {"required": ["description"]},
+                    {"required": ["target_date"]},
+                ],
+                "properties": {"operation": {"const": "update_project"}},
+            },
+            {
+                "required": ["operation", "project", "name"],
+                "anyOf": [
+                    {"required": ["new_name"]},
+                    {"required": ["description"]},
+                    {"required": ["target_date"]},
+                ],
+                "properties": {
+                    "operation": {"const": "update_milestone"},
+                    "project": {"type": "string", "minLength": 1, "maxLength": 200},
                 },
             },
         ],
@@ -634,6 +689,35 @@ def _public_target(result: dict[str, Any]) -> tuple[dict[str, Any], dict[str, An
         ):
             raise RouteError("verified issue relation has invalid public facts")
         return dict(target), None
+    if operation in {
+        "create_project",
+        "create_milestone",
+        "update_project",
+        "update_milestone",
+    }:
+        if not isinstance(after, dict):
+            raise RouteError("verified project management result lacks public completion facts")
+        milestone = operation.endswith("milestone")
+        name = _public_text(after.get("name"), "milestone name" if milestone else "project name")
+        public: dict[str, Any] = {"type": "milestone" if milestone else "project"}
+        if milestone:
+            public["project"] = _public_text(after.get("project"), "project name")
+        public["name"] = name
+        if "target_date" in after:
+            target_date = after.get("target_date")
+            if target_date is not None:
+                if not isinstance(target_date, str) or not re.fullmatch(
+                    r"[0-9]{4}-[0-9]{2}-[0-9]{2}", target_date
+                ):
+                    raise RouteError("verified project management result has an invalid target date")
+                try:
+                    date.fromisoformat(target_date)
+                except ValueError as exc:
+                    raise RouteError(
+                        "verified project management result has an invalid target date"
+                    ) from exc
+            public["target_date"] = target_date
+        return public, None
     if operation == "converge_hierarchy":
         if not isinstance(after, dict):
             raise RouteError("verified hierarchy result lacks public completion facts")
@@ -962,6 +1046,15 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
             "issue",
             "sub_issues",
         }:
+            request = dict(args)
+        elif (
+            args.get("operation")
+            in {"create_project", "create_milestone", "update_project", "update_milestone"}
+            and "name" in args
+            and set(args).issubset(
+                {"operation", "project", "name", "new_name", "description", "target_date"}
+            )
+        ):
             request = dict(args)
         else:
             raise RouteError("tool input does not match a bounded request shape")

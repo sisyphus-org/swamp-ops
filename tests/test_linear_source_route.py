@@ -642,6 +642,25 @@ class ParseTests(unittest.TestCase):
                 with self.assertRaises(route.RouteError):
                     route.parse_linear_request(text, uuid_factory=uuid_factory())
 
+    def test_project_management_requests_preserve_only_exact_bounded_fields(self):
+        requests = (
+            {"operation": "create_project", "name": "Hermes Experience", "description": "Integrations", "target_date": "2026-12-31"},
+            {"operation": "create_milestone", "project": "Hermes Experience", "name": "Calendar", "target_date": "2026-10-01"},
+            {"operation": "update_project", "name": "Hermes Experience", "new_name": "Hermes Personal Experience", "target_date": None},
+            {"operation": "update_milestone", "project": "Hermes Experience", "name": "Calendar", "description": "Calendar milestone"},
+        )
+        for request in requests:
+            with self.subTest(operation=request["operation"]):
+                parsed = route.parse_linear_request(request, source_profile="default", uuid_factory=uuid_factory())
+                self.assertEqual(parsed.command["operation"], request["operation"])
+                self.assertEqual(parsed.command["target"], {"type": "team", "identifier": "SIS"})
+                self.assertEqual(parsed.command["change"], {key: value for key, value in request.items() if key != "operation"})
+                self.assertFalse(set(parsed.command["change"]) & {"id", "team", "team_id"})
+
+        invalid = dict(requests[0], target_date="2026-02-30")
+        with self.assertRaisesRegex(route.RouteError, "valid calendar date"):
+            route.parse_linear_request(invalid, uuid_factory=uuid_factory())
+
 
 class SourceContextTests(unittest.TestCase):
     def test_accepts_every_user_facing_profile_and_rejects_special_roles(self):

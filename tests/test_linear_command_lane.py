@@ -131,6 +131,44 @@ def issue_tree_command(key="linear:SIS:tree:shakespeare"):
     return raw
 
 
+def project_command(operation="create_project", key="linear:SIS:project:fixture"):
+    raw = command(operation, {}, key)
+    raw["target"] = {"type": "team", "identifier": "SIS"}
+    raw["change"] = {
+        "name": "Hermes Experience",
+        "description": "User-facing integrations",
+        "target_date": "2026-12-31",
+    }
+    if operation == "update_project":
+        raw["change"] = {
+            "name": "Hermes Experience",
+            "new_name": "Hermes Personal Experience",
+            "description": "Personal integrations",
+            "target_date": None,
+        }
+    return raw
+
+
+def milestone_command(operation="create_milestone", key="linear:SIS:milestone:fixture"):
+    raw = command(operation, {}, key)
+    raw["target"] = {"type": "team", "identifier": "SIS"}
+    raw["change"] = {
+        "project": "Hermes Experience",
+        "name": "Calendar integration",
+        "description": "Calendar milestone",
+        "target_date": "2026-10-01",
+    }
+    if operation == "update_milestone":
+        raw["change"] = {
+            "project": "Hermes Experience",
+            "name": "Calendar integration",
+            "new_name": "Calendar and reminders",
+            "description": "Calendar and reminders milestone",
+            "target_date": None,
+        }
+    return raw
+
+
 def issue(state="In Progress"):
     return {
         "id": "issue-uuid",
@@ -3448,6 +3486,159 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(len(stored), 1)
             self.assertNotIn("In Review", journal.read_text())
             self.assertNotIn("stable-key", journal.read_text())
+
+    def test_project_management_validates_exact_bounded_shapes_and_dates(self):
+        for raw in (
+            project_command(), milestone_command(),
+            project_command("update_project"), milestone_command("update_milestone"),
+        ):
+            with self.subTest(operation=raw["operation"]):
+                self.assertIs(lane.validate_command(raw), raw)
+        invalid = project_command()
+        invalid["change"]["team_id"] = "arbitrary-team"
+        with self.assertRaises(lane.ContractError):
+            lane.validate_command(invalid)
+        for unsafe in ("<!-- linear-command:v2 reserved -->", "lin_api_" + "A" * 32):
+            invalid = project_command()
+            invalid["change"]["description"] = unsafe
+            with self.assertRaises(lane.ContractError):
+                lane.validate_command(invalid)
+        invalid = milestone_command("update_milestone")
+        invalid["change"]["target_date"] = "2026-02-30"
+        with self.assertRaisesRegex(lane.ContractError, "valid calendar date"):
+            lane.validate_command(invalid)
+
+    def test_project_and_milestone_create_apply_exact_readback_and_replay(self):
+        class ManagementClient:
+            def __init__(self):
+                self.projects, self.milestones, self.writes = [], [], []
+            def list_teams(self):
+                return [{"id": "team-sis", "key": "SIS", "name": "Sisyphus"}]
+            def list_team_projects(self, team_id):
+                return json.loads(json.dumps(self.projects))
+            def list_project_milestones(self, project_id):
+                return json.loads(json.dumps(self.milestones))
+            def create_project(self, **values):
+                self.writes.append(("create_project", values))
+                self.projects.append({"id": values["project_id"], "name": values["name"],
+                    "description": values.get("description"), "targetDate": values.get("target_date"),
+                    "teams": {"nodes": [{"id": values["team_id"]}]}})
+            def create_project_milestone(self, **values):
+                self.writes.append(("create_milestone", values))
+                self.milestones.append({"id": values["milestone_id"], "name": values["name"],
+                    "description": values.get("description"), "targetDate": values.get("target_date"),
+                    "project": {"id": values["project_id"]}})
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = ManagementClient()
+            raw = project_command()
+            planned = lane.execute_command(client, raw, mode="plan")
+            self.assertEqual(planned["plan"], [{"action": "create_project", "name": "Hermes Experience", "target_date": "2026-12-31"}])
+            self.assertEqual(planned["after"], {"name": "Hermes Experience", "target_date": "2026-12-31"})
+            applied = lane.execute_command(client, raw, mode="apply", journal_path=Path(tmp) / "p.json")
+            self.assertEqual(applied["after"], {"name": "Hermes Experience", "target_date": "2026-12-31"})
+            candidate = client.writes[0][1]["project_id"]
+            self.assertEqual(uuid.UUID(candidate).version, 4)
+            second_client = ManagementClient()
+            lane.execute_command(second_client, raw, mode="apply", journal_path=Path(tmp) / "p2.json")
+            self.assertEqual(second_client.writes[0][1]["project_id"], candidate)
+            self.assertEqual(lane.execute_command(client, raw, mode="apply", journal_path=Path(tmp) / "pr.json")["result"], "no_op")
+
+            raw = milestone_command()
+            applied = lane.execute_command(client, raw, mode="apply", journal_path=Path(tmp) / "m.json")
+            self.assertEqual(applied["after"], {"project": "Hermes Experience", "name": "Calendar integration", "target_date": "2026-10-01"})
+            self.assertEqual(uuid.UUID(client.writes[-1][1]["milestone_id"]).version, 4)
+            self.assertEqual(lane.execute_command(client, raw, mode="apply", journal_path=Path(tmp) / "mr.json")["result"], "no_op")
+            self.assertEqual(len(client.writes), 2)
+
+    def test_project_management_accepts_sis_project_shared_with_another_team(self):
+        class SharedProjectClient:
+            def list_teams(self):
+                return [{"id": "team-sis", "key": "SIS", "name": "Sisyphus"}]
+
+            def list_team_projects(self, team_id):
+                return [
+                    {
+                        "id": "shared-project",
+                        "name": "Hermes Experience",
+                        "description": "User-facing integrations",
+                        "targetDate": "2026-12-31",
+                        "teams": {
+                            "nodes": [{"id": "team-sis"}, {"id": "other-team"}]
+                        },
+                    }
+                ]
+
+        result = lane.execute_command(
+            SharedProjectClient(),
+            project_command(),
+            mode="plan",
+        )
+        self.assertEqual(result["result"], "no_op")
+        self.assertEqual(result["plan"], [])
+
+    def test_exact_project_and_milestone_edits_replay_without_duplicate_writes(self):
+        class EditClient:
+            def __init__(self):
+                self.projects = [{"id": "project-existing", "name": "Hermes Experience", "description": "old", "targetDate": "2026-01-01", "teams": {"nodes": [{"id": "team-sis"}]}}]
+                self.milestones = [{"id": "milestone-existing", "name": "Calendar integration", "description": "old", "targetDate": "2026-02-01", "project": {"id": "project-existing"}}]
+                self.writes = []
+            def list_teams(self):
+                return [{"id": "team-sis", "key": "SIS", "name": "Sisyphus"}]
+            def list_team_projects(self, team_id):
+                return json.loads(json.dumps(self.projects))
+            def list_project_milestones(self, project_id):
+                return json.loads(json.dumps(self.milestones))
+            def update_project(self, project_id, **fields):
+                self.writes.append(("update_project", project_id, fields)); item = self.projects[0]
+                item["name"] = fields.get("new_name", item["name"])
+                if "description" in fields: item["description"] = fields["description"]
+                if "target_date" in fields: item["targetDate"] = fields["target_date"]
+            def update_project_milestone(self, milestone_id, **fields):
+                self.writes.append(("update_milestone", milestone_id, fields)); item = self.milestones[0]
+                item["name"] = fields.get("new_name", item["name"])
+                if "description" in fields: item["description"] = fields["description"]
+                if "target_date" in fields: item["targetDate"] = fields["target_date"]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = EditClient(); raw = project_command("update_project"); journal = Path(tmp) / "up.json"
+            applied = lane.execute_command(client, raw, mode="apply", journal_path=journal)
+            self.assertEqual(applied["after"], {"name": "Hermes Personal Experience", "target_date": None})
+            self.assertEqual(lane.execute_command(client, raw, mode="apply", journal_path=journal)["result"], "no_op")
+            self.assertEqual(len(client.writes), 1)
+            client = EditClient(); raw = milestone_command("update_milestone"); journal = Path(tmp) / "um.json"
+            applied = lane.execute_command(client, raw, mode="apply", journal_path=journal)
+            self.assertEqual(applied["after"], {"project": "Hermes Experience", "name": "Calendar and reminders", "target_date": None})
+            self.assertEqual(lane.execute_command(client, raw, mode="apply", journal_path=journal)["result"], "no_op")
+            self.assertEqual(len(client.writes), 1)
+
+    def test_project_management_fails_closed_on_exact_name_ambiguity(self):
+        class AmbiguousClient:
+            def list_teams(self): return [{"id": "team-sis", "key": "SIS", "name": "Sisyphus"}]
+            def list_team_projects(self, team_id):
+                item = {"id": "one", "name": "Hermes Experience", "teams": {"nodes": [{"id": "team-sis"}]}}
+                return [item, {**item, "id": "two"}]
+        with self.assertRaisesRegex(lane.ContractError, "ambiguous.*project name"):
+            lane.execute_command(AmbiguousClient(), project_command(), mode="plan")
+
+        class MissingClient(AmbiguousClient):
+            def list_team_projects(self, team_id):
+                return []
+        with self.assertRaisesRegex(lane.ContractError, "exact Linear project not found"):
+            lane.execute_command(MissingClient(), project_command("update_project"), mode="plan")
+
+    def test_linear_client_project_updates_use_minimal_fixed_graphql_payloads(self):
+        client = object.__new__(lane.LinearClient); calls = []
+        def execute(query, variables=None):
+            calls.append((query, variables))
+            return {"projectUpdate": {"success": True}} if "projectUpdate" in query else {"projectMilestoneUpdate": {"success": True}}
+        client.execute = execute
+        client.update_project("project-id", new_name="Renamed", description="", target_date=None)
+        client.update_project_milestone("milestone-id", new_name="M", target_date="2026-09-30")
+        self.assertEqual(calls[0][1], {"id": "project-id", "input": {"name": "Renamed", "description": "", "targetDate": None}})
+        self.assertEqual(calls[1][1], {"id": "milestone-id", "input": {"name": "M", "targetDate": "2026-09-30"}})
+        with self.assertRaises(lane.ContractError):
+            client.create_project(project_id="id", team_id="team", name="name", leadId="forbidden")
 
 
 if __name__ == "__main__":
