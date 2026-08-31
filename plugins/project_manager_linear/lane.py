@@ -46,7 +46,7 @@ def _unescaped_angle_end(text: str, start: int) -> int | None:
     escaped = False
     for cursor in range(start, len(text)):
         char = text[cursor]
-        if char == "\n":
+        if char in "\r\n":
             return None
         if escaped:
             escaped = False
@@ -100,9 +100,7 @@ def _markdown_link_at(text: str, start: int) -> tuple[str, int] | None:
         destination += 1
     if destination < len(text) and text[destination] == "<":
         angle_end = _unescaped_angle_end(text, destination + 1)
-        if angle_end is None or any(
-            char.isspace() for char in text[destination + 1 : angle_end]
-        ):
+        if angle_end is None:
             return None
         if not text.startswith(("http://", "https://"), destination + 1):
             return None

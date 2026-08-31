@@ -1928,6 +1928,10 @@ class ExecutionTests(unittest.TestCase):
             "docs",
         )
         self.assertEqual(
+            lane.remove_description_links("[docs](<https://example.com/a b>)"),
+            "docs",
+        )
+        self.assertEqual(
             lane.remove_description_links(
                 '[docs](<https://example.com/path> "title")'
             ),
