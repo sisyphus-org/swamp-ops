@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any, Callable
 from uuid import UUID
 
+from . import linear_approval_contract as linear_approval
+
 
 class BrokerError(ValueError):
     pass
@@ -27,6 +29,9 @@ ALLOWED_OPERATIONS = {
     ("swamp", "plan_github_cloudflare_repository"),
     ("swamp", "start_github_cloudflare_repository_apply"),
     ("swamp", "approve_github_cloudflare_repository_apply"),
+    ("swamp", "plan_linear_destructive_owner_approval"),
+    ("swamp", "start_linear_destructive_owner_approval_attest"),
+    ("swamp", "approve_linear_destructive_owner_approval_attest"),
     ("swamp", "get_result"),
 }
 
@@ -121,6 +126,14 @@ def build_command(
             "artifact_version",
         },
         "swamp.approve_github_cloudflare_repository_apply": {"apply_run_id"},
+        "swamp.plan_linear_destructive_owner_approval": {
+            "intent", "before_state_hash", "expires_at"
+        },
+        "swamp.start_linear_destructive_owner_approval_attest": {
+            "intent", "before_state_hash", "expires_at", "plan_run_id",
+            "plan_checksum", "plan_artifact_version",
+        },
+        "swamp.approve_linear_destructive_owner_approval_attest": {"attest_run_id"},
         "swamp.get_result": {"model", "name"},
     }
     if operation_key not in expected_arguments:
@@ -208,6 +221,58 @@ def build_command(
             "--run",
             apply_run_id,
             "--json",
+        ]
+    if operation_key == "swamp.plan_linear_destructive_owner_approval":
+        if policy.get("swamp", {}).get("linearDestructiveApprovalPlanWorkflow") != linear_approval.PLAN_WORKFLOW:
+            raise BrokerError("Linear destructive approval plan workflow is not allowed")
+        try:
+            encoded_intent = linear_approval.encode_intent(arguments.get("intent"))
+            before_state_hash = arguments.get("before_state_hash")
+            if not isinstance(before_state_hash, str) or linear_approval.SHA256.fullmatch(before_state_hash) is None:
+                raise linear_approval.ContractError("before_state_hash must be SHA-256")
+            expires_at = arguments.get("expires_at")
+            linear_approval.parse_expiry(expires_at)
+        except linear_approval.ContractError as exc:
+            raise BrokerError(str(exc)) from exc
+        return [
+            "swamp", "workflow", "run", linear_approval.PLAN_WORKFLOW,
+            "--input", f"intent={encoded_intent}",
+            "--input", f"beforeStateHash={before_state_hash}",
+            "--input", f"expiresAt={expires_at}", "--json",
+        ]
+    if operation_key == "swamp.start_linear_destructive_owner_approval_attest":
+        if policy.get("swamp", {}).get("linearDestructiveApprovalAttestWorkflow") != linear_approval.ATTEST_WORKFLOW:
+            raise BrokerError("Linear destructive approval attestation workflow is not allowed")
+        try:
+            encoded_intent = linear_approval.encode_intent(arguments.get("intent"))
+            before_state_hash = arguments.get("before_state_hash")
+            if not isinstance(before_state_hash, str) or linear_approval.SHA256.fullmatch(before_state_hash) is None:
+                raise linear_approval.ContractError("before_state_hash must be SHA-256")
+            expires_at = arguments.get("expires_at")
+            linear_approval.parse_expiry(expires_at)
+        except linear_approval.ContractError as exc:
+            raise BrokerError(str(exc)) from exc
+        plan_run_id = _uuid(arguments.get("plan_run_id"), "plan_run_id")
+        plan_checksum = _checksum(arguments.get("plan_checksum"))
+        plan_version = arguments.get("plan_artifact_version")
+        if not isinstance(plan_version, int) or isinstance(plan_version, bool) or plan_version < 1:
+            raise BrokerError("plan_artifact_version must be a positive integer")
+        return [
+            "swamp", "workflow", "run", linear_approval.ATTEST_WORKFLOW,
+            "--input", f"intent={encoded_intent}",
+            "--input", f"beforeStateHash={before_state_hash}",
+            "--input", f"expiresAt={expires_at}",
+            "--input", f"planRunId={plan_run_id}",
+            "--input", f"planArtifactVersion:json={plan_version}",
+            "--input", f"planChecksum={plan_checksum}", "--json",
+        ]
+    if operation_key == "swamp.approve_linear_destructive_owner_approval_attest":
+        if policy.get("swamp", {}).get("linearDestructiveApprovalAttestWorkflow") != linear_approval.ATTEST_WORKFLOW:
+            raise BrokerError("Linear destructive approval attestation workflow is not allowed")
+        attest_run_id = _uuid(arguments.get("attest_run_id"), "attest_run_id")
+        return [
+            "swamp", "workflow", "approve", linear_approval.ATTEST_WORKFLOW,
+            "approve-linear-destructive-intent", "--run", attest_run_id, "--json",
         ]
     if operation_key == "swamp.get_result":
         model = arguments.get("model")
@@ -338,6 +403,252 @@ def _repository_plan_result(
         expected_repository=expected_repository,
     )
     return {"workflowRunId": workflow_run_id, "artifactVersion": version, "plan": plan}
+
+
+def _load_linear_approval_artifact(
+    *,
+    runner: Callable[..., dict[str, Any]],
+    workspace: Path,
+    model: str,
+    artifact_version: int,
+    run_id: str,
+) -> dict[str, Any]:
+    payload = _json_command(
+        runner,
+        [
+            "swamp", "data", "get", model, "result", "--version",
+            str(artifact_version), "--json",
+        ],
+        workspace=workspace,
+        timeout=60,
+        error_prefix="Linear owner approval artifact retrieval",
+    )
+    owner = payload.get("ownerDefinition")
+    content = payload.get("content")
+    if (
+        payload.get("modelName") != model
+        or payload.get("name") != "result"
+        or payload.get("version") != artifact_version
+        or not isinstance(owner, dict)
+        or owner.get("workflowRunId") != run_id
+        or not isinstance(content, dict)
+        or content.get("exitCode") != 0
+        or not isinstance(content.get("stdout"), str)
+    ):
+        raise BrokerError("Linear owner approval artifact provenance is invalid")
+    try:
+        result = json.loads(content["stdout"])
+    except json.JSONDecodeError as exc:
+        raise BrokerError("Linear owner approval artifact content is invalid JSON") from exc
+    if not isinstance(result, dict):
+        raise BrokerError("Linear owner approval artifact content is invalid")
+    return result
+
+
+def _linear_plan_result(
+    workflow_result: dict[str, Any],
+    *,
+    arguments: dict[str, Any],
+    runner: Callable[..., dict[str, Any]],
+    workspace: Path,
+) -> dict[str, Any]:
+    run_id, version = _extract_result_version(workflow_result)
+    result = _load_linear_approval_artifact(
+        runner=runner,
+        workspace=workspace,
+        model=linear_approval.PLAN_MODEL,
+        artifact_version=version,
+        run_id=run_id,
+    )
+    try:
+        expected = linear_approval.build_plan(
+            arguments["intent"],
+            arguments["before_state_hash"],
+            arguments["expires_at"],
+        )
+    except linear_approval.ContractError as exc:
+        raise BrokerError(str(exc)) from exc
+    if result != expected or not linear_approval.verify_artifact_checksum(result):
+        raise BrokerError("Linear owner approval plan artifact binding is invalid")
+    return {"workflowRunId": run_id, "artifactVersion": version, "plan": result}
+
+
+def _register_linear_attest_gate(
+    audit_path: Path | None,
+    *,
+    request: dict[str, Any],
+    caller: str,
+    attest_run_id: str,
+) -> None:
+    if audit_path is None:
+        raise BrokerError("Linear owner approval attest requires an immutable audit path")
+    arguments = request["arguments"]
+    _append_jsonl(
+        audit_path,
+        {
+            **_audit_base(request, caller, request["integration"] + "." + request["operation"], "awaiting_approval"),
+            "event": "linear_owner_approval_gate",
+            "attest_run_id": attest_run_id,
+            "intent": linear_approval.encode_intent(arguments["intent"]),
+            "before_state_hash": arguments["before_state_hash"],
+            "expires_at": arguments["expires_at"],
+            "plan_run_id": arguments["plan_run_id"],
+            "plan_checksum": arguments["plan_checksum"],
+            "plan_artifact_version": arguments["plan_artifact_version"],
+        },
+    )
+
+
+def _linear_approval_step_status(history: dict[str, Any]) -> str | None:
+    for job in history.get("jobs", []):
+        if not isinstance(job, dict) or job.get("name") != "attest":
+            continue
+        for step in job.get("steps", []):
+            if isinstance(step, dict) and step.get("name") == "approve-linear-destructive-intent":
+                status = step.get("status")
+                return status if isinstance(status, str) else None
+    return None
+
+
+def _approve_linear_attestation(
+    audit_path: Path | None,
+    *,
+    request: dict[str, Any],
+    caller: str,
+    runner: Callable[..., dict[str, Any]],
+    workspace: Path,
+    approve_command: list[str],
+) -> dict[str, Any]:
+    if caller != "owner":
+        raise BrokerError("Linear destructive approval requires authenticated owner")
+    if audit_path is None or not audit_path.exists():
+        raise BrokerError("Linear owner approval run is not registered in immutable audit")
+    attest_run_id = request["arguments"]["attest_run_id"]
+    lock_path = audit_path.with_name(audit_path.name + ".linear-approval.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        gate: dict[str, Any] | None = None
+        completed = False
+        for line in audit_path.read_text(encoding="utf-8").splitlines():
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise BrokerError("immutable audit contains invalid JSON") from exc
+            if record.get("attest_run_id") != attest_run_id:
+                continue
+            if record.get("event") == "linear_owner_approval_gate":
+                gate = record
+            elif record.get("event") == "linear_owner_approval_result":
+                completed = True
+        if gate is None:
+            raise BrokerError("Linear owner approval run is not registered")
+        if completed:
+            raise BrokerError("Linear owner approval run was already approved")
+        history = _json_command(
+            runner,
+            ["swamp", "workflow", "history", "get", attest_run_id, "--json"],
+            workspace=workspace,
+            timeout=60,
+            error_prefix="Linear owner approval history lookup",
+        )
+        expected_inputs = {
+            "intent": gate.get("intent"),
+            "beforeStateHash": gate.get("before_state_hash"),
+            "expiresAt": gate.get("expires_at"),
+            "planRunId": gate.get("plan_run_id"),
+            "planArtifactVersion": gate.get("plan_artifact_version"),
+            "planChecksum": gate.get("plan_checksum"),
+        }
+        if (
+            history.get("id") != attest_run_id
+            or history.get("workflowName") != linear_approval.ATTEST_WORKFLOW
+            or history.get("inputs") != expected_inputs
+            or history.get("status") != "suspended"
+            or _linear_approval_step_status(history) != "waiting_approval"
+        ):
+            raise BrokerError("Linear owner approval run is not suspended at the exact approval gate")
+        approved = _json_command(
+            runner,
+            approve_command,
+            workspace=workspace,
+            timeout=60,
+            error_prefix="Linear owner approval",
+        )
+        if approved.get("runId") != attest_run_id:
+            raise BrokerError("Linear owner approval returned the wrong run")
+        result = _json_command(
+            runner,
+            [
+                "swamp", "workflow", "resume", linear_approval.ATTEST_WORKFLOW,
+                "--run", attest_run_id, "--json",
+            ],
+            workspace=workspace,
+            timeout=120,
+            error_prefix="Linear owner approval attestation resume",
+        )
+        if result.get("id") != attest_run_id or result.get("status") != "succeeded":
+            raise BrokerError("Linear owner approval attestation did not succeed")
+        result_run_id, artifact_version = _extract_result_version(result)
+        if result_run_id != attest_run_id:
+            raise BrokerError("Linear owner approval attestation returned wrong run")
+        attestation = _load_linear_approval_artifact(
+            runner=runner,
+            workspace=workspace,
+            model=linear_approval.ATTEST_MODEL,
+            artifact_version=artifact_version,
+            run_id=attest_run_id,
+        )
+        try:
+            intent = linear_approval.decode_intent(str(gate.get("intent")))
+            expected = {
+                "schemaVersion": linear_approval.ATTESTATION_SCHEMA_VERSION,
+                "mode": "attestation",
+                "decision": "owner_approved",
+                "workflow": linear_approval.ATTEST_WORKFLOW,
+                "model": linear_approval.ATTEST_MODEL,
+                "plan": {
+                    "workflow": linear_approval.PLAN_WORKFLOW,
+                    "model": linear_approval.PLAN_MODEL,
+                    "runId": gate["plan_run_id"],
+                    "artifactVersion": gate["plan_artifact_version"],
+                    "checksum": gate["plan_checksum"],
+                },
+                "intent": intent,
+                "intentHash": linear_approval.canonical_sha256(intent),
+                "beforeStateHash": gate["before_state_hash"],
+                "expiresAt": gate["expires_at"],
+            }
+            expected["checksum"] = linear_approval.artifact_checksum(expected)
+            linear_approval.validate_expiry_window(gate["expires_at"], datetime.now(timezone.utc))
+        except (KeyError, linear_approval.ContractError) as exc:
+            raise BrokerError("Linear owner approval gate binding is invalid") from exc
+        if attestation != expected or not linear_approval.verify_artifact_checksum(attestation):
+            raise BrokerError("Linear owner approval attestation binding is invalid")
+        policy_reference = {
+            "mode": "owner_approved",
+            "approval": {
+                "workflow": linear_approval.ATTEST_WORKFLOW,
+                "model": linear_approval.ATTEST_MODEL,
+                "run_id": attest_run_id,
+                "artifact_version": artifact_version,
+                "checksum": attestation["checksum"],
+                "intent_hash": attestation["intentHash"],
+                "before_state_hash": attestation["beforeStateHash"],
+                "expires_at": attestation["expiresAt"],
+            },
+        }
+        _append_jsonl(
+            audit_path,
+            {
+                **_audit_base(request, caller, request["integration"] + "." + request["operation"], "approved"),
+                "event": "linear_owner_approval_result",
+                "attest_run_id": attest_run_id,
+                "attestation_checksum": attestation["checksum"],
+            },
+        )
+        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        return {"status": "succeeded", "policy": policy_reference}
 
 
 def _append_jsonl(path: Path | None, record: dict[str, Any]) -> None:
@@ -586,6 +897,56 @@ def execute_request(
             )
             if approved_plan.get("ready") is not True or approved_plan.get("blockers") != []:
                 raise BrokerError("repository bootstrap plan is not ready for apply")
+        if operation_key == "swamp.start_linear_destructive_owner_approval_attest":
+            if audit_path is None:
+                raise BrokerError("Linear owner approval attest requires an immutable audit path")
+            try:
+                _append_jsonl(
+                    audit_path,
+                    {
+                        **_audit_base(request, caller, operation_key, "preflight"),
+                        "event": "linear_owner_approval_preflight",
+                    },
+                )
+            except OSError as exc:
+                raise BrokerError("immutable audit path is not writable") from exc
+            args = request["arguments"]
+            loaded_plan = _load_linear_approval_artifact(
+                runner=runner,
+                workspace=workspace,
+                model=linear_approval.PLAN_MODEL,
+                artifact_version=args["plan_artifact_version"],
+                run_id=args["plan_run_id"],
+            )
+            try:
+                expected_plan = linear_approval.build_plan(
+                    args["intent"], args["before_state_hash"], args["expires_at"]
+                )
+            except linear_approval.ContractError as exc:
+                raise BrokerError(str(exc)) from exc
+            if (
+                loaded_plan != expected_plan
+                or loaded_plan.get("checksum") != args["plan_checksum"]
+                or not linear_approval.verify_artifact_checksum(loaded_plan)
+            ):
+                raise BrokerError("Linear owner approval plan does not match attest request")
+        if operation_key == "swamp.approve_linear_destructive_owner_approval_attest":
+            result = _approve_linear_attestation(
+                audit_path,
+                request=request,
+                caller=caller,
+                runner=runner,
+                workspace=workspace,
+                approve_command=command,
+            )
+            return {
+                "request_id": request["request_id"],
+                "caller": caller,
+                "operation": operation_key,
+                "mode": request["mode"],
+                "status": "ok",
+                "result": result,
+            }
         if operation_key == "swamp.approve_github_cloudflare_repository_apply":
             result = _approve_registered_apply(
                 audit_path,
@@ -620,6 +981,24 @@ def execute_request(
                 runner=runner,
                 workspace=workspace,
             )
+        elif operation_key == "swamp.plan_linear_destructive_owner_approval":
+            result = _linear_plan_result(
+                result,
+                arguments=request["arguments"],
+                runner=runner,
+                workspace=workspace,
+            )
+        elif operation_key == "swamp.start_linear_destructive_owner_approval_attest":
+            attest_run_id = result.get("id") if isinstance(result, dict) else None
+            if not isinstance(attest_run_id, str) or result.get("status") != "suspended":
+                raise BrokerError("Linear owner approval workflow did not suspend")
+            _uuid(attest_run_id, "attest_run_id")
+            _register_linear_attest_gate(
+                audit_path,
+                request=request,
+                caller=caller,
+                attest_run_id=attest_run_id,
+            )
         elif operation_key == "swamp.start_github_cloudflare_repository_apply":
             apply_run_id = result.get("id") if isinstance(result, dict) else None
             if (
@@ -649,6 +1028,8 @@ def execute_request(
     if operation_key not in {
         "swamp.start_github_cloudflare_repository_apply",
         "swamp.approve_github_cloudflare_repository_apply",
+        "swamp.start_linear_destructive_owner_approval_attest",
+        "swamp.approve_linear_destructive_owner_approval_attest",
     }:
         _append_jsonl(audit_path, _audit_base(request, caller, operation_key, "ok"))
     return response
@@ -671,6 +1052,8 @@ def validate_request(payload: dict[str, Any]) -> dict[str, Any]:
     apply_operations = {
         "start_github_cloudflare_repository_apply",
         "approve_github_cloudflare_repository_apply",
+        "start_linear_destructive_owner_approval_attest",
+        "approve_linear_destructive_owner_approval_attest",
     }
     expected_mode = "apply" if operation in apply_operations else "plan"
     if mode != expected_mode:

@@ -170,12 +170,79 @@ def execute_pm_command(
         raise ProtocolVersionError(
             "Linear plan returned an unsupported schema; expected linear-result.v2"
         )
-    result = lane.execute_command(
-        client,
-        validated,
-        mode="apply",
-        journal_path=journal_path,
-    )
+    owner_approval_authorization = None
+    if validated["policy"].get("mode") == "owner_approved":
+        from .approval import (
+            ApprovalError,
+            consume_owner_approval,
+            contract,
+            verify_owner_approval,
+        )
+
+        expected_intent = {
+            "operation": validated["operation"],
+            "target": validated["target"],
+            "change": validated["change"],
+        }
+        before_state_hash = contract.canonical_sha256(plan.get("before"))
+        verified_approval = verify_owner_approval(
+            validated["policy"],
+            expected_intent=expected_intent,
+            expected_before_state_hash=before_state_hash,
+        )
+        # Verification is intentionally non-consuming.  Re-read Linear
+        # immediately afterwards and bind apply to the exact same before-state,
+        # operation, target, and concrete lane plan.
+        live_plan = lane.execute_command(
+            client,
+            validated,
+            mode="plan",
+            journal_path=journal_path,
+        )
+        if not isinstance(live_plan, dict) or live_plan.get("schema_version") != "linear-result.v2":
+            raise ProtocolVersionError(
+                "Linear re-plan returned an unsupported schema; expected linear-result.v2"
+            )
+        approved_plan_binding = {
+            "operation": plan.get("operation"),
+            "target": plan.get("target"),
+            "plan": plan.get("plan"),
+        }
+        live_plan_binding = {
+            "operation": live_plan.get("operation"),
+            "target": live_plan.get("target"),
+            "plan": live_plan.get("plan"),
+        }
+        approved_target = approved_plan_binding["target"]
+        if (
+            not isinstance(plan.get("before"), dict)
+            or approved_plan_binding["operation"] != expected_intent["operation"]
+            or not isinstance(approved_target, dict)
+            or approved_target.get("type") != expected_intent["target"]["type"]
+            or approved_target.get("identifier")
+            != expected_intent["target"]["identifier"]
+            or approved_plan_binding["plan"] is None
+            or not isinstance(live_plan.get("before"), dict)
+            or contract.canonical_sha256(live_plan.get("before")) != before_state_hash
+            or contract.canonical_sha256(live_plan_binding)
+            != contract.canonical_sha256(approved_plan_binding)
+        ):
+            raise ApprovalError(
+                "owner approval live before-state or operation plan/target drifted"
+            )
+        # This is the last action before entering the mutation path.  The
+        # replay journal lock makes exactly one concurrent caller successful.
+        owner_approval_authorization = consume_owner_approval(
+            verified_approval,
+            journal_path=journal_path.with_name("owner-approval-journal.json"),
+        )
+    apply_kwargs = {
+        "mode": "apply",
+        "journal_path": journal_path,
+    }
+    if owner_approval_authorization is not None:
+        apply_kwargs["owner_approval_authorization"] = owner_approval_authorization
+    result = lane.execute_command(client, validated, **apply_kwargs)
     if (
         not isinstance(result, dict)
         or result.get("schema_version") != "linear-result.v2"

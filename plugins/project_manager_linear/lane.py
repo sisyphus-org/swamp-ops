@@ -385,6 +385,12 @@ def _load_validation() -> Any:
     return _load_bundled_module("validation.py", "project_manager_linear_validation")
 
 
+def _load_approval() -> Any:
+    if __package__:
+        return importlib.import_module(f"{__package__}.approval")
+    return _load_bundled_module("approval.py", "project_manager_linear_approval")
+
+
 def _load_hierarchy() -> Any:
     """Load the bundled hierarchy module in package and standalone contexts."""
     return _load_bundled_module("hierarchy.py", "project_manager_linear_hierarchy")
@@ -1294,8 +1300,11 @@ def validate_command(raw: Any) -> dict[str, Any]:
         _load_initiative_management().validate_change(
             change, operation, ContractError
         )
-    if raw["policy"] != {"mode": "standard"}:
-        raise ContractError("policy must be the standard fail-closed lane")
+    approval = _load_approval()
+    try:
+        approval.validate_policy(raw["policy"])
+    except approval.ApprovalError as exc:
+        raise ContractError(str(exc)) from exc
     return raw
 
 
@@ -1680,12 +1689,31 @@ def execute_command(
     *,
     mode: str,
     journal_path: Path | None = None,
+    owner_approval_authorization: Any = None,
     _lock_held: bool = False,
 ) -> dict[str, Any]:
     """Plan or execute one validated exact-target command."""
     if mode not in {"plan", "apply"}:
         raise ContractError("mode must be plan or apply")
     command = validate_command(raw)
+    owner_approved_apply = (
+        mode == "apply" and command["policy"].get("mode") == "owner_approved"
+    )
+    if owner_approved_apply:
+        approval = _load_approval()
+        try:
+            approval.require_consumed_owner_approval(
+                owner_approval_authorization,
+                expected_intent={
+                    "operation": command["operation"],
+                    "target": command["target"],
+                    "change": command["change"],
+                },
+            )
+        except approval.ApprovalError as exc:
+            raise ContractError(str(exc)) from exc
+    elif owner_approval_authorization is not None:
+        raise ContractError("owner approval authorization is invalid for this execution")
     key_hash, request_hash, _ = command_fingerprint(command)
     mutation_apply = mode == "apply" and command["operation"] not in READ_OPERATIONS
     if mutation_apply and not _lock_held:
@@ -1697,6 +1725,7 @@ def execute_command(
                 command,
                 mode=mode,
                 journal_path=journal_path,
+                owner_approval_authorization=owner_approval_authorization,
                 _lock_held=True,
             )
     journal: dict[str, str] = {}

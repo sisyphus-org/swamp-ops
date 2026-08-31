@@ -1,8 +1,8 @@
 name: ops-broker
-version: 0.3.0
+version: 0.4.0
 description: >-
   Typed, policy-allowlisted operations broker for authenticated A2A peers.
-  Exposes read-only operations plus checksum-bound, approval-gated repository bootstrap writes without sharing credentials.
+  Adds owner-only Swamp attestation for future destructive Linear operations without granting Linear mutation capability.
 author: sisyphus-org
 kind: backend
 provides_tools:

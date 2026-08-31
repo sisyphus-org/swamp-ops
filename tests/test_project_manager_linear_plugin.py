@@ -316,14 +316,18 @@ class PluginTests(unittest.TestCase):
         )
         self.assertEqual(sanitized, "[credential-redacted]")
 
-    def test_pm_plugin_bundles_lane_without_mutable_runtime_dependency(self):
+    def test_pm_plugin_bundles_lane_without_mutable_development_checkout_dependency(self):
         plugin_root = ROOT / "plugins" / "project_manager_linear"
         self.assertTrue((plugin_root / "lane.py").is_file())
         source = "\n".join(
             path.read_text()
             for path in sorted(plugin_root.glob("*.py"))
         )
-        self.assertNotIn("swamp-ops-runtime", source)
+        self.assertNotIn('Path("/Users/hermes/workspaces/swamp-ops")', source)
+        self.assertIn(
+            'SWAMP_WORKSPACE = Path("/Users/hermes/workspaces/swamp-ops-runtime")',
+            (plugin_root / "approval.py").read_text(),
+        )
 
     def test_worker_skill_calls_no_arg_v2_tool_and_does_not_reconstruct_command(self):
         skill = (ROOT / "skills" / "project-manager-linear-worker" / "SKILL.md").read_text()

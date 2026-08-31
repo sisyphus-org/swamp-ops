@@ -1,7 +1,7 @@
 ---
 name: linear-source-request-routing
 description: Route Linear reads/writes through Project Manager.
-version: 0.6.0
+version: 0.7.0
 author: Alexey Petrov, Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -29,7 +29,7 @@ Use the typed Project Manager lane for every Linear read, creation, or mutation.
 - Inventory an explicit non-empty subset of `issues`, `projects`, `milestones`, and `initiatives`, with an explicit `include_archived` boolean.
 - Search the same explicit core subset with an exact non-empty `query`; matching is deterministic Unicode casefold substring matching over issue identifiers/titles and entity names.
 
-Do not use this path for fuzzy/missing mutation targets, server-side/raw search passthrough, bulk operations, terminal states, unlink, archive/delete, initiative reparenting, arbitrary teams, unrestricted structural changes, or per-task Telegram topics.
+Do not use this path for fuzzy/missing mutation targets, server-side/raw search passthrough, bulk operations, terminal states, unlink, archive/delete, initiative reparenting, arbitrary teams, unrestricted structural changes, or per-task Telegram topics. A Swamp `owner_approved` attestation does not make any of these source operations available; each future destructive operation requires a separately shipped typed source and PM slice.
 
 ## Procedure
 

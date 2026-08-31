@@ -1,0 +1,69 @@
+id: 76a31474-cd9a-47ce-b7b5-d5e78415f1f4
+name: linear-destructive-owner-approval-attest
+description: >-
+  Suspend for explicit owner approval, then attest only the exact checksum-bound
+  future destructive Linear plan. This workflow never calls or mutates Linear.
+tags:
+  domain: linear
+  safety: approval-gated-attestation-only
+  owner: default-broker
+inputs:
+  type: object
+  properties:
+    intent:
+      type: string
+      pattern: "^[A-Za-z0-9_-]{16,4096}$"
+    beforeStateHash:
+      type: string
+      pattern: "^[0-9a-f]{64}$"
+    expiresAt:
+      type: string
+      pattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    planRunId:
+      type: string
+      pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    planArtifactVersion:
+      type: integer
+      minimum: 1
+    planChecksum:
+      type: string
+      pattern: "^[0-9a-f]{64}$"
+  required: [intent, beforeStateHash, expiresAt, planRunId, planArtifactVersion, planChecksum]
+  additionalProperties: false
+jobs:
+  - name: attest
+    steps:
+      - name: approve-linear-destructive-intent
+        description: Approve only the exact intent, before-state hash, expiry and plan checksum.
+        task:
+          type: manual_approval
+          prompt: Approve this exact checksum-bound destructive Linear intent for one use before expiry.
+        dependsOn: []
+        weight: 0
+        allowFailure: false
+      - name: emit-owner-approval-attestation
+        task:
+          type: model_method
+          modelIdOrName: linear-destructive-owner-approval-attest
+          methodName: execute
+          inputs:
+            run: >-
+              python3 scripts/linear_owner_approval.py
+              --mode attest
+              --intent '${{ inputs.intent }}'
+              --before-state-hash '${{ inputs.beforeStateHash }}'
+              --expires-at '${{ inputs.expiresAt }}'
+              --plan-run-id '${{ inputs.planRunId }}'
+              --plan-artifact-version '${{ inputs.planArtifactVersion }}'
+              --plan-checksum '${{ inputs.planChecksum }}'
+            timeout: 60000
+            ignoreExitCode: false
+        dependsOn:
+          - step: approve-linear-destructive-intent
+            condition:
+              type: succeeded
+        weight: 1
+        allowFailure: false
+    dependsOn: []
+    weight: 1
+version: 1

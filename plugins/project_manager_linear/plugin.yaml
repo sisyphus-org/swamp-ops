@@ -1,7 +1,7 @@
 name: project-manager-linear
-version: 0.8.0
+version: 0.9.0
 description: >-
-  Deterministic Project Manager fixed-query reads and bounded write lane.
+  Deterministic PM Linear lane with fixed owner-approval attestation verification; destructive operations remain disabled.
 author: sisyphus-org
 kind: backend
 provides_tools:

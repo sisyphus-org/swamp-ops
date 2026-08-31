@@ -1,0 +1,11 @@
+type: command/shell
+typeVersion: 2026.02.09.1
+id: 7a783f7c-5bb7-4d43-8d56-194702e0c067
+name: linear-destructive-owner-approval-plan
+version: 1
+tags:
+  domain: linear
+  safety: read-only-owner-approval-plan
+  owner: default-broker
+globalArguments: {}
+methods: {}
