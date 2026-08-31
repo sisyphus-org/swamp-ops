@@ -15,7 +15,6 @@ from typing import Any, NoReturn
 MAX_NAME = 200
 MAX_DESCRIPTION = 10_000
 MAX_COMMAND_BYTES = 24_576
-SIS_TEAM_NAME = "Sisyphus"
 
 
 def _load_validation() -> Any:
@@ -165,7 +164,7 @@ def preflight(client: Any, change: dict[str, Any], error_cls: type[Exception]) -
     teams = _bounded_nodes(client.list_teams(), "workspace teams", error_cls)
     _require_id_name(teams, "key", "workspace teams", error_cls)
     sis = _one([item for item in teams if item["key"] == "SIS"], "team SIS", error_cls)
-    if sis is None or sis.get("name") != SIS_TEAM_NAME:
+    if sis is None:
         _fail(error_cls, "exact SIS team was not found")
 
     projects = _bounded_nodes(
