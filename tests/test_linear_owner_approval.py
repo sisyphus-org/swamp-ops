@@ -28,9 +28,9 @@ EXPIRES = "2026-08-31T13:00:00Z"
 
 def intent():
     return {
-        "operation": "archive_issue",
+        "operation": "update_issue",
         "target": {"type": "issue", "identifier": "SIS-77"},
-        "change": {},
+        "change": {"parent_identifier": None},
     }
 
 
@@ -138,9 +138,15 @@ class PlanContractTests(unittest.TestCase):
             {**intent(), "target": {"type": "issue", "identifier": ["SIS-1"]}},
             {**intent(), "operation": "terminal"},
             {
-                "operation": "reparent_issue",
+                "operation": "update_issue",
                 "target": {"type": "issue", "identifier": "SIS-77"},
                 "change": {"parent_identifier": ["SIS-1", "SIS-2"]},
+            },
+            {**intent(), "operation": "archive_issue", "change": {}},
+            {**intent(), "operation": "delete_issue", "change": {}},
+            {
+                **intent(),
+                "change": {"parent_identifier": None, "description": "forbidden"},
             },
         ]
         for value in cases:
@@ -200,9 +206,11 @@ class PolicyValidationTests(unittest.TestCase):
 
     def test_exact_owner_approved_reference_is_structurally_accepted_only(self):
         command = self.base_command()
+        command["operation"] = "update_issue"
+        command["change"] = {"parent_identifier": None}
         command["policy"] = policy()
         self.assertEqual(lane.validate_command(command)["policy"], policy())
-        for operation in owner_approval.FUTURE_DESTRUCTIVE_OPERATIONS:
+        for operation in ("archive_issue", "delete_issue", "delete_issue_relation", "reparent_issue"):
             self.assertNotIn(operation, lane.OPERATIONS)
             destructive = self.base_command()
             destructive["operation"] = operation
@@ -223,7 +231,7 @@ class PmExecutionBoundaryTests(unittest.TestCase):
         def plan_result():
             return {
                 "schema_version": "linear-result.v2",
-                "operation": "archive_issue",
+                "operation": "update_issue",
                 "mode": "plan",
                 "target": {
                     "type": "issue",
@@ -231,8 +239,8 @@ class PmExecutionBoundaryTests(unittest.TestCase):
                     "url": "https://linear.app/example/SIS-77",
                 },
                 "result": "planned",
-                "before": {"identifier": "SIS-77", "archived": False},
-                "plan": [{"action": "archive_issue", "identifier": "SIS-77"}],
+                "before": {"identifier": "SIS-77", "parent_identifier": "SIS-1"},
+                "plan": [{"action": "update_issue", "fields": ["parent_identifier"]}],
                 "verified": False,
             }
 
@@ -250,13 +258,13 @@ class PmExecutionBoundaryTests(unittest.TestCase):
             self.authorizations.append(owner_approval_authorization)
             return {
                 "schema_version": "linear-result.v2",
-                "operation": "archive_issue",
+                "operation": "update_issue",
                 "mode": "apply",
                 "target": {"type": "issue", "identifier": "SIS-77"},
                 "result": "applied",
-                "before": {"identifier": "SIS-77", "archived": False},
-                "after": {"identifier": "SIS-77", "archived": True},
-                "plan": [{"action": "archive_issue", "identifier": "SIS-77"}],
+                "before": {"identifier": "SIS-77", "parent_identifier": "SIS-1"},
+                "after": {"identifier": "SIS-77", "parent_identifier": None},
+                "plan": [{"action": "update_issue", "fields": ["parent_identifier"]}],
                 "verified": True,
             }
 
@@ -288,14 +296,14 @@ class PmExecutionBoundaryTests(unittest.TestCase):
         self.assertEqual(
             verifier.call_args.kwargs["expected_before_state_hash"],
             owner_approval.canonical_sha256(
-                {"identifier": "SIS-77", "archived": False}
+                {"identifier": "SIS-77", "parent_identifier": "SIS-1"}
             ),
         )
 
     def test_live_before_state_drift_after_verification_fails_without_consuming_or_mutating(self):
         original = self.FakeLane.plan_result()
         drifted = copy.deepcopy(original)
-        drifted["before"]["archived"] = True
+        drifted["before"]["parent_identifier"] = "SIS-2"
         fake_lane = self.FakeLane([original, drifted])
         command = {
             "schema_version": "linear-command.v2",
@@ -492,9 +500,9 @@ class PmVerifierTests(unittest.TestCase):
             "correlation_id": "44444444-4444-4444-8444-444444444444",
             "idempotency_key": "linear:v2:" + "a" * 32,
             "source_profile": "swe",
-            "operation": "read_issue",
+            "operation": "update_issue",
             "target": {"type": "issue", "identifier": "SIS-77"},
-            "change": {},
+            "change": {"parent_identifier": None},
             "policy": policy(),
         }
         client = mock.Mock()

@@ -1305,6 +1305,12 @@ def validate_command(raw: Any) -> dict[str, Any]:
         approval.validate_policy(raw["policy"])
     except approval.ApprovalError as exc:
         raise ContractError(str(exc)) from exc
+    if raw["policy"].get("mode") == "owner_approved" and not (
+        operation == "update_issue" and set(change) == {"parent_identifier"}
+    ):
+        raise ContractError(
+            "owner_approved policy is allowed only for a parent-only update_issue"
+        )
     return raw
 
 
@@ -2275,88 +2281,96 @@ def execute_command(
                 raise ContractError(f"exact workflow state not found: {change['state']}")
             state_id = states[0]["id"]
 
-        desired_parent_id: str | object = ...
+        desired_parent_id: str | None | object = ...
         desired_parent_identifier: str | None = None
         if "parent_identifier" in change:
             requested_parent = change["parent_identifier"]
-            if requested_parent is None:
-                raise ContractError(OWNER_APPROVAL_PARENT_BLOCKER)
-            if requested_parent == identifier:
-                raise ContractError("update_issue target cannot be its own parent")
-            parent = client.get_issue(requested_parent)
-            if (
-                not isinstance(parent, dict)
-                or parent.get("identifier") != requested_parent
-                or not isinstance(parent.get("id"), str)
-                or not parent["id"].strip()
-            ):
-                raise ContractError(f"exact Linear parent not found: {requested_parent}")
-            parent_team = parent.get("team")
-            if (
-                not isinstance(parent_team, dict)
-                or parent_team.get("id") != team["id"]
-                or parent_team.get("key") != "SIS"
-            ):
-                raise ContractError("update_issue parent is not in the SIS team")
             current_parent = issue.get("parent")
-            if current_parent is not None:
+            if current_parent is not None and (
+                not isinstance(current_parent, dict)
+                or not isinstance(current_parent.get("id"), str)
+                or not current_parent["id"].strip()
+                or not isinstance(current_parent.get("identifier"), str)
+                or not ISSUE_IDENTIFIER.fullmatch(current_parent["identifier"])
+            ):
+                raise ContractError("current issue parent is malformed")
+            replacing_parent = (
+                requested_parent is None
+                or (
+                    current_parent is not None
+                    and current_parent["identifier"] != requested_parent
+                )
+            )
+            if replacing_parent and command["policy"].get("mode") != "owner_approved":
+                raise ContractError(OWNER_APPROVAL_PARENT_BLOCKER)
+            if requested_parent is None:
+                desired_parent_id = None
+            else:
+                if requested_parent == identifier:
+                    raise ContractError("update_issue target cannot be its own parent")
+                parent = client.get_issue(requested_parent)
                 if (
-                    not isinstance(current_parent, dict)
-                    or not isinstance(current_parent.get("id"), str)
-                    or not current_parent["id"].strip()
-                    or not isinstance(current_parent.get("identifier"), str)
-                    or not ISSUE_IDENTIFIER.fullmatch(current_parent["identifier"])
+                    not isinstance(parent, dict)
+                    or parent.get("identifier") != requested_parent
+                    or not isinstance(parent.get("id"), str)
+                    or not parent["id"].strip()
                 ):
+                    raise ContractError(f"exact Linear parent not found: {requested_parent}")
+                parent_team = parent.get("team")
+                if (
+                    not isinstance(parent_team, dict)
+                    or parent_team.get("id") != team["id"]
+                    or parent_team.get("key") != "SIS"
+                ):
+                    raise ContractError("update_issue parent is not in the SIS team")
+                if current_parent is not None and (
+                    current_parent["id"] == parent["id"]
+                ) != (current_parent["identifier"] == requested_parent):
                     raise ContractError("current issue parent is malformed")
-                if (
-                    current_parent["id"] != parent["id"]
-                    or current_parent["identifier"] != requested_parent
-                ):
-                    raise ContractError(OWNER_APPROVAL_PARENT_BLOCKER)
 
-            ancestor = parent
-            seen_ancestors: set[str] = set()
-            while True:
-                ancestor_identifier = ancestor.get("identifier")
-                ancestor_id = ancestor.get("id")
-                ancestor_team = ancestor.get("team")
-                if ancestor_identifier == identifier:
-                    raise ContractError("update_issue parent would create a cycle")
-                if (
-                    not isinstance(ancestor_identifier, str)
-                    or not ISSUE_IDENTIFIER.fullmatch(ancestor_identifier)
-                    or not isinstance(ancestor_id, str)
-                    or not ancestor_id.strip()
-                    or not isinstance(ancestor_team, dict)
-                    or ancestor_team.get("id") != team["id"]
-                    or ancestor_team.get("key") != "SIS"
-                    or ancestor_identifier in seen_ancestors
-                ):
-                    raise ContractError("update_issue parent ancestry is malformed or cyclic")
-                seen_ancestors.add(ancestor_identifier)
-                ancestor_parent = ancestor.get("parent")
-                if ancestor_parent is None:
-                    break
-                if (
-                    not isinstance(ancestor_parent, dict)
-                    or not isinstance(ancestor_parent.get("id"), str)
-                    or not ancestor_parent["id"].strip()
-                    or not isinstance(ancestor_parent.get("identifier"), str)
-                    or not ISSUE_IDENTIFIER.fullmatch(ancestor_parent["identifier"])
-                ):
-                    raise ContractError("update_issue parent ancestry is malformed or cyclic")
-                if ancestor_parent["identifier"] == identifier:
-                    raise ContractError("update_issue parent would create a cycle")
-                next_ancestor = client.get_issue(ancestor_parent["identifier"])
-                if (
-                    not isinstance(next_ancestor, dict)
-                    or next_ancestor.get("id") != ancestor_parent["id"]
-                    or next_ancestor.get("identifier") != ancestor_parent["identifier"]
-                ):
-                    raise ContractError("update_issue parent ancestry is malformed or missing")
-                ancestor = next_ancestor
-            desired_parent_id = parent["id"]
-            desired_parent_identifier = requested_parent
+                ancestor = parent
+                seen_ancestors: set[str] = set()
+                while True:
+                    ancestor_identifier = ancestor.get("identifier")
+                    ancestor_id = ancestor.get("id")
+                    ancestor_team = ancestor.get("team")
+                    if ancestor_identifier == identifier:
+                        raise ContractError("update_issue parent would create a cycle")
+                    if (
+                        not isinstance(ancestor_identifier, str)
+                        or not ISSUE_IDENTIFIER.fullmatch(ancestor_identifier)
+                        or not isinstance(ancestor_id, str)
+                        or not ancestor_id.strip()
+                        or not isinstance(ancestor_team, dict)
+                        or ancestor_team.get("id") != team["id"]
+                        or ancestor_team.get("key") != "SIS"
+                        or ancestor_identifier in seen_ancestors
+                    ):
+                        raise ContractError("update_issue parent ancestry is malformed or cyclic")
+                    seen_ancestors.add(ancestor_identifier)
+                    ancestor_parent = ancestor.get("parent")
+                    if ancestor_parent is None:
+                        break
+                    if (
+                        not isinstance(ancestor_parent, dict)
+                        or not isinstance(ancestor_parent.get("id"), str)
+                        or not ancestor_parent["id"].strip()
+                        or not isinstance(ancestor_parent.get("identifier"), str)
+                        or not ISSUE_IDENTIFIER.fullmatch(ancestor_parent["identifier"])
+                    ):
+                        raise ContractError("update_issue parent ancestry is malformed or cyclic")
+                    if ancestor_parent["identifier"] == identifier:
+                        raise ContractError("update_issue parent would create a cycle")
+                    next_ancestor = client.get_issue(ancestor_parent["identifier"])
+                    if (
+                        not isinstance(next_ancestor, dict)
+                        or next_ancestor.get("id") != ancestor_parent["id"]
+                        or next_ancestor.get("identifier") != ancestor_parent["identifier"]
+                    ):
+                        raise ContractError("update_issue parent ancestry is malformed or missing")
+                    ancestor = next_ancestor
+                desired_parent_id = parent["id"]
+                desired_parent_identifier = requested_parent
 
         desired_project_id: str | None | object = ...
         desired_milestone_id: str | None | object = ...
@@ -2558,7 +2572,10 @@ def execute_command(
                 fields.append("labels")
             if "parent_identifier" in change:
                 live_parent = live.get("parent")
-                if (
+                if desired_parent_id is None:
+                    if live_parent is not None:
+                        fields.append("parent")
+                elif (
                     not isinstance(live_parent, dict)
                     or live_parent.get("id") != desired_parent_id
                     or live_parent.get("identifier") != desired_parent_identifier

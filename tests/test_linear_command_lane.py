@@ -41,6 +41,22 @@ def command(operation="read_issue", change=None, key="linear:SIS-59:read:fixture
     }
 
 
+def owner_policy():
+    return {
+        "mode": "owner_approved",
+        "approval": {
+            "workflow": "linear-destructive-owner-approval-attest",
+            "model": "linear-destructive-owner-approval-attest",
+            "run_id": "55555555-5555-4555-8555-555555555555",
+            "artifact_version": 7,
+            "checksum": "a" * 64,
+            "intent_hash": "b" * 64,
+            "before_state_hash": "c" * 64,
+            "expires_at": "2026-08-31T23:00:00Z",
+        },
+    }
+
+
 def create_command(key="linear:SIS:create:fixture"):
     raw = command("read_issue", {}, key)
     raw["operation"] = "create_issue"
@@ -1192,16 +1208,21 @@ class ClientTests(unittest.TestCase):
             ),
         )
 
-    def test_client_issue_reparent_emits_only_parent_id(self):
+    def test_client_issue_reparent_emits_only_parent_id_including_null_clear(self):
         client = self.StubClient()
         client.update_issue_fields("issue-uuid", parent_id="parent-uuid")
+        client.update_issue_fields("issue-uuid", parent_id=None)
         self.assertEqual(
             client.calls,
             [
                 (
                     lane.ISSUE_UPDATE,
                     {"id": "issue-uuid", "input": {"parentId": "parent-uuid"}},
-                )
+                ),
+                (
+                    lane.ISSUE_UPDATE,
+                    {"id": "issue-uuid", "input": {"parentId": None}},
+                ),
             ],
         )
 
@@ -2752,6 +2773,159 @@ class ExecutionTests(unittest.TestCase):
                     mode="plan",
                 )
             self.assertEqual(client.writes, [])
+
+    def test_owner_approved_parent_clear_and_replace_use_consumed_gate_and_minimal_payload(self):
+        class Gate:
+            class ApprovalError(RuntimeError):
+                pass
+
+            @staticmethod
+            def validate_policy(policy):
+                return policy
+
+            @staticmethod
+            def require_consumed_owner_approval(authorization, *, expected_intent):
+                if authorization is not consumed:
+                    raise Gate.ApprovalError("apply requires consumed owner approval")
+                if expected_intent["operation"] != "update_issue" or set(expected_intent["change"]) != {"parent_identifier"}:
+                    raise Gate.ApprovalError("wrong intent")
+
+        consumed = object()
+        parent = issue("Todo")
+        parent.update(
+            {
+                "id": "parent-68-uuid",
+                "identifier": "SIS-68",
+                "url": "https://linear.app/example/issue/SIS-68",
+                "parent": None,
+            }
+        )
+        for requested, current_parent, expected_payload in (
+            (None, {"id": "old-parent-uuid", "identifier": "SIS-1"}, {"parent_id": None}),
+            (
+                "SIS-68",
+                {"id": "old-parent-uuid", "identifier": "SIS-1"},
+                {"parent_id": "parent-68-uuid"},
+            ),
+        ):
+            with self.subTest(requested=requested), tempfile.TemporaryDirectory() as tmp:
+                client = FakeClient()
+                client.current["parent"] = current_parent
+                client.related[parent["id"]] = parent
+                unmanaged_before = json.loads(
+                    json.dumps(
+                        {
+                            key: value
+                            for key, value in client.current.items()
+                            if key != "parent"
+                        }
+                    )
+                )
+                raw = command(
+                    "update_issue",
+                    {"parent_identifier": requested},
+                    key=f"linear:SIS-59:owner-parent:{requested}",
+                )
+                raw["policy"] = owner_policy()
+                with mock.patch.object(lane, "_load_approval", return_value=Gate):
+                    planned = lane.execute_command(client, raw, mode="plan")
+                    applied = lane.execute_command(
+                        client,
+                        raw,
+                        mode="apply",
+                        journal_path=Path(tmp) / "journal.json",
+                        owner_approval_authorization=consumed,
+                    )
+                    replay = lane.execute_command(
+                        client,
+                        raw,
+                        mode="apply",
+                        journal_path=Path(tmp) / "replay.json",
+                        owner_approval_authorization=consumed,
+                    )
+                self.assertEqual(planned["plan"], [{"action": "update_issue", "fields": ["parent_identifier"]}])
+                self.assertEqual(applied["after"]["parent_identifier"], requested)
+                self.assertEqual(client.writes, [("fields", "issue-uuid", expected_payload)])
+                self.assertEqual(
+                    {key: value for key, value in client.current.items() if key != "parent"},
+                    unmanaged_before,
+                )
+                self.assertEqual(replay["result"], "no_op")
+
+    def test_owner_approved_parent_apply_rejects_direct_lane_bypass_and_cycle(self):
+        raw = command(
+            "update_issue",
+            {"parent_identifier": None},
+            key="linear:SIS-59:owner-parent:bypass",
+        )
+        raw["policy"] = owner_policy()
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(
+            lane.ContractError, "consumed owner approval"
+        ):
+            lane.execute_command(
+                FakeClient(), raw, mode="apply", journal_path=Path(tmp) / "journal.json"
+            )
+
+        cyclic = FakeClient()
+        cyclic_parent = issue("Todo")
+        cyclic_parent.update(
+            {
+                "id": "parent-68-uuid",
+                "identifier": "SIS-68",
+                "url": "https://linear.app/example/issue/SIS-68",
+                "parent": {"id": "issue-uuid", "identifier": "SIS-59"},
+            }
+        )
+        cyclic.related[cyclic_parent["id"]] = cyclic_parent
+        cycle = command(
+            "update_issue",
+            {"parent_identifier": "SIS-68"},
+            key="linear:SIS-59:owner-parent:cycle",
+        )
+        cycle["policy"] = owner_policy()
+        with self.assertRaisesRegex(lane.ContractError, "would create a cycle"):
+            lane.execute_command(cyclic, cycle, mode="plan")
+        self.assertEqual(cyclic.writes, [])
+
+    def test_owner_approved_clear_fails_exact_read_back_on_parent_drift(self):
+        class Gate:
+            class ApprovalError(RuntimeError):
+                pass
+
+            @staticmethod
+            def validate_policy(policy):
+                return policy
+
+            @staticmethod
+            def require_consumed_owner_approval(_authorization, *, expected_intent):
+                return None
+
+        class DriftingClearClient(FakeClient):
+            def update_issue_fields(self, issue_id, **fields):
+                old_parent = self.current["parent"]
+                super().update_issue_fields(issue_id, **fields)
+                self.current["parent"] = old_parent
+
+        client = DriftingClearClient()
+        client.current["parent"] = {"id": "old-parent-uuid", "identifier": "SIS-1"}
+        raw = command(
+            "update_issue",
+            {"parent_identifier": None},
+            key="linear:SIS-59:owner-parent:readback-drift",
+        )
+        raw["policy"] = owner_policy()
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            lane, "_load_approval", return_value=Gate
+        ), self.assertRaisesRegex(
+            lane.ContractError, r"^update_issue read-back mismatched fields: parent$"
+        ):
+            lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "journal.json",
+                owner_approval_authorization=object(),
+            )
 
     def test_update_issue_rejects_missing_wrong_team_self_and_cycle_parent(self):
         cases = []

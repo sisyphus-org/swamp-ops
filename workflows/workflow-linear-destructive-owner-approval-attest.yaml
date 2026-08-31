@@ -2,7 +2,7 @@ id: 76a31474-cd9a-47ce-b7b5-d5e78415f1f4
 name: linear-destructive-owner-approval-attest
 description: >-
   Suspend for explicit owner approval, then attest only the exact checksum-bound
-  future destructive Linear plan. This workflow never calls or mutates Linear.
+  issue-parent replacement/clear plan. This workflow never calls or mutates Linear.
 tags:
   domain: linear
   safety: approval-gated-attestation-only

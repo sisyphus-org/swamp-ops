@@ -20,7 +20,7 @@ Required envelope:
 }
 ```
 
-`{"mode":"standard"}` remains the default and is byte-for-byte backward compatible. The validator also recognizes the exact fixed-shape `owner_approved` attestation reference documented in [linear-owner-approval.md](linear-owner-approval.md), but that reference does not add an operation to the allowlist. It is therefore foundation for a future separately reviewed destructive slice, not a way to execute one today.
+`{"mode":"standard"}` remains the default and byte-for-byte backward compatible. The exact fixed-shape `owner_approved` attestation reference documented in [linear-owner-approval.md](linear-owner-approval.md) is accepted only for a parent-only `update_issue`. Standard mode may safely attach a top-level issue; replacing or clearing an existing parent requires consumed owner authorization from the common PM gate.
 
 The validator rejects unknown fields, arbitrary GraphQL or MCP method names, URLs, fuzzy identifiers, arrays/bulk targets, unsupported operations and unbounded payloads. After exact issue resolution, the execution lane additionally rejects targets whose resolved team is not `SIS`. `idempotency_key` is 8–200 characters, starts with an alphanumeric character, and thereafter uses only `A-Za-z0-9:._/-`.
 
@@ -47,7 +47,7 @@ The lane accepts only `linear-command.v2` and emits/accepts only `linear-result.
 - `update_initiative`: selects one exact existing initiative by current `name`, then updates a non-empty subset of `new_name`, `description`, and `target_date` with exact read-back and no-op replay.
 - `link_project_to_initiative`: adds one unique exact existing `SIS` project to one unique exact existing initiative. The relation uses a deterministic caller UUIDv4 and exact initiative-project read-back. Unlink is intentionally unavailable. Live schema introspection confirmed `InitiativeCreateInput.id`, nullable `InitiativeCreateInput.targetDate` / `InitiativeUpdateInput.targetDate`, and `InitiativeToProjectCreateInput.id`, `initiativeId`, and `projectId`.
 
-`Done`, `Canceled`, `Duplicate`, arbitrary/raw search, initiative unlink/reparenting/status/owner/labels, archive/delete mutations, bulk and unrestricted structure changes remain unavailable and fail closed. The repository now includes a checksum-bound owner-approval **attestation foundation**, but it does not expose any of those destructive Linear mutations; see [linear-owner-approval.md](linear-owner-approval.md).
+`Done`, `Canceled`, `Duplicate`, arbitrary/raw search, initiative unlink/reparenting/status/owner/labels, archive/delete, relation deletion, bulk and unrestricted structure changes remain unavailable and fail closed. Owner approval enables only exact issue-parent replacement or clear through `update_issue`; see [linear-owner-approval.md](linear-owner-approval.md).
 
 ### Read-only credential boundary
 

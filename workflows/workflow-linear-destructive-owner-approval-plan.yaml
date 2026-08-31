@@ -1,8 +1,8 @@
 id: b0f98532-abaf-47f7-a7b8-6ee9ad6df79d
 name: linear-destructive-owner-approval-plan
 description: >-
-  Produce a deterministic, checksum-bound, read-only plan for one exact future
-  destructive Linear intent and one exact before-state hash. Never calls Linear.
+  Produce a deterministic, checksum-bound, read-only plan for one exact issue
+  parent replacement/clear intent and before-state hash. Never calls Linear.
 tags:
   domain: linear
   safety: read-only-plan

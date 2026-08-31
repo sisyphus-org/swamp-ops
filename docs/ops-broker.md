@@ -27,7 +27,7 @@ A Hermes profile is not an OS sandbox. This broker limits delegated capability, 
 - Every command is a fixed argv list executed with `shell=False`.
 - GitHub repositories, Swamp models, workflows, and data names are exact allowlists in `plugins/ops_broker/policy.json`.
 - Read-only operations require `mode: plan`; repository bootstrap apply and Linear owner-attestation start/approve operations require `mode: apply`.
-- The Linear owner-approval operations accept only one bounded future destructive intent, exact before-state hash, expiry, and immutable plan bindings. They produce an attestation only: Swamp has no Linear credential and performs no Linear mutation.
+- The Linear owner-approval operations accept only one parent-only `update_issue` intent (`parent_identifier` exact `SIS-N` or `null`), exact before-state hash, expiry, and immutable plan bindings. They produce an attestation only: Swamp has no Linear credential and performs no Linear mutation.
 - Repository bootstrap apply still accepts only repository name plus immutable plan run ID/checksum/artifact version and reloads exact artifact provenance before starting its suspended workflow.
 - Approval can resume only an exact run registered in broker audit and serialized by a lock for the policy-bound authenticated owner Telegram session; SWE has no approval operation. Caller booleans, paths, manifest IDs, shell text, and source profiles cannot grant approval.
 - Audit records contain caller, request ID, operation, mode, status, approval state and checksum/run identities, but never command output, stderr, environment, or credentials.

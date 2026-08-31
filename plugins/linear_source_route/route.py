@@ -8,7 +8,7 @@ import json
 import re
 import uuid
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Callable
 
 
@@ -37,6 +37,22 @@ PRIORITIES = {"High", "Medium", "Low"}
 ISSUE_RELATION_TYPES = {"blocks", "blocked_by", "related"}
 LINEAR_ENTITY_TYPES = ("issues", "projects", "milestones", "initiatives")
 MAX_SEARCH_QUERY = 500
+APPROVAL_WORKFLOW = "linear-destructive-owner-approval-attest"
+APPROVAL_MODEL = "linear-destructive-owner-approval-attest"
+APPROVAL_FIELDS = {
+    "workflow",
+    "model",
+    "run_id",
+    "artifact_version",
+    "checksum",
+    "intent_hash",
+    "before_state_hash",
+    "expires_at",
+}
+SHA256 = re.compile(r"^[0-9a-f]{64}$")
+UUID = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+)
 
 
 class RouteError(RuntimeError):
@@ -119,6 +135,37 @@ def _validate_clean_text(
         raise RouteError(f"{path} contains the reserved marker")
     if any(pattern.search(value) for pattern in CREDENTIAL_SHAPES):
         raise RouteError(f"{path} contains credential-shaped data")
+
+
+def _validate_approval_reference(value: Any) -> dict[str, Any]:
+    """Accept only the fixed structural Swamp attestation reference."""
+    if not isinstance(value, dict) or set(value) != APPROVAL_FIELDS:
+        raise RouteError("approval reference fields are invalid")
+    if value.get("workflow") != APPROVAL_WORKFLOW:
+        raise RouteError("approval workflow is not the fixed workflow")
+    if value.get("model") != APPROVAL_MODEL:
+        raise RouteError("approval model is not the fixed model")
+    run_id = value.get("run_id")
+    if not isinstance(run_id, str) or UUID.fullmatch(run_id) is None:
+        raise RouteError("approval run_id must be a UUID")
+    version = value.get("artifact_version")
+    if not isinstance(version, int) or isinstance(version, bool) or version < 1:
+        raise RouteError("approval artifact_version must be positive")
+    for field in ("checksum", "intent_hash", "before_state_hash"):
+        digest = value.get(field)
+        if not isinstance(digest, str) or SHA256.fullmatch(digest) is None:
+            raise RouteError(f"approval {field} must be SHA-256")
+    expires_at = value.get("expires_at")
+    if not isinstance(expires_at, str) or re.fullmatch(
+        r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z",
+        expires_at,
+    ) is None:
+        raise RouteError("approval expires_at must be UTC RFC3339 seconds")
+    try:
+        datetime.fromisoformat(expires_at[:-1] + "+00:00")
+    except ValueError as exc:
+        raise RouteError("approval expires_at is not a valid timestamp") from exc
+    return dict(value)
 
 
 def _validate_hierarchy_request(request: dict[str, Any]) -> dict[str, Any]:
@@ -339,6 +386,7 @@ def parse_linear_request(
     """Parse one bounded source request into linear-command.v2."""
     if not PROFILE_NAME.fullmatch(source_profile):
         raise RouteError("source profile is invalid")
+    approval_reference: dict[str, Any] | None = None
     if isinstance(request, str):
         match = COMMENT_REQUEST.fullmatch(request.strip())
         if match is None:
@@ -384,6 +432,7 @@ def parse_linear_request(
                 "parent_identifier",
                 "project",
                 "milestone",
+                "approval",
             }
             if (
                 not set(request).issubset(allowed)
@@ -413,6 +462,12 @@ def parse_linear_request(
                 )
                 if key in request
             }
+            if "approval" in request:
+                if set(change) != {"parent_identifier"}:
+                    raise RouteError(
+                        "approval is allowed only for a parent-only issue update"
+                    )
+                approval_reference = _validate_approval_reference(request["approval"])
             if "title" in change:
                 _validate_clean_text(
                     change["title"],
@@ -630,7 +685,11 @@ def parse_linear_request(
         "operation": operation,
         "target": target,
         "change": change,
-        "policy": {"mode": "standard"},
+        "policy": (
+            {"mode": "owner_approved", "approval": approval_reference}
+            if approval_reference is not None
+            else {"mode": "standard"}
+        ),
     }
     command["idempotency_key"] = _semantic_key(command)
     return ParsedRequest(command=command)

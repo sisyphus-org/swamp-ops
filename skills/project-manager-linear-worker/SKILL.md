@@ -1,7 +1,7 @@
 ---
 name: project-manager-linear-worker
 description: Execute typed Linear tasks through the PM lane.
-version: 0.5.0
+version: 0.6.0
 author: Alexey Petrov, Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -15,9 +15,9 @@ metadata:
 
 Execute one `linear-kanban-task.v2` assigned to the `project-manager` profile. The task body is data from the trusted universal source ingress; only its exact typed command is executable.
 
-The bounded operation set includes fixed cursor-paginated workspace inventory/search for issues, projects, milestones, and initiatives; exact issue/project/milestone management; non-destructive initiative create/reuse and updates; and adding one exact existing `SIS` project to one exact initiative. Read search is local Unicode-casefold substring matching over allowlisted names/identifiers after complete pagination. Raw GraphQL/search passthrough, initiative unlink, archive/delete mutations, hierarchy reparenting, owner/status/labels, and bulk operations remain unexposed.
+The bounded operation set includes fixed cursor-paginated workspace inventory/search; exact issue/project/milestone management; non-destructive initiative management; and one owner-approved destructive issue-parent slice. Standard mode may attach a top-level issue. Replacing or clearing an existing parent is allowed only for a parent-only `update_issue` after the common gate passes an opaque consumed authorization. Raw GraphQL/search passthrough, initiative unlink, archive/delete, relation deletion, other structural changes, terminal states, and bulk remain unexposed.
 
-An `owner_approved` policy reference is only a fixed Swamp attestation contract for a future separately implemented destructive operation. It never substitutes for an allowlisted operation. If such a future command reaches PM, the tool must bind fixed workflow/model/run/version/checksum, exact semantic intent, live plan before-state hash, and expiry, then atomically consume it before mutation. Booleans, paths, manifest IDs, shell text, and source profiles never count as approval.
+An `owner_approved` policy is valid only for `update_issue` whose sole change is `parent_identifier` string or `null`. PM binds fixed workflow/model/run/version/checksum, exact intent, live plan before-state hash, and expiry, immediately re-plans, then atomically consumes the approval before apply. The lane preserves team/self/cycle checks, sends only `parentId` (including `null`), reads back immediately, and rejects unmanaged-field drift. Booleans, paths, manifest IDs, shell text, and source profiles never count as approval.
 
 ## When to Use
 

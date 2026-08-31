@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Build and attest exact, expiring owner approvals for future Linear destruction.
+"""Build and attest exact, expiring approvals for issue-parent replacement/clear.
 
 This module never imports a Linear client and never mutates Linear.  It produces
 checksum-bound Swamp artifacts which the credential-holding Project Manager can
-independently verify before a future destructive mutation is implemented.
+independently verify before the bounded destructive parent mutation.
 """
 
 from __future__ import annotations
@@ -31,9 +31,6 @@ UUID = re.compile(
 )
 ENCODED_INTENT = re.compile(r"^[A-Za-z0-9_-]{16,4096}$")
 MAX_APPROVAL_LIFETIME = timedelta(hours=24)
-FUTURE_DESTRUCTIVE_OPERATIONS = frozenset(
-    {"archive_issue", "delete_issue", "reparent_issue", "delete_issue_relation"}
-)
 
 
 class ContractError(RuntimeError):
@@ -88,8 +85,8 @@ def validate_intent(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != {"operation", "target", "change"}:
         raise ContractError("intent must contain exactly operation, target and change")
     operation = value.get("operation")
-    if operation not in FUTURE_DESTRUCTIVE_OPERATIONS:
-        raise ContractError("intent operation is not in the future destructive allowlist")
+    if operation != "update_issue":
+        raise ContractError("intent operation must be update_issue")
     target = value.get("target")
     if (
         not isinstance(target, dict)
@@ -102,34 +99,15 @@ def validate_intent(value: Any) -> dict[str, Any]:
     change = value.get("change")
     if not isinstance(change, dict):
         raise ContractError("intent change must be an object")
-    if operation in {"archive_issue", "delete_issue"}:
-        if change != {}:
-            raise ContractError(f"{operation} change must be empty")
-    elif operation == "reparent_issue":
-        if set(change) != {"parent_identifier"}:
-            raise ContractError("reparent_issue requires exactly parent_identifier")
-        parent = change.get("parent_identifier")
-        if parent is not None and (
-            not isinstance(parent, str) or ISSUE_IDENTIFIER.fullmatch(parent) is None
-        ):
-            raise ContractError("reparent_issue parent_identifier must be exact SIS-N or null")
-        if parent == target["identifier"]:
-            raise ContractError("reparent_issue cannot parent an issue to itself")
-    else:
-        if set(change) != {"related_identifier", "relation_type"}:
-            raise ContractError(
-                "delete_issue_relation requires related_identifier and relation_type"
-            )
-        related = change.get("related_identifier")
-        relation_type = change.get("relation_type")
-        if (
-            not isinstance(related, str)
-            or ISSUE_IDENTIFIER.fullmatch(related) is None
-            or related == target["identifier"]
-        ):
-            raise ContractError("related_identifier must be another exact SIS-N issue")
-        if relation_type not in {"blocks", "blocked_by", "related", "duplicate"}:
-            raise ContractError("relation_type is not in the bounded allowlist")
+    if set(change) != {"parent_identifier"}:
+        raise ContractError("update_issue requires exactly parent_identifier")
+    parent = change.get("parent_identifier")
+    if parent is not None and (
+        not isinstance(parent, str) or ISSUE_IDENTIFIER.fullmatch(parent) is None
+    ):
+        raise ContractError("update_issue parent_identifier must be exact SIS-N or null")
+    if parent == target["identifier"]:
+        raise ContractError("update_issue cannot parent an issue to itself")
     return value
 
 

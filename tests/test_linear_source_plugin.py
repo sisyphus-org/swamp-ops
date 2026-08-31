@@ -521,7 +521,6 @@ class AdapterTests(unittest.TestCase):
             "initiative_status",
             "initiative_owner",
             "initiative_labels",
-            "approval",
             "bulk",
             "search_initiative",
         ):
@@ -604,6 +603,7 @@ class PluginTests(unittest.TestCase):
                 "milestone",
                 "issue",
                 "sub_issues",
+                "approval",
             },
         )
         self.assertFalse(parameters["additionalProperties"])
@@ -658,6 +658,17 @@ class PluginTests(unittest.TestCase):
                 ]
             },
         )
+        approval_schema = parameters["properties"]["approval"]
+        self.assertFalse(approval_schema["additionalProperties"])
+        self.assertEqual(
+            set(approval_schema["required"]),
+            {
+                "workflow", "model", "run_id", "artifact_version", "checksum",
+                "intent_hash", "before_state_hash", "expires_at",
+            },
+        )
+        self.assertNotIn("policy", parameters["properties"])
+        self.assertNotIn("approved", parameters["properties"])
         create_branch = next(
             branch
             for branch in parameters["oneOf"]

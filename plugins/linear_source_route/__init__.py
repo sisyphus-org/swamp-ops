@@ -248,6 +248,42 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                     {"type": "null"},
                 ]
             },
+            "approval": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "workflow": {
+                        "type": "string",
+                        "const": "linear-destructive-owner-approval-attest",
+                    },
+                    "model": {
+                        "type": "string",
+                        "const": "linear-destructive-owner-approval-attest",
+                    },
+                    "run_id": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                    },
+                    "artifact_version": {"type": "integer", "minimum": 1},
+                    "checksum": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                    "intent_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                    "before_state_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                    "expires_at": {
+                        "type": "string",
+                        "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+                    },
+                },
+                "required": [
+                    "workflow",
+                    "model",
+                    "run_id",
+                    "artifact_version",
+                    "checksum",
+                    "intent_hash",
+                    "before_state_hash",
+                    "expires_at",
+                ],
+            },
             "project": {
                 "oneOf": [
                     {
@@ -1338,6 +1374,7 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
                     "parent_identifier",
                     "project",
                     "milestone",
+                    "approval",
                 }
             )
         ):

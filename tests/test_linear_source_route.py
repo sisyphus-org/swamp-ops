@@ -23,6 +23,21 @@ UUID_VALUES = [
 ]
 
 
+def approval_reference(**overrides):
+    value = {
+        "workflow": "linear-destructive-owner-approval-attest",
+        "model": "linear-destructive-owner-approval-attest",
+        "run_id": "55555555-5555-4555-8555-555555555555",
+        "artifact_version": 7,
+        "checksum": "a" * 64,
+        "intent_hash": "b" * 64,
+        "before_state_hash": "c" * 64,
+        "expires_at": "2026-08-31T23:00:00Z",
+    }
+    value.update(overrides)
+    return value
+
+
 def uuid_factory():
     values = iter(UUID_VALUES)
     return lambda: next(values)
@@ -537,6 +552,55 @@ class ParseTests(unittest.TestCase):
         )
         self.assertEqual(attached.command["change"], {"parent_identifier": "SIS-68"})
         self.assertEqual(clear.command["change"], {"parent_identifier": None})
+
+    def test_parent_only_owner_approval_emits_exact_policy_and_changes_replay_identity(self):
+        standard = route.parse_linear_request(
+            {"operation": "update_issue", "identifier": "SIS-94", "parent_identifier": None},
+            source_profile="default",
+            uuid_factory=uuid_factory(),
+        ).command
+        reference = approval_reference()
+        request = {
+            "operation": "update_issue",
+            "identifier": "SIS-94",
+            "parent_identifier": None,
+            "approval": reference,
+        }
+        approved = route.parse_linear_request(
+            request, source_profile="default", uuid_factory=uuid_factory()
+        ).command
+        replay = route.parse_linear_request(
+            request, source_profile="default", uuid_factory=uuid_factory()
+        ).command
+        self.assertEqual(
+            approved["policy"],
+            {"mode": "owner_approved", "approval": reference},
+        )
+        self.assertEqual(approved["change"], {"parent_identifier": None})
+        self.assertNotEqual(standard["idempotency_key"], approved["idempotency_key"])
+        self.assertEqual(approved["idempotency_key"], replay["idempotency_key"])
+
+    def test_source_rejects_forged_or_unbounded_approval_surfaces(self):
+        base = {
+            "operation": "update_issue",
+            "identifier": "SIS-94",
+            "parent_identifier": "SIS-68",
+        }
+        cases = (
+            {**base, "approval": True},
+            {**base, "approved": True},
+            {**base, "policy": {"mode": "owner_approved"}},
+            {**base, "approval": {**approval_reference(), "path": "/tmp/a"}},
+            {**base, "approval": {**approval_reference(), "manifest": "raw"}},
+            {**base, "approval": {**approval_reference(), "shell": "env"}},
+            {**base, "approval": approval_reference(workflow="attacker")},
+            {**base, "description": "mixed", "approval": approval_reference()},
+        )
+        for value in cases:
+            with self.subTest(value=value), self.assertRaises(route.RouteError):
+                route.parse_linear_request(
+                    value, source_profile="default", uuid_factory=uuid_factory()
+                )
 
     def test_structured_issue_update_rejects_malformed_parent_identifier(self):
         for parent_identifier in ("sis-68", "SIS-0", "SIS-68 ", 68, {"id": "internal"}):
