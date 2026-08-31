@@ -28,7 +28,7 @@ The plugin:
 - derives the authoritative source profile from Hermes' resolved runtime home;
 - accepts any syntactically valid user-facing profile name except `broker` and `project-manager`;
 - requires Telegram DM context, exact numeric chat/user/thread IDs, and the persisted exact Hermes session ID;
-- supports bounded comment, safe workflow-state change, issue creation under an exact `SIS-N` parent, create-only hierarchy convergence, standalone top-level creation in an exact existing project/milestone, and one top-level issue plus 1–10 explicit sub-issues without caller-controlled entity IDs;
+- supports bounded comment, safe workflow-state change, issue-number targeting inside the single `SIS` team, deterministic description link removal, issue creation under an exact `SIS-N` parent, create-only hierarchy convergence, standalone top-level creation in an exact existing project/milestone, and one top-level issue plus 1–10 explicit sub-issues without caller-controlled entity IDs;
 - derives a global mutation key from only `operation`, `target`, `change`, and `policy`; source profile/session and command/correlation IDs are excluded;
 - derives a separate delivery key from that mutation key plus the exact source profile/platform/chat/user/thread/session;
 - atomically gets or creates one PM-assigned Kanban task by delivery key inside one Kanban write transaction;
@@ -46,7 +46,7 @@ Supported operations:
 
 - `read_issue`;
 - `change_state` to the safe non-terminal allowlist;
-- `update_issue` for an explicit non-empty subset of description, safe state, and bounded priority on one exact `SIS-N`;
+- `update_issue` for an explicit non-empty subset of description, deterministic `remove_links`, safe state, and bounded priority on one exact `SIS-N`; source shorthand is carried as a positive `issue_number` and canonicalized to the fixed `SIS` team before persistence;
 - `add_comment` with deterministic-ID replay protection and a clean user-authored body;
 - `create_issue` in the `SIS` team under one exact `SIS-N` parent, with bounded title/description, safe state, and High/Medium/Low priority.
 - `converge_hierarchy` for exactly one `SIS` project → milestone → top-level issue; it performs complete bounded scoped preflight, safe unique exact-name reuse for project/milestone, deterministic-ID-only issue handling, exact scoped-list read-back, and crash/concurrent replay convergence under the existing hash-only journal lock.

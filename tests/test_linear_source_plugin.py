@@ -436,9 +436,11 @@ class PluginTests(unittest.TestCase):
                 "request",
                 "operation",
                 "identifier",
+                "issue_number",
                 "state",
                 "title",
                 "description",
+                "description_transform",
                 "parent_identifier",
                 "priority",
                 "project",
@@ -449,6 +451,10 @@ class PluginTests(unittest.TestCase):
         )
         self.assertFalse(parameters["additionalProperties"])
         self.assertEqual(len(parameters["oneOf"]), 7)
+        self.assertEqual(
+            parameters["properties"]["description_transform"]["enum"],
+            ["remove_links"],
+        )
         self.assertEqual(
             parameters["properties"]["operation"]["enum"],
             [

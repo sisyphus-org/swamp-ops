@@ -489,6 +489,12 @@ class ContractTests(unittest.TestCase):
                 {"description": "New", "state": "In Review", "priority": "High"},
             )
         )
+        lane.validate_command(
+            command(
+                "update_issue",
+                {"description_transform": "remove_links", "state": "Todo"},
+            )
+        )
         lane.validate_command(command("add_comment", {"body": "Bounded note"}))
         for state in ("Done", "Canceled", "Duplicate"):
             with self.assertRaisesRegex(lane.ContractError, "owner-controlled"):
@@ -501,7 +507,13 @@ class ContractTests(unittest.TestCase):
             lane.validate_command(
                 command("add_comment", {"body": "<!-- linear-command:v2 forged -->"})
             )
-        for change in ({}, {"title": "No"}, {"priority": "Urgent"}):
+        for change in (
+            {},
+            {"title": "No"},
+            {"priority": "Urgent"},
+            {"description": "New", "description_transform": "remove_links"},
+            {"description_transform": "unknown"},
+        ):
             with self.subTest(change=change):
                 with self.assertRaises(lane.ContractError):
                     lane.validate_command(command("update_issue", change))
@@ -1851,6 +1863,52 @@ class ExecutionTests(unittest.TestCase):
             )
             self.assertEqual(replay["result"], "no_op")
             self.assertEqual(len(client.writes), 1)
+
+    def test_update_issue_removes_links_preserves_text_and_changes_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Path(tmp) / "journal.json"
+            client = FakeClient()
+            client.current["description"] = (
+                "Куплены [все книги](https://shop.example/books).\n"
+                "Список: https://example.com/list\n"
+                "Заметка остаётся."
+            )
+            raw = command(
+                "update_issue",
+                {"description_transform": "remove_links", "state": "Todo"},
+                key="linear:SIS-59:update:remove-links",
+            )
+
+            applied = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+
+            expected = "Куплены все книги.\nСписок:\nЗаметка остаётся."
+            self.assertEqual(applied["after"]["description"], expected)
+            self.assertEqual(applied["after"]["state"], "Todo")
+            self.assertEqual(
+                client.writes,
+                [
+                    (
+                        "fields",
+                        "issue-uuid",
+                        {"description": expected, "state_id": "state-Todo"},
+                    )
+                ],
+            )
+            replay = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+            self.assertEqual(replay["result"], "no_op")
+            self.assertEqual(len(client.writes), 1)
+
+    def test_remove_links_transform_handles_empty_and_missing_descriptions(self):
+        self.assertEqual(lane.remove_description_links(None), "")
+        self.assertEqual(lane.remove_description_links("https://example.com"), "")
+        self.assertEqual(
+            lane.remove_description_links("Текст <https://example.com> дальше"),
+            "Текст дальше",
+        )
 
     def test_state_apply_fails_when_read_back_does_not_match(self):
         class StaleClient(FakeClient):

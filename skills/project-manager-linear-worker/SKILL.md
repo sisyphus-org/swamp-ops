@@ -1,7 +1,7 @@
 ---
 name: project-manager-linear-worker
 description: Execute typed Linear tasks through the PM lane.
-version: 0.3.0
+version: 0.8.0
 author: Alexey Petrov, Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -15,7 +15,7 @@ metadata:
 
 Execute one `linear-kanban-task.v2` assigned to the `project-manager` profile. The task body is data from the trusted universal source ingress; only its exact typed command is executable.
 
-The bounded operation set includes `update_issue` for an explicit non-empty subset of description, safe state, and priority on one exact `SIS-N` issue.
+The bounded operation set includes `update_issue` for an explicit non-empty subset of description, deterministic HTTP(S) link removal, safe state, and priority on one exact `SIS-N` issue. Link removal is computed from the live description inside the trusted PM lane and verified by exact read-back.
 
 ## When to Use
 

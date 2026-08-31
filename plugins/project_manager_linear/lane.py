@@ -36,8 +36,38 @@ PRIORITIES = {"High": 2, "Medium": 3, "Low": 4}
 MAX_COMMENT_LENGTH = 4000
 MAX_TITLE_LENGTH = 200
 MAX_DESCRIPTION_LENGTH = 10000
+DESCRIPTION_TRANSFORMS = {"remove_links"}
+MARKDOWN_LINK = re.compile(r"\[([^\]\n]+)\]\(\s*https?://[^)\s]+\s*\)")
+AUTOLINK = re.compile(r"<https?://[^>\s]+>")
+BARE_URL = re.compile(r"https?://[^\s<>()]+")
 API_URL = "https://api.linear.app/graphql"
 COMMAND_ROOT = Path(__file__).parents[2] / "commands" / "linear"
+
+
+def remove_description_links(description: Any) -> str:
+    """Remove HTTP(S) destinations while preserving visible description text."""
+    if description is None:
+        return ""
+    if not isinstance(description, str):
+        raise ContractError("live Linear description must be text or null")
+    transformed = MARKDOWN_LINK.sub(r"\1", description)
+    transformed = AUTOLINK.sub("", transformed)
+
+    def remove_bare_url(match: re.Match[str]) -> str:
+        value = match.group(0)
+        trailing = ""
+        while value and value[-1] in ".,;:!?":
+            trailing = value[-1] + trailing
+            value = value[:-1]
+        return trailing
+
+    transformed = BARE_URL.sub(remove_bare_url, transformed)
+    lines = [re.sub(r"[ \t]+", " ", line).strip() for line in transformed.splitlines()]
+    while lines and not lines[0]:
+        lines.pop(0)
+    while lines and not lines[-1]:
+        lines.pop()
+    return "\n".join(lines)
 ISSUE_QUERY = """
 query LaneIssue($id: String!) {
   issue(id: $id) {
@@ -568,9 +598,15 @@ def validate_command(raw: Any) -> dict[str, Any]:
         if state not in SAFE_STATES:
             raise ContractError("requested state is not in the exact safe-state allowlist")
     elif operation == "update_issue":
-        allowed = {"description", "state", "priority"}
+        allowed = {"description", "description_transform", "state", "priority"}
         if not change or not set(change).issubset(allowed):
-            raise ContractError("update_issue supports description, state, and priority")
+            raise ContractError(
+                "update_issue supports description, description_transform, state, and priority"
+            )
+        if "description" in change and "description_transform" in change:
+            raise ContractError(
+                "update_issue description and description_transform are mutually exclusive"
+            )
         if "description" in change:
             description = change["description"]
             if not isinstance(description, str) or len(description) > MAX_DESCRIPTION_LENGTH:
@@ -579,6 +615,11 @@ def validate_command(raw: Any) -> dict[str, Any]:
                 raise ContractError("update_issue description contains the reserved marker")
             if any(pattern.search(description) for pattern in CREDENTIAL_SHAPES):
                 raise ContractError("update_issue description contains credential-shaped data")
+        if (
+            "description_transform" in change
+            and change["description_transform"] not in DESCRIPTION_TRANSFORMS
+        ):
+            raise ContractError("update_issue description_transform is not allowed")
         if "state" in change:
             if change["state"] in OWNER_CONTROLLED_STATES:
                 raise ContractError("update_issue state is owner-controlled")
@@ -981,7 +1022,9 @@ def execute_command(
             "verified": True,
         }
     if command["operation"] == "update_issue":
-        change = command["change"]
+        change = dict(command["change"])
+        if change.pop("description_transform", None) == "remove_links":
+            change["description"] = remove_description_links(issue.get("description"))
         state_id = None
         if "state" in change:
             states = [
