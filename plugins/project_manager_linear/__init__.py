@@ -195,6 +195,8 @@ def human_summary(result: dict[str, Any]) -> str:
         lead = "Иерархия Linear готова."
     elif operation == "change_state":
         lead = "Статус Linear изменён."
+    elif operation == "update_issue":
+        lead = "Поля задачи Linear обновлены."
     else:
         lead = "Комментарий добавлен."
     return f"{lead}\n{url}" if url else lead

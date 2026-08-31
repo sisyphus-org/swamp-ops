@@ -19,6 +19,7 @@ Use the typed Project Manager lane for every Linear creation or mutation. The so
 
 - Add one bounded comment to an exact uppercase `SIS-N` issue.
 - Change one exact `SIS-N` issue to `Backlog`, `Todo`, `Research`, `In Progress`, or `In Review`.
+- Update one exact `SIS-N` issue with any non-empty subset of description, safe state, and High/Medium/Low priority.
 - Create one bounded issue in the `SIS` team under one exact uppercase `SIS-N` parent, with bounded title/description, safe state, and High/Medium/Low priority.
 - Converge one bounded create-only `SIS` hierarchy: one exact project, one milestone, and one top-level issue, with optional descriptions and a safe issue state.
 - Create one standalone top-level issue in one exact existing project/milestone with explicit description, safe state, and priority.
@@ -32,6 +33,7 @@ Do not use this path for fuzzy/missing targets, bulk operations, terminal states
 2. Call `linear_source_request` once with the matching bounded shape:
    - comment: `request=<exact supported comment text>`;
    - state: `operation=change_state`, exact `identifier`, exact safe `state`;
+   - issue fields: `operation=update_issue`, exact `identifier`, and at least one of exact `description`, safe `state`, or bounded `priority`;
    - create: `operation=create_issue`, bounded `title`, `description`, exact `parent_identifier`, safe `state`, and bounded `priority`.
    - hierarchy: `operation=converge_hierarchy` with exact `project`, `milestone`, and `issue` objects; names/titles are required, descriptions and a safe issue state are optional, and IDs are never supplied by the source.
    - standalone: `operation=create_standalone_issue` with exact `project`/`milestone` names and optional supplied descriptions plus an `issue` containing exact `title`, `description`, safe `state`, and `priority`.

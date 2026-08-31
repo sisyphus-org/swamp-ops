@@ -33,6 +33,14 @@ PUBLIC_MISMATCH_FIELDS = (
 )
 PUBLIC_MISMATCH_LIST = rf"{PUBLIC_MISMATCH_FIELDS}(?:, {PUBLIC_MISMATCH_FIELDS})*"
 PUBLIC_BLOCK_REASON_PATTERNS = {
+    "update_issue": (
+        re.compile(r"^exact Linear issue not found: SIS-[1-9][0-9]*$"),
+        re.compile(r"^exact target is not in the SIS team: SIS-[1-9][0-9]*$"),
+        re.compile(
+            r"^exact workflow state not found: (?:Backlog|Todo|Research|In Progress|In Review)$"
+        ),
+        re.compile(rf"^update_issue read-back mismatched fields: {PUBLIC_MISMATCH_LIST}$"),
+    ),
     "create_issue": (
         re.compile(rf"^create_issue read-back mismatched fields: {PUBLIC_MISMATCH_LIST}$"),
         re.compile(r"^create_issue idempotency key conflicts with another request$"),
@@ -91,7 +99,7 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
     "description": (
         "Route one bounded Linear request from an allowed user-facing profile "
         "through the project-manager Kanban lane. Accepts an exact comment text, "
-        "a structured state/child request, one bounded hierarchy request, one "
+        "a structured state/field/child request, one bounded hierarchy request, one "
         "standalone issue in an exact existing scope, or one top-level issue "
         "plus 1-10 explicit sub-issues. The calling profile never mutates Linear "
         "directly; the tool creates or replays one audited wake-only task and "
@@ -111,6 +119,7 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                 "type": "string",
                 "enum": [
                     "change_state",
+                    "update_issue",
                     "create_issue",
                     "converge_hierarchy",
                     "create_standalone_issue",
@@ -195,6 +204,15 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
             {
                 "required": ["operation", "identifier", "state"],
                 "properties": {"operation": {"const": "change_state"}},
+            },
+            {
+                "required": ["operation", "identifier"],
+                "anyOf": [
+                    {"required": ["description"]},
+                    {"required": ["state"]},
+                    {"required": ["priority"]},
+                ],
+                "properties": {"operation": {"const": "update_issue"}},
             },
             {
                 "required": [
@@ -531,11 +549,14 @@ def _public_target(result: dict[str, Any]) -> tuple[dict[str, Any], dict[str, An
     public_target = _public_issue_target(result.get("target"))
     if not isinstance(after, dict):
         raise RouteError("verified result lacks public completion facts")
-    if operation == "change_state":
+    if operation in {"change_state", "update_issue"}:
         state = after.get("state")
-        if state not in PUBLIC_STATES:
+        if operation == "change_state" and state not in PUBLIC_STATES:
             raise RouteError("verified state result lacks a public state")
-        public_target["state"] = state
+        if state is not None:
+            if state not in PUBLIC_STATES:
+                raise RouteError("verified issue update has an invalid public state")
+            public_target["state"] = state
     elif operation == "create_issue":
         if (
             after.get("identifier") != public_target["identifier"]
@@ -613,6 +634,15 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
             if not isinstance(request, str):
                 raise RouteError("request must be text")
         elif set(args) == {"operation", "identifier", "state"}:
+            request = dict(args)
+        elif (
+            args.get("operation") == "update_issue"
+            and "identifier" in args
+            and bool(set(args) & {"description", "state", "priority"})
+            and set(args).issubset(
+                {"operation", "identifier", "description", "state", "priority"}
+            )
+        ):
             request = dict(args)
         elif set(args) == {
             "operation",

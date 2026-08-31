@@ -13,7 +13,7 @@ Required envelope:
   "correlation_id": "UUIDv4",
   "idempotency_key": "linear:SIS-59:read:2026-08-28",
   "source_profile": "swe",
-  "operation": "read_issue | change_state | add_comment | create_issue | converge_hierarchy | create_standalone_issue | converge_issue_tree",
+  "operation": "read_issue | change_state | update_issue | add_comment | create_issue | converge_hierarchy | create_standalone_issue | converge_issue_tree",
   "target": {"type": "issue", "identifier": "SIS-N"},
   "change": {},
   "policy": {"mode": "standard"}
@@ -30,6 +30,7 @@ The lane accepts only `linear-command.v2` and emits/accepts only `linear-result.
 
 - `read_issue`: `change` must be empty.
 - `change_state`: `change` must contain only `state`; exact allowlist is `Backlog`, `Todo`, `Research`, `In Progress`, `In Review`.
+- `update_issue`: `change` is a non-empty subset of `description`, safe `state`, and `High|Medium|Low` priority for one exact `SIS-N`; apply uses exact read-back and literal replay is a verified no-op.
 - `add_comment`: `change` must contain only `body`, 1–4000 characters. The public comment body remains exactly this user-authored text; reserved internal marker text cannot be supplied by the caller.
 - `create_issue`: `target` is exactly `{"type":"team","identifier":"SIS"}` and `change` contains bounded `title`, `description`, exact `parent_identifier`, safe `state`, and `High|Medium|Low` priority. The public issue description remains exactly user-authored.
 - `converge_hierarchy`: `target` is exactly `{"type":"team","identifier":"SIS"}` and `change` contains exactly one `project`, one `milestone`, and one top-level `issue`, with no entity UUID fields. Names/titles are 1–200 characters; optional descriptions are at most 10,000 characters; optional issue state uses the safe-state allowlist. The trusted PM lane derives candidate UUIDv4 IDs internally from the semantic idempotency key with separate project/milestone/issue domain strings. Team identity is the unique exact Linear key `SIS`; its mutable display name is not an identity field. Project and milestone resolution first checks candidate IDs, then may reuse one unambiguous exact-name entity only after exact `SIS` team-ID scope/project and supplied-description verification. Issue resolution remains deterministic-ID-only; a same-title issue with another ID fails closed. Missing entities are created, supplied-field drift fails closed, and omitted optional fields are neither sent nor compared.

@@ -127,6 +127,8 @@ def issue(state="In Progress"):
         "url": "https://linear.app/example/issue/SIS-59",
         "state": {"id": f"state-{state}", "name": state, "type": "started"},
         "team": {"id": "team-uuid", "key": "SIS"},
+        "description": "Old description",
+        "priority": lane.PRIORITIES["Low"],
     }
 
 
@@ -166,6 +168,20 @@ class FakeClient:
         self.writes.append(("state", issue_id, state_id))
         name = state_id.removeprefix("state-")
         self.current["state"] = {"id": state_id, "name": name, "type": "started"}
+
+    def update_issue_fields(self, issue_id, **fields):
+        self.writes.append(("fields", issue_id, fields))
+        if "description" in fields:
+            self.current["description"] = fields["description"]
+        if "priority" in fields:
+            self.current["priority"] = fields["priority"]
+        if "state_id" in fields:
+            state_id = fields["state_id"]
+            self.current["state"] = {
+                "id": state_id,
+                "name": state_id.removeprefix("state-"),
+                "type": "started",
+            }
 
     def list_comments(self, issue_id):
         return list(self.comments)
@@ -466,6 +482,13 @@ class ContractTests(unittest.TestCase):
 
     def test_operation_change_contracts_and_policy_fail_closed(self):
         lane.validate_command(command("change_state", {"state": "In Review"}))
+        lane.validate_command(command("update_issue", {"description": "New"}))
+        lane.validate_command(
+            command(
+                "update_issue",
+                {"description": "New", "state": "In Review", "priority": "High"},
+            )
+        )
         lane.validate_command(command("add_comment", {"body": "Bounded note"}))
         for state in ("Done", "Canceled", "Duplicate"):
             with self.assertRaisesRegex(lane.ContractError, "owner-controlled"):
@@ -478,6 +501,10 @@ class ContractTests(unittest.TestCase):
             lane.validate_command(
                 command("add_comment", {"body": "<!-- linear-command:v2 forged -->"})
             )
+        for change in ({}, {"title": "No"}, {"priority": "Urgent"}):
+            with self.subTest(change=change):
+                with self.assertRaises(lane.ContractError):
+                    lane.validate_command(command("update_issue", change))
 
     def test_comment_contract_rejects_credential_shaped_bodies(self):
         bodies = (
@@ -1781,6 +1808,46 @@ class ExecutionTests(unittest.TestCase):
                 command("change_state", {"state": "In Review"}),
                 mode="apply",
                 journal_path=journal,
+            )
+            self.assertEqual(replay["result"], "no_op")
+            self.assertEqual(len(client.writes), 1)
+
+    def test_update_issue_applies_exact_fields_and_literal_replay_is_noop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Path(tmp) / "journal.json"
+            client = FakeClient()
+            raw = command(
+                "update_issue",
+                {
+                    "description": "Школа на Яр валу. Сравнить расписание и пробный урок.",
+                    "state": "In Review",
+                    "priority": "High",
+                },
+                key="linear:SIS-59:update:fixture",
+            )
+            applied = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+            self.assertEqual(applied["result"], "applied")
+            self.assertEqual(applied["after"]["description"], raw["change"]["description"])
+            self.assertEqual(applied["after"]["state"], "In Review")
+            self.assertEqual(applied["after"]["priority"], "High")
+            self.assertEqual(
+                client.writes,
+                [
+                    (
+                        "fields",
+                        "issue-uuid",
+                        {
+                            "description": raw["change"]["description"],
+                            "state_id": "state-In Review",
+                            "priority": lane.PRIORITIES["High"],
+                        },
+                    )
+                ],
+            )
+            replay = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
             )
             self.assertEqual(replay["result"], "no_op")
             self.assertEqual(len(client.writes), 1)
