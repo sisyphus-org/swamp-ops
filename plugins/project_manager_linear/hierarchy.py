@@ -15,6 +15,7 @@ from typing import Any, NoReturn
 MAX_NAME = 200
 MAX_DESCRIPTION = 10_000
 MAX_COMMAND_BYTES = 24_576
+SIS_TEAM_NAME = "Sisyphus"
 
 
 def _load_validation() -> Any:
@@ -164,7 +165,7 @@ def preflight(client: Any, change: dict[str, Any], error_cls: type[Exception]) -
     teams = _bounded_nodes(client.list_teams(), "workspace teams", error_cls)
     _require_id_name(teams, "key", "workspace teams", error_cls)
     sis = _one([item for item in teams if item["key"] == "SIS"], "team SIS", error_cls)
-    if sis is None:
+    if sis is None or sis.get("name") != SIS_TEAM_NAME:
         _fail(error_cls, "exact SIS team was not found")
 
     projects = _bounded_nodes(
@@ -172,16 +173,21 @@ def preflight(client: Any, change: dict[str, Any], error_cls: type[Exception]) -
     )
     _require_id_name(projects, "name", "SIS team projects", error_cls)
     project_spec = change["project"]
-    project = _one(
+    project_by_id = _one(
         [item for item in projects if item["id"] == project_spec["id"]],
         "project id",
         error_cls,
     )
-    name_collision = [
-        item for item in projects if item["name"] == project_spec["name"] and item["id"] != project_spec["id"]
-    ]
-    if name_collision:
-        _fail(error_cls, "project name already exists with a different deterministic id")
+    named_projects = [item for item in projects if item["name"] == project_spec["name"]]
+    named_project = _one(named_projects, "project name", error_cls)
+    project = project_by_id if project_by_id is not None else named_project
+    reused_project_by_name = project_by_id is None and named_project is not None
+    if (
+        project_by_id is not None
+        and named_project is not None
+        and named_project["id"] != project_by_id["id"]
+    ):
+        _fail(error_cls, "ambiguous scoped Linear match for project name")
     state = None
     if "state" in change["issue"]:
         states = _bounded_nodes(client.list_states(sis["id"]), "SIS team states", error_cls)
@@ -202,7 +208,8 @@ def preflight(client: Any, change: dict[str, Any], error_cls: type[Exception]) -
         or not isinstance(team_nodes, list)
         or {item.get("id") for item in team_nodes if isinstance(item, dict)} != {sis["id"]}
     ):
-        _fail(error_cls, "project deterministic id conflicts with live scope or name")
+        match_kind = "exact-name match" if reused_project_by_name else "deterministic id"
+        _fail(error_cls, f"project {match_kind} conflicts with live scope or name")
     _verify_optional(project_spec, project, error_cls, "project")
 
     milestones = _bounded_nodes(
@@ -210,16 +217,21 @@ def preflight(client: Any, change: dict[str, Any], error_cls: type[Exception]) -
     )
     _require_id_name(milestones, "name", "project milestones", error_cls)
     milestone_spec = change["milestone"]
-    milestone = _one(
+    milestone_by_id = _one(
         [item for item in milestones if item["id"] == milestone_spec["id"]],
         "milestone id",
         error_cls,
     )
-    if any(
-        item["name"] == milestone_spec["name"] and item["id"] != milestone_spec["id"]
-        for item in milestones
+    named_milestones = [item for item in milestones if item["name"] == milestone_spec["name"]]
+    named_milestone = _one(named_milestones, "milestone name", error_cls)
+    milestone = milestone_by_id if milestone_by_id is not None else named_milestone
+    reused_milestone_by_name = milestone_by_id is None and named_milestone is not None
+    if (
+        milestone_by_id is not None
+        and named_milestone is not None
+        and named_milestone["id"] != milestone_by_id["id"]
     ):
-        _fail(error_cls, "milestone name already exists with a different deterministic id")
+        _fail(error_cls, "ambiguous scoped Linear match for milestone name")
     if milestone is not None:
         milestone_project = milestone.get("project")
         if (
@@ -227,7 +239,10 @@ def preflight(client: Any, change: dict[str, Any], error_cls: type[Exception]) -
             or not isinstance(milestone_project, dict)
             or milestone_project.get("id") != project["id"]
         ):
-            _fail(error_cls, "milestone deterministic id conflicts with live scope or name")
+            match_kind = (
+                "exact-name match" if reused_milestone_by_name else "deterministic id"
+            )
+            _fail(error_cls, f"milestone {match_kind} conflicts with live scope or name")
         _verify_optional(milestone_spec, milestone, error_cls, "milestone")
 
     issues = _bounded_nodes(
@@ -360,27 +375,36 @@ def _snapshot(
     milestone_spec = change["milestone"]
     issue_spec = change["issue"]
 
-    def scalar(spec: dict[str, Any], name_field: str) -> dict[str, Any]:
-        item = {"id": spec["id"], name_field: spec[name_field]}
+    def scalar(
+        spec: dict[str, Any],
+        name_field: str,
+        live_entity: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        entity_id = live_entity["id"] if live_entity is not None else spec["id"]
+        item = {"id": entity_id, name_field: spec[name_field]}
         if "description" in spec:
             item["description"] = spec["description"]
         return item
 
     project = None
     if desired or live.project is not None:
-        project = scalar(project_spec, "name")
+        project = scalar(project_spec, "name", live.project)
+    project_id = live.project["id"] if live.project is not None else project_spec["id"]
     milestone = None
     if desired or live.milestone is not None:
-        milestone = scalar(milestone_spec, "name")
-        milestone["project_id"] = project_spec["id"]
+        milestone = scalar(milestone_spec, "name", live.milestone)
+        milestone["project_id"] = project_id
+    milestone_id = (
+        live.milestone["id"] if live.milestone is not None else milestone_spec["id"]
+    )
     issue = None
     if desired or live.issue is not None:
-        issue = scalar(issue_spec, "title")
+        issue = scalar(issue_spec, "title", live.issue)
         issue.update(
             {
                 "team_key": "SIS",
-                "project_id": project_spec["id"],
-                "milestone_id": milestone_spec["id"],
+                "project_id": project_id,
+                "milestone_id": milestone_id,
                 "parent_id": None,
             }
         )

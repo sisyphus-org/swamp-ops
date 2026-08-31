@@ -554,27 +554,224 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(len(set(ids)), 3)
         self.assertTrue(all(uuid.UUID(value).version == 4 for value in ids))
 
-    def test_changed_hierarchy_semantics_collide_by_name_instead_of_duplicating(self):
+    def test_new_issue_reuses_exact_existing_project_and_milestone(self):
         with tempfile.TemporaryDirectory() as tmp:
             client = FakeHierarchyClient()
             original = hierarchy_command("linear:SIS:hierarchy:original")
+            original["change"]["project"].update(
+                {"name": "Hermes Experience", "description": "Project description"}
+            )
+            original["change"]["milestone"].update(
+                {
+                    "name": "Personal productivity integrations",
+                    "description": "Milestone description",
+                }
+            )
+            original["change"]["issue"]["title"] = "First integration"
             lane.execute_command(
                 client,
                 original,
                 mode="apply",
                 journal_path=Path(tmp) / "original.json",
             )
-            changed = hierarchy_command("linear:SIS:hierarchy:changed")
-            changed["change"]["issue"]["description"] = "changed semantic content"
+            project_id = client.projects[0]["id"]
+            milestone_id = client.milestones[0]["id"]
 
-            with self.assertRaisesRegex(lane.ContractError, "project name already exists"):
-                lane.execute_command(
-                    client,
-                    changed,
-                    mode="apply",
-                    journal_path=Path(tmp) / "changed.json",
-                )
-            self.assertEqual((len(client.projects), len(client.milestones), len(client.issues)), (1, 1, 1))
+            google_calendar = hierarchy_command("linear:SIS:hierarchy:google-calendar")
+            google_calendar["change"]["project"].update(
+                {"name": "Hermes Experience", "description": "Project description"}
+            )
+            google_calendar["change"]["milestone"].update(
+                {
+                    "name": "Personal productivity integrations",
+                    "description": "Milestone description",
+                }
+            )
+            google_calendar["change"]["issue"]["title"] = (
+                "Интегрировать Hermes с Google Calendar"
+            )
+
+            applied = lane.execute_command(
+                client,
+                google_calendar,
+                mode="apply",
+                journal_path=Path(tmp) / "google-calendar.json",
+            )
+
+            self.assertEqual(applied["result"], "applied")
+            self.assertTrue(applied["verified"])
+            self.assertEqual(applied["before"]["project"]["id"], project_id)
+            self.assertEqual(applied["before"]["milestone"]["id"], milestone_id)
+            self.assertEqual(applied["after"]["project"]["id"], project_id)
+            self.assertEqual(applied["after"]["milestone"]["id"], milestone_id)
+            self.assertEqual(applied["after"]["issue"]["project_id"], project_id)
+            self.assertEqual(applied["after"]["issue"]["milestone_id"], milestone_id)
+            self.assertEqual(
+                (len(client.projects), len(client.milestones), len(client.issues)),
+                (1, 1, 2),
+            )
+
+            writes = [
+                call
+                for call in client.calls
+                if call[0]
+                in {"create_project", "create_project_milestone", "create_project_issue"}
+            ]
+            replay = lane.execute_command(
+                client,
+                google_calendar,
+                mode="apply",
+                journal_path=Path(tmp) / "google-calendar-replay.json",
+            )
+            self.assertEqual(replay["result"], "no_op")
+            self.assertTrue(replay["verified"])
+            self.assertEqual(
+                [
+                    call
+                    for call in client.calls
+                    if call[0]
+                    in {
+                        "create_project",
+                        "create_project_milestone",
+                        "create_project_issue",
+                    }
+                ],
+                writes,
+            )
+
+    def test_reused_project_fails_closed_on_ambiguity_scope_or_description(self):
+        raw = hierarchy_command("linear:SIS:hierarchy:reuse-project-safety")
+        raw["change"]["project"]["description"] = "Expected project description"
+        base = {
+            "id": "existing-project",
+            "name": "health",
+            "description": "Expected project description",
+            "teams": {"nodes": [{"id": "team-sis"}]},
+        }
+        cases = {
+            "ambiguous": [base, {**base, "id": "second-project"}],
+            "wrong team": [
+                {**base, "teams": {"nodes": [{"id": "team-other"}]}}
+            ],
+            "description": [{**base, "description": "Different description"}],
+        }
+        for label, projects in cases.items():
+            with self.subTest(label=label):
+                client = FakeHierarchyClient()
+                client.projects = json.loads(json.dumps(projects))
+                with self.assertRaises(lane.ContractError):
+                    lane.execute_command(client, raw, mode="plan")
+                self.assertFalse(any(call[0].startswith("create_") for call in client.calls))
+
+    def test_hierarchy_rejects_sis_key_with_unexpected_team_name(self):
+        class WrongTeamNameClient(FakeHierarchyClient):
+            def list_teams(self):
+                return [{"id": "team-sis", "key": "SIS", "name": "Not Sisyphus"}]
+
+        with self.assertRaisesRegex(lane.ContractError, "exact SIS team"):
+            lane.execute_command(
+                WrongTeamNameClient(), hierarchy_command(), mode="plan"
+            )
+
+    def test_name_fallback_scope_errors_do_not_claim_deterministic_id_conflict(self):
+        project_client = FakeHierarchyClient()
+        project_client.projects = [
+            {
+                "id": "existing-project",
+                "name": "health",
+                "teams": {"nodes": [{"id": "team-other"}]},
+            }
+        ]
+        with self.assertRaisesRegex(
+            lane.ContractError, "project exact-name match conflicts with live scope or name"
+        ):
+            lane.execute_command(project_client, hierarchy_command(), mode="plan")
+
+        milestone_client = FakeHierarchyClient()
+        milestone_client.projects = [
+            {
+                "id": "existing-project",
+                "name": "health",
+                "teams": {"nodes": [{"id": "team-sis"}]},
+            }
+        ]
+        milestone_client.milestones = [
+            {
+                "id": "existing-milestone",
+                "name": "Подолог",
+                "project": {"id": "different-project"},
+            }
+        ]
+        with self.assertRaisesRegex(
+            lane.ContractError,
+            "milestone exact-name match conflicts with live scope or name",
+        ):
+            lane.execute_command(milestone_client, hierarchy_command(), mode="plan")
+
+    def test_reused_milestone_fails_closed_on_ambiguity_scope_or_description(self):
+        raw = hierarchy_command("linear:SIS:hierarchy:reuse-milestone-safety")
+        raw["change"]["milestone"]["description"] = "Expected milestone description"
+        project = {
+            "id": "existing-project",
+            "name": "health",
+            "teams": {"nodes": [{"id": "team-sis"}]},
+        }
+        base = {
+            "id": "existing-milestone",
+            "name": "Подолог",
+            "description": "Expected milestone description",
+            "project": {"id": "existing-project"},
+        }
+        cases = {
+            "ambiguous": [base, {**base, "id": "second-milestone"}],
+            "wrong project": [
+                {**base, "project": {"id": "different-project"}}
+            ],
+            "description": [{**base, "description": "Different description"}],
+        }
+        for label, milestones in cases.items():
+            with self.subTest(label=label):
+                client = FakeHierarchyClient()
+                client.projects = [json.loads(json.dumps(project))]
+                client.milestones = json.loads(json.dumps(milestones))
+                with self.assertRaises(lane.ContractError):
+                    lane.execute_command(client, raw, mode="plan")
+                self.assertFalse(any(call[0].startswith("create_") for call in client.calls))
+
+    def test_new_issue_does_not_reuse_existing_issue_by_title(self):
+        client = FakeHierarchyClient()
+        raw = hierarchy_command("linear:SIS:hierarchy:new-issue-id")
+        client.projects = [
+            {
+                "id": "existing-project",
+                "name": "health",
+                "teams": {"nodes": [{"id": "team-sis"}]},
+            }
+        ]
+        client.milestones = [
+            {
+                "id": "existing-milestone",
+                "name": "Подолог",
+                "project": {"id": "existing-project"},
+            }
+        ]
+        client.issues = [
+            {
+                "id": "different-issue-id",
+                "identifier": "SIS-50",
+                "title": "Сходить в Solomia и записаться",
+                "url": "https://linear.app/example/issue/SIS-50/existing",
+                "team": {"id": "team-sis", "key": "SIS"},
+                "project": {"id": "existing-project"},
+                "projectMilestone": {"id": "existing-milestone"},
+                "state": {"id": "state-Todo", "name": "Todo"},
+                "parent": None,
+            }
+        ]
+
+        with self.assertRaisesRegex(lane.ContractError, "issue title already exists"):
+            lane.execute_command(client, raw, mode="plan")
+        self.assertFalse(any(call[0].startswith("create_") for call in client.calls))
 
     def test_hierarchy_results_have_typed_before_after_without_description_leaks(self):
         with tempfile.TemporaryDirectory() as tmp:
