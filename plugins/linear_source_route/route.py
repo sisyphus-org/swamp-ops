@@ -270,6 +270,7 @@ def parse_linear_request(
                 "state",
                 "priority",
                 "assignee",
+                "labels",
             }
             if (
                 not set(request).issubset(allowed)
@@ -284,7 +285,14 @@ def parse_linear_request(
                 raise RouteError("target must be an exact SIS-N identifier")
             change = {
                 key: request[key]
-                for key in ("title", "description", "state", "priority", "assignee")
+                for key in (
+                    "title",
+                    "description",
+                    "state",
+                    "priority",
+                    "assignee",
+                    "labels",
+                )
                 if key in request
             }
             if "title" in change:
@@ -312,6 +320,19 @@ def parse_linear_request(
                     maximum=200,
                     required=True,
                 )
+            if "labels" in change:
+                labels = change["labels"]
+                if not isinstance(labels, list) or len(labels) > 100:
+                    raise RouteError("labels must be an array of at most 100 exact names")
+                for index, label in enumerate(labels):
+                    _validate_clean_text(
+                        label,
+                        f"labels[{index}]",
+                        maximum=200,
+                        required=True,
+                    )
+                if len(set(labels)) != len(labels):
+                    raise RouteError("labels must contain unique exact names")
             target = {"type": "issue", "identifier": identifier}
         elif operation == "inventory_sub_issues":
             if set(request) != {"operation", "identifier"}:

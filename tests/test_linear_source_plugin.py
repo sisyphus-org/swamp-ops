@@ -442,6 +442,7 @@ class PluginTests(unittest.TestCase):
                 "parent_identifier",
                 "priority",
                 "assignee",
+                "labels",
                 "project",
                 "milestone",
                 "issue",
@@ -556,11 +557,18 @@ class PluginTests(unittest.TestCase):
                         "identifier": "SIS-94",
                         "url": "https://linear.app/example/issue/SIS-94/fixture",
                     },
-                    "after": {"assignee": "Alexey Petrov"},
+                    "after": {
+                        "assignee": "Alexey Petrov",
+                        "labels": ["area:linear", "priority:owner"],
+                    },
                 },
             }
         )
         self.assertEqual(result["target"]["assignee"], "Alexey Petrov")
+        self.assertEqual(
+            result["target"]["labels"],
+            ["area:linear", "priority:owner"],
+        )
 
     def test_handler_uses_request_scoped_gateway_identity(self):
         fake_board = mock.Mock()

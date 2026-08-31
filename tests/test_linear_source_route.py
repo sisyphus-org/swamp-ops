@@ -361,6 +361,21 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(assigned.command["change"], {"assignee": "Alexey Petrov"})
         self.assertEqual(unassigned.command["change"], {"assignee": None})
 
+    def test_structured_issue_update_preserves_exact_label_set(self):
+        parsed = route.parse_linear_request(
+            {
+                "operation": "update_issue",
+                "identifier": "SIS-94",
+                "labels": ["area:linear", "priority:owner"],
+            },
+            source_profile="default",
+            uuid_factory=uuid_factory(),
+        )
+        self.assertEqual(
+            parsed.command["change"],
+            {"labels": ["area:linear", "priority:owner"]},
+        )
+
     def test_sub_issue_inventory_request_targets_exact_parent(self):
         parsed = route.parse_linear_request(
             {

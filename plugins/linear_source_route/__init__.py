@@ -29,7 +29,7 @@ PUBLIC_INTERNAL_MARKER = re.compile(
 )
 PUBLIC_STATES = {"Backlog", "Todo", "Research", "In Progress", "In Review"}
 PUBLIC_MISMATCH_FIELDS = (
-    r"(?:id/title|description|state|priority|assignee|parent|project|milestone|team)"
+    r"(?:id/title|description|state|priority|assignee|labels|parent|project|milestone|team)"
 )
 PUBLIC_MISMATCH_LIST = rf"{PUBLIC_MISMATCH_FIELDS}(?:, {PUBLIC_MISMATCH_FIELDS})*"
 PUBLIC_BLOCK_REASON_PATTERNS = {
@@ -149,6 +149,12 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                     {"type": "null"},
                 ]
             },
+            "labels": {
+                "type": "array",
+                "maxItems": 100,
+                "uniqueItems": True,
+                "items": {"type": "string", "minLength": 1, "maxLength": 200},
+            },
             "project": {
                 "type": "object",
                 "additionalProperties": False,
@@ -221,6 +227,7 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                     {"required": ["state"]},
                     {"required": ["priority"]},
                     {"required": ["assignee"]},
+                    {"required": ["labels"]},
                 ],
                 "properties": {"operation": {"const": "update_issue"}},
             },
@@ -608,6 +615,17 @@ def _public_target(result: dict[str, Any]) -> tuple[dict[str, Any], dict[str, An
                 if assignee is None
                 else _public_text(assignee, "assignee name")
             )
+        if operation == "update_issue" and "labels" in after:
+            labels = after.get("labels")
+            if (
+                not isinstance(labels, list)
+                or len(labels) > 100
+                or len(set(labels)) != len(labels)
+            ):
+                raise RouteError("verified issue update has invalid public labels")
+            public_target["labels"] = [
+                _public_text(label, "label name") for label in labels
+            ]
     elif operation == "create_issue":
         if (
             after.get("identifier") != public_target["identifier"]
@@ -700,7 +718,8 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
             args.get("operation") == "update_issue"
             and "identifier" in args
             and bool(
-                set(args) & {"title", "description", "state", "priority", "assignee"}
+                set(args)
+                & {"title", "description", "state", "priority", "assignee", "labels"}
             )
             and set(args).issubset(
                 {
@@ -711,6 +730,7 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
                     "state",
                     "priority",
                     "assignee",
+                    "labels",
                 }
             )
         ):

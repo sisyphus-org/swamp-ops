@@ -46,6 +46,7 @@ query LaneIssue($id: String!) {
     id identifier title url description priority
     state { id name type }
     assignee { id name email }
+    labels { nodes { id name } }
     team { id key }
     parent { id identifier }
   }
@@ -62,6 +63,18 @@ WORKSPACE_USERS_QUERY = """
 query LaneUsers($after: String) {
   users(first: 100, after: $after) {
     nodes { id name email }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+"""
+ISSUE_LABELS_QUERY = """
+query LaneIssueLabels($teamId: ID!, $after: String) {
+  issueLabels(
+    first: 100
+    after: $after
+    filter: { team: { id: { eq: $teamId } } }
+  ) {
+    nodes { id name }
     pageInfo { hasNextPage endCursor }
   }
 }
@@ -320,6 +333,28 @@ class LinearClient:
                 raise ContractError("workspace users pagination cursor is invalid")
             after = cursor
 
+    def list_issue_labels(self, team_id: str) -> list[dict[str, Any]]:
+        """Return every issue label in the exact team scope."""
+        labels: list[dict[str, Any]] = []
+        after: str | None = None
+        while True:
+            connection = self.execute(
+                ISSUE_LABELS_QUERY,
+                {"teamId": team_id, "after": after},
+            ).get("issueLabels")
+            if not isinstance(connection, dict) or not isinstance(connection.get("nodes"), list):
+                raise ContractError("issue labels payload is invalid")
+            labels.extend(connection["nodes"])
+            page = connection.get("pageInfo")
+            if not isinstance(page, dict):
+                raise ContractError("issue labels pagination is invalid")
+            if not page.get("hasNextPage"):
+                return labels
+            cursor = page.get("endCursor")
+            if not isinstance(cursor, str) or not cursor:
+                raise ContractError("issue labels pagination cursor is invalid")
+            after = cursor
+
     def list_comments(self, issue_id: str) -> list[dict[str, Any]]:
         """Return bounded comments for before/after count evidence."""
         connection = self.execute(COMMENTS_QUERY, {"issueId": issue_id})["issue"]["comments"]
@@ -507,7 +542,14 @@ class LinearClient:
 
     def update_issue_fields(self, issue_id: str, **fields: Any) -> None:
         """Apply only allowlisted issue fields through the fixed mutation."""
-        allowed = {"title", "description", "state_id", "priority", "assignee_id"}
+        allowed = {
+            "title",
+            "description",
+            "state_id",
+            "priority",
+            "assignee_id",
+            "label_ids",
+        }
         if not fields or not set(fields).issubset(allowed):
             raise ContractError("issue update has invalid managed fields")
         payload: dict[str, Any] = {}
@@ -515,6 +557,8 @@ class LinearClient:
             payload["title"] = fields["title"]
         if "assignee_id" in fields:
             payload["assigneeId"] = fields["assignee_id"]
+        if "label_ids" in fields:
+            payload["labelIds"] = fields["label_ids"]
         if "description" in fields:
             payload["description"] = fields["description"]
         if "state_id" in fields:
@@ -602,10 +646,10 @@ def validate_command(raw: Any) -> dict[str, Any]:
         if state not in SAFE_STATES:
             raise ContractError("requested state is not in the exact safe-state allowlist")
     elif operation == "update_issue":
-        allowed = {"title", "description", "state", "priority", "assignee"}
+        allowed = {"title", "description", "state", "priority", "assignee", "labels"}
         if not change or not set(change).issubset(allowed):
             raise ContractError(
-                "update_issue supports title, description, state, priority, and assignee"
+                "update_issue supports title, description, state, priority, assignee, and labels"
             )
         if "title" in change:
             title = change["title"]
@@ -634,6 +678,18 @@ def validate_command(raw: Any) -> dict[str, Any]:
             assignee = change["assignee"]
             if not isinstance(assignee, str) or not assignee.strip() or len(assignee) > 200:
                 raise ContractError("update_issue assignee must be null or 1-200 characters")
+        if "labels" in change:
+            labels = change["labels"]
+            if (
+                not isinstance(labels, list)
+                or len(labels) > 100
+                or len(set(labels)) != len(labels)
+                or any(
+                    not isinstance(label, str) or not label.strip() or len(label) > 200
+                    for label in labels
+                )
+            ):
+                raise ContractError("update_issue labels must be 0-100 unique exact names")
     elif operation == "inventory_sub_issues":
         if change:
             raise ContractError("inventory_sub_issues change must be empty")
@@ -1222,6 +1278,23 @@ def execute_command(
                 assignee_name = user.get("name")
                 if not isinstance(assignee_name, str) or not assignee_name.strip():
                     raise ContractError("exact Linear assignee has no public name")
+        label_ids: list[str] = []
+        desired_label_names: list[str] | None = None
+        if "labels" in change:
+            requested_labels = change["labels"]
+            available = client.list_issue_labels(team["id"])
+            by_name: dict[str, list[dict[str, Any]]] = {}
+            for label in available:
+                if isinstance(label.get("name"), str):
+                    by_name.setdefault(label["name"], []).append(label)
+            resolved: list[dict[str, Any]] = []
+            for name in requested_labels:
+                matches = by_name.get(name, [])
+                if len(matches) != 1 or not isinstance(matches[0].get("id"), str):
+                    raise ContractError("exact Linear label not found or ambiguous")
+                resolved.append(matches[0])
+            label_ids = [label["id"] for label in resolved]
+            desired_label_names = list(requested_labels)
         if "state" in change:
             states = [
                 item
@@ -1264,6 +1337,18 @@ def execute_command(
                 )
                 if live_assignee_id != assignee_id:
                     fields.append("assignee")
+            if "labels" in change:
+                live_labels = live.get("labels")
+                live_nodes = (
+                    live_labels.get("nodes") if isinstance(live_labels, dict) else None
+                )
+                live_label_ids = (
+                    {item.get("id") for item in live_nodes if isinstance(item, dict)}
+                    if isinstance(live_nodes, list)
+                    else set()
+                )
+                if live_label_ids != set(label_ids):
+                    fields.append("labels")
             return _COMPARISON.ordered_mismatch_fields(fields)
 
         def update_snapshot(live: dict[str, Any]) -> dict[str, Any]:
@@ -1282,6 +1367,18 @@ def execute_command(
                     if isinstance(live_assignee, dict)
                     else None
                 )
+            if "labels" in change:
+                live_labels = live.get("labels")
+                live_nodes = (
+                    live_labels.get("nodes") if isinstance(live_labels, dict) else []
+                )
+                if not isinstance(live_nodes, list):
+                    live_nodes = []
+                snapshot["labels"] = sorted(
+                    item["name"]
+                    for item in live_nodes
+                    if isinstance(item, dict) and isinstance(item.get("name"), str)
+                )
             return snapshot
 
         fields = update_mismatches(issue)
@@ -1298,7 +1395,14 @@ def execute_command(
             })
         managed_fields = [
             field
-            for field in ("title", "description", "state", "priority", "assignee")
+            for field in (
+                "title",
+                "description",
+                "state",
+                "priority",
+                "assignee",
+                "labels",
+            )
             if field in change
         ]
         plan = [{"action": "update_issue", "fields": managed_fields}]
@@ -1306,6 +1410,8 @@ def execute_command(
         after_update.update(change)
         if "assignee" in change:
             after_update["assignee"] = assignee_name
+        if "labels" in change:
+            after_update["labels"] = sorted(desired_label_names or [])
         if mode == "plan":
             return {
                 **base,
@@ -1327,6 +1433,8 @@ def execute_command(
             mutation["priority"] = PRIORITIES[change["priority"]]
         if assignee_id is not ...:
             mutation["assignee_id"] = assignee_id
+        if "labels" in change:
+            mutation["label_ids"] = label_ids
         client.update_issue_fields(issue["id"], **mutation)
         verified_issue = client.get_issue(identifier)
         if not isinstance(verified_issue, dict):

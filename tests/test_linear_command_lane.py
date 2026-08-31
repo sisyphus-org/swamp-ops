@@ -180,6 +180,11 @@ class FakeClient:
                 if assignee_id is None
                 else next(user for user in self.list_users() if user["id"] == assignee_id)
             )
+        if "label_ids" in fields:
+            by_id = {label["id"]: label for label in self.list_issue_labels("team-uuid")}
+            self.current["labels"] = {
+                "nodes": [by_id[label_id] for label_id in fields["label_ids"]]
+            }
         if "description" in fields:
             self.current["description"] = fields["description"]
         if "priority" in fields:
@@ -199,6 +204,12 @@ class FakeClient:
                 "name": "Alexey Petrov",
                 "email": "alexey@example.com",
             }
+        ]
+
+    def list_issue_labels(self, team_id):
+        return [
+            {"id": "label-linear", "name": "area:linear"},
+            {"id": "label-owner", "name": "priority:owner"},
         ]
 
     def list_comments(self, issue_id):
@@ -1945,6 +1956,39 @@ class ExecutionTests(unittest.TestCase):
                 client.writes,
                 [("fields", "issue-uuid", {"assignee_id": None})],
             )
+
+    def test_update_issue_sets_exact_label_set_and_replays_noop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = FakeClient()
+            client.current["labels"] = {"nodes": []}
+            raw = command(
+                "update_issue",
+                {"labels": ["area:linear", "priority:owner"]},
+                key="linear:SIS-59:labels:fixture",
+            )
+            journal = Path(tmp) / "journal.json"
+            applied = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+            self.assertEqual(
+                applied["after"]["labels"],
+                ["area:linear", "priority:owner"],
+            )
+            self.assertEqual(
+                client.writes,
+                [
+                    (
+                        "fields",
+                        "issue-uuid",
+                        {"label_ids": ["label-linear", "label-owner"]},
+                    )
+                ],
+            )
+            replay = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+            self.assertEqual(replay["result"], "no_op")
+            self.assertEqual(len(client.writes), 1)
 
     def test_inventory_sub_issues_returns_complete_recursive_tree_without_writes(self):
         class RecursiveClient(FakeClient):
