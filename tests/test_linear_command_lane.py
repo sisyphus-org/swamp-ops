@@ -1923,6 +1923,10 @@ class ExecutionTests(unittest.TestCase):
             ),
             "https://visible.example",
         )
+        self.assertEqual(
+            lane.remove_description_links("[docs](<https://example.com/path>)"),
+            "docs",
+        )
 
     def test_remove_links_preserves_unrelated_markdown_whitespace(self):
         original = (

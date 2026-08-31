@@ -51,6 +51,20 @@ def _markdown_link_at(text: str, start: int) -> tuple[str, int] | None:
     destination = label_end + 2
     while destination < len(text) and text[destination] in " \t":
         destination += 1
+    if destination < len(text) and text[destination] == "<":
+        angle_end = text.find(">", destination + 1)
+        if angle_end < 0 or any(
+            char.isspace() for char in text[destination + 1 : angle_end]
+        ):
+            return None
+        if not text.startswith(("http://", "https://"), destination + 1):
+            return None
+        cursor = angle_end + 1
+        while cursor < len(text) and text[cursor] in " \t":
+            cursor += 1
+        if cursor < len(text) and text[cursor] == ")":
+            return text[start + 1 : label_end], cursor + 1
+        return None
     if not text.startswith(("http://", "https://"), destination):
         return None
     depth = 1
