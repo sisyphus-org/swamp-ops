@@ -173,6 +173,13 @@ class FakeClient:
         self.writes.append(("fields", issue_id, fields))
         if "title" in fields:
             self.current["title"] = fields["title"]
+        if "assignee_id" in fields:
+            assignee_id = fields["assignee_id"]
+            self.current["assignee"] = (
+                None
+                if assignee_id is None
+                else next(user for user in self.list_users() if user["id"] == assignee_id)
+            )
         if "description" in fields:
             self.current["description"] = fields["description"]
         if "priority" in fields:
@@ -184,6 +191,15 @@ class FakeClient:
                 "name": state_id.removeprefix("state-"),
                 "type": "started",
             }
+
+    def list_users(self):
+        return [
+            {
+                "id": "user-alexey",
+                "name": "Alexey Petrov",
+                "email": "alexey@example.com",
+            }
+        ]
 
     def list_comments(self, issue_id):
         return list(self.comments)
@@ -1878,6 +1894,57 @@ class ExecutionTests(unittest.TestCase):
             )
             self.assertEqual(replay["result"], "no_op")
             self.assertEqual(len(client.writes), 1)
+
+    def test_update_issue_assigns_exact_user_and_replays_noop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Path(tmp) / "journal.json"
+            client = FakeClient()
+            client.current["assignee"] = None
+            raw = command(
+                "update_issue",
+                {"assignee": "Alexey Petrov"},
+                key="linear:SIS-59:assignee:fixture",
+            )
+            applied = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+            self.assertEqual(applied["result"], "applied")
+            self.assertEqual(applied["after"]["assignee"], "Alexey Petrov")
+            self.assertEqual(
+                client.writes,
+                [("fields", "issue-uuid", {"assignee_id": "user-alexey"})],
+            )
+            replay = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+            self.assertEqual(replay["result"], "no_op")
+            self.assertEqual(len(client.writes), 1)
+
+    def test_update_issue_unassigns_and_preserves_other_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = FakeClient()
+            client.current["assignee"] = client.list_users()[0]
+            before = json.loads(json.dumps(client.current))
+            raw = command(
+                "update_issue",
+                {"assignee": None},
+                key="linear:SIS-59:unassign:fixture",
+            )
+            applied = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "journal.json",
+            )
+            self.assertIsNone(applied["after"]["assignee"])
+            self.assertEqual(
+                {key: client.current[key] for key in ("title", "description", "priority", "state")},
+                {key: before[key] for key in ("title", "description", "priority", "state")},
+            )
+            self.assertEqual(
+                client.writes,
+                [("fields", "issue-uuid", {"assignee_id": None})],
+            )
 
     def test_inventory_sub_issues_returns_complete_recursive_tree_without_writes(self):
         class RecursiveClient(FakeClient):

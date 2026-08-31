@@ -262,7 +262,15 @@ def parse_linear_request(
             target = {"type": "issue", "identifier": identifier}
             change = {"state": state}
         elif operation == "update_issue":
-            allowed = {"operation", "identifier", "title", "description", "state", "priority"}
+            allowed = {
+                "operation",
+                "identifier",
+                "title",
+                "description",
+                "state",
+                "priority",
+                "assignee",
+            }
             if (
                 not set(request).issubset(allowed)
                 or "identifier" not in request
@@ -276,7 +284,7 @@ def parse_linear_request(
                 raise RouteError("target must be an exact SIS-N identifier")
             change = {
                 key: request[key]
-                for key in ("title", "description", "state", "priority")
+                for key in ("title", "description", "state", "priority", "assignee")
                 if key in request
             }
             if "title" in change:
@@ -297,6 +305,13 @@ def parse_linear_request(
                 raise RouteError("state is not in the safe-state allowlist")
             if "priority" in change and change["priority"] not in PRIORITIES:
                 raise RouteError("priority is not in the bounded allowlist")
+            if "assignee" in change and change["assignee"] is not None:
+                _validate_clean_text(
+                    change["assignee"],
+                    "assignee",
+                    maximum=200,
+                    required=True,
+                )
             target = {"type": "issue", "identifier": identifier}
         elif operation == "inventory_sub_issues":
             if set(request) != {"operation", "identifier"}:

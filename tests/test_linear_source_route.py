@@ -339,6 +339,28 @@ class ParseTests(unittest.TestCase):
             {"title": "Записаться на урок фортепиано"},
         )
 
+    def test_structured_issue_update_preserves_assignee_name_and_null_unassign(self):
+        assigned = route.parse_linear_request(
+            {
+                "operation": "update_issue",
+                "identifier": "SIS-94",
+                "assignee": "Alexey Petrov",
+            },
+            source_profile="default",
+            uuid_factory=uuid_factory(),
+        )
+        unassigned = route.parse_linear_request(
+            {
+                "operation": "update_issue",
+                "identifier": "SIS-94",
+                "assignee": None,
+            },
+            source_profile="default",
+            uuid_factory=uuid_factory(),
+        )
+        self.assertEqual(assigned.command["change"], {"assignee": "Alexey Petrov"})
+        self.assertEqual(unassigned.command["change"], {"assignee": None})
+
     def test_sub_issue_inventory_request_targets_exact_parent(self):
         parsed = route.parse_linear_request(
             {

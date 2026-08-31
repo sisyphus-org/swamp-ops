@@ -29,7 +29,7 @@ PUBLIC_INTERNAL_MARKER = re.compile(
 )
 PUBLIC_STATES = {"Backlog", "Todo", "Research", "In Progress", "In Review"}
 PUBLIC_MISMATCH_FIELDS = (
-    r"(?:id/title|description|state|priority|parent|project|milestone|team)"
+    r"(?:id/title|description|state|priority|assignee|parent|project|milestone|team)"
 )
 PUBLIC_MISMATCH_LIST = rf"{PUBLIC_MISMATCH_FIELDS}(?:, {PUBLIC_MISMATCH_FIELDS})*"
 PUBLIC_BLOCK_REASON_PATTERNS = {
@@ -143,6 +143,12 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                 "pattern": "^SIS-[1-9][0-9]*$",
             },
             "priority": {"type": "string", "enum": ["High", "Medium", "Low"]},
+            "assignee": {
+                "oneOf": [
+                    {"type": "string", "minLength": 1, "maxLength": 200},
+                    {"type": "null"},
+                ]
+            },
             "project": {
                 "type": "object",
                 "additionalProperties": False,
@@ -214,6 +220,7 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                     {"required": ["description"]},
                     {"required": ["state"]},
                     {"required": ["priority"]},
+                    {"required": ["assignee"]},
                 ],
                 "properties": {"operation": {"const": "update_issue"}},
             },
@@ -594,6 +601,13 @@ def _public_target(result: dict[str, Any]) -> tuple[dict[str, Any], dict[str, An
             if state not in PUBLIC_STATES:
                 raise RouteError("verified issue update has an invalid public state")
             public_target["state"] = state
+        if operation == "update_issue" and "assignee" in after:
+            assignee = after.get("assignee")
+            public_target["assignee"] = (
+                None
+                if assignee is None
+                else _public_text(assignee, "assignee name")
+            )
     elif operation == "create_issue":
         if (
             after.get("identifier") != public_target["identifier"]
@@ -685,9 +699,19 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
         elif (
             args.get("operation") == "update_issue"
             and "identifier" in args
-            and bool(set(args) & {"title", "description", "state", "priority"})
+            and bool(
+                set(args) & {"title", "description", "state", "priority", "assignee"}
+            )
             and set(args).issubset(
-                {"operation", "identifier", "title", "description", "state", "priority"}
+                {
+                    "operation",
+                    "identifier",
+                    "title",
+                    "description",
+                    "state",
+                    "priority",
+                    "assignee",
+                }
             )
         ):
             request = dict(args)

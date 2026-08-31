@@ -45,6 +45,7 @@ query LaneIssue($id: String!) {
   issue(id: $id) {
     id identifier title url description priority
     state { id name type }
+    assignee { id name email }
     team { id key }
     parent { id identifier }
   }
@@ -54,6 +55,14 @@ TEAM_STATES_QUERY = """
 query LaneStates($teamId: String!) {
   team(id: $teamId) {
     states(first: 100) { nodes { id name type } pageInfo { hasNextPage } }
+  }
+}
+"""
+WORKSPACE_USERS_QUERY = """
+query LaneUsers($after: String) {
+  users(first: 100, after: $after) {
+    nodes { id name email }
+    pageInfo { hasNextPage endCursor }
   }
 }
 """
@@ -292,6 +301,25 @@ class LinearClient:
             raise ContractError("team exceeds the supported 100-state limit")
         return connection["nodes"]
 
+    def list_users(self) -> list[dict[str, Any]]:
+        """Return the complete workspace user inventory with cursor pagination."""
+        users: list[dict[str, Any]] = []
+        after: str | None = None
+        while True:
+            connection = self.execute(WORKSPACE_USERS_QUERY, {"after": after}).get("users")
+            if not isinstance(connection, dict) or not isinstance(connection.get("nodes"), list):
+                raise ContractError("workspace users payload is invalid")
+            users.extend(connection["nodes"])
+            page = connection.get("pageInfo")
+            if not isinstance(page, dict):
+                raise ContractError("workspace users pagination is invalid")
+            if not page.get("hasNextPage"):
+                return users
+            cursor = page.get("endCursor")
+            if not isinstance(cursor, str) or not cursor:
+                raise ContractError("workspace users pagination cursor is invalid")
+            after = cursor
+
     def list_comments(self, issue_id: str) -> list[dict[str, Any]]:
         """Return bounded comments for before/after count evidence."""
         connection = self.execute(COMMENTS_QUERY, {"issueId": issue_id})["issue"]["comments"]
@@ -479,12 +507,14 @@ class LinearClient:
 
     def update_issue_fields(self, issue_id: str, **fields: Any) -> None:
         """Apply only allowlisted issue fields through the fixed mutation."""
-        allowed = {"title", "description", "state_id", "priority"}
+        allowed = {"title", "description", "state_id", "priority", "assignee_id"}
         if not fields or not set(fields).issubset(allowed):
             raise ContractError("issue update has invalid managed fields")
         payload: dict[str, Any] = {}
         if "title" in fields:
             payload["title"] = fields["title"]
+        if "assignee_id" in fields:
+            payload["assigneeId"] = fields["assignee_id"]
         if "description" in fields:
             payload["description"] = fields["description"]
         if "state_id" in fields:
@@ -572,9 +602,11 @@ def validate_command(raw: Any) -> dict[str, Any]:
         if state not in SAFE_STATES:
             raise ContractError("requested state is not in the exact safe-state allowlist")
     elif operation == "update_issue":
-        allowed = {"title", "description", "state", "priority"}
+        allowed = {"title", "description", "state", "priority", "assignee"}
         if not change or not set(change).issubset(allowed):
-            raise ContractError("update_issue supports title, description, state, and priority")
+            raise ContractError(
+                "update_issue supports title, description, state, priority, and assignee"
+            )
         if "title" in change:
             title = change["title"]
             if not isinstance(title, str) or not title.strip() or len(title) > MAX_TITLE_LENGTH:
@@ -598,6 +630,10 @@ def validate_command(raw: Any) -> dict[str, Any]:
                 raise ContractError("update_issue state is not in the safe-state allowlist")
         if "priority" in change and change["priority"] not in PRIORITIES:
             raise ContractError("update_issue priority is not in the bounded allowlist")
+        if "assignee" in change and change["assignee"] is not None:
+            assignee = change["assignee"]
+            if not isinstance(assignee, str) or not assignee.strip() or len(assignee) > 200:
+                raise ContractError("update_issue assignee must be null or 1-200 characters")
     elif operation == "inventory_sub_issues":
         if change:
             raise ContractError("inventory_sub_issues change must be empty")
@@ -1161,6 +1197,31 @@ def execute_command(
     if command["operation"] == "update_issue":
         change = command["change"]
         state_id = None
+        assignee_id: str | None | object = ...
+        assignee_name: str | None = None
+        if "assignee" in change:
+            requested_assignee = change["assignee"]
+            if requested_assignee is None:
+                assignee_id = None
+            else:
+                users = [
+                    user
+                    for user in client.list_users()
+                    if user.get("name") == requested_assignee
+                    or user.get("email") == requested_assignee
+                ]
+                unique = {
+                    user.get("id"): user
+                    for user in users
+                    if isinstance(user.get("id"), str)
+                }
+                if len(unique) != 1:
+                    raise ContractError("exact Linear assignee not found or ambiguous")
+                user = next(iter(unique.values()))
+                assignee_id = user["id"]
+                assignee_name = user.get("name")
+                if not isinstance(assignee_name, str) or not assignee_name.strip():
+                    raise ContractError("exact Linear assignee has no public name")
         if "state" in change:
             states = [
                 item
@@ -1196,6 +1257,13 @@ def execute_command(
                 fields.append("state")
             if "priority" in change and live.get("priority") != PRIORITIES[change["priority"]]:
                 fields.append("priority")
+            if "assignee" in change:
+                live_assignee = live.get("assignee")
+                live_assignee_id = (
+                    live_assignee.get("id") if isinstance(live_assignee, dict) else None
+                )
+                if live_assignee_id != assignee_id:
+                    fields.append("assignee")
             return _COMPARISON.ordered_mismatch_fields(fields)
 
         def update_snapshot(live: dict[str, Any]) -> dict[str, Any]:
@@ -1206,6 +1274,13 @@ def execute_command(
                 snapshot["priority"] = next(
                     (name for name, value in PRIORITIES.items() if value == live.get("priority")),
                     None,
+                )
+            if "assignee" in change:
+                live_assignee = live.get("assignee")
+                snapshot["assignee"] = (
+                    live_assignee.get("name")
+                    if isinstance(live_assignee, dict)
+                    else None
                 )
             return snapshot
 
@@ -1222,11 +1297,15 @@ def execute_command(
                 "verified": True,
             })
         managed_fields = [
-            field for field in ("title", "description", "state", "priority") if field in change
+            field
+            for field in ("title", "description", "state", "priority", "assignee")
+            if field in change
         ]
         plan = [{"action": "update_issue", "fields": managed_fields}]
         after_update = dict(before_update)
         after_update.update(change)
+        if "assignee" in change:
+            after_update["assignee"] = assignee_name
         if mode == "plan":
             return {
                 **base,
@@ -1246,6 +1325,8 @@ def execute_command(
             mutation["state_id"] = state_id
         if "priority" in change:
             mutation["priority"] = PRIORITIES[change["priority"]]
+        if assignee_id is not ...:
+            mutation["assignee_id"] = assignee_id
         client.update_issue_fields(issue["id"], **mutation)
         verified_issue = client.get_issue(identifier)
         if not isinstance(verified_issue, dict):

@@ -441,6 +441,7 @@ class PluginTests(unittest.TestCase):
                 "description",
                 "parent_identifier",
                 "priority",
+                "assignee",
                 "project",
                 "milestone",
                 "issue",
@@ -541,6 +542,25 @@ class PluginTests(unittest.TestCase):
             ],
         )
         self.assertNotIn("child-", json.dumps(result))
+
+    def test_public_result_exposes_verified_assignee_name(self):
+        result = _public_result(
+            {
+                "status": "verified_no_op",
+                "linear_result": {
+                    "verified": True,
+                    "result": "applied",
+                    "operation": "update_issue",
+                    "target": {
+                        "type": "issue",
+                        "identifier": "SIS-94",
+                        "url": "https://linear.app/example/issue/SIS-94/fixture",
+                    },
+                    "after": {"assignee": "Alexey Petrov"},
+                },
+            }
+        )
+        self.assertEqual(result["target"]["assignee"], "Alexey Petrov")
 
     def test_handler_uses_request_scoped_gateway_identity(self):
         fake_board = mock.Mock()
