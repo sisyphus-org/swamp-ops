@@ -163,6 +163,19 @@ def _one(items: list[dict[str, Any]], label: str, error_cls: type[Exception]) ->
     return items[0] if items else None
 
 
+def _compatible_projection(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    """Return true when two partial GraphQL projections agree where both speak."""
+    for key in set(left).intersection(right):
+        left_value = left[key]
+        right_value = right[key]
+        if isinstance(left_value, dict) and isinstance(right_value, dict):
+            if not _compatible_projection(left_value, right_value):
+                return False
+        elif left_value != right_value:
+            return False
+    return True
+
+
 def _exact_scope(client: Any, change: dict[str, Any], error_cls: type[Exception]) -> ExactScope:
     teams = _bounded(client.list_teams(), "workspace teams", error_cls)
     team = _one([item for item in teams if item.get("key") == "SIS"], "team SIS", error_cls)
@@ -235,7 +248,7 @@ def _exact_scope(client: Any, change: dict[str, Any], error_cls: type[Exception]
         if not isinstance(issue_id, str) or not issue_id.strip():
             _fail(error_cls, "SIS exact-title issues contain malformed ids")
         previous = issues_by_id.get(issue_id)
-        if previous is not None and previous != item:
+        if previous is not None and not _compatible_projection(previous, item):
             _fail(error_cls, "SIS exact-title issue read-back is inconsistent")
         issues_by_id[issue_id] = item
     return ExactScope(team, project, milestone, by_name, list(issues_by_id.values()))
