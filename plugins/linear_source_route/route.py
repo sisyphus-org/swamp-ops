@@ -519,7 +519,12 @@ def _validate_canonical_bulk_item(item: dict[str, Any], index: int) -> None:
         for field in endpoints:
             if not isinstance(change.get(field), str) or re.fullmatch(r"SIS-[1-9][0-9]*", change[field]) is None or change[field] == target["identifier"]:
                 raise RouteError(f"bulk item {index} has an invalid relation endpoint")
-        if any(change.get(field) not in ISSUE_RELATION_TYPES for field in types):
+        allowed_types = (
+            CREATE_ISSUE_RELATION_TYPES
+            if operation == "create_issue_relation"
+            else ISSUE_RELATION_TYPES
+        )
+        if any(change.get(field) not in allowed_types for field in types):
             raise RouteError(f"bulk item {index} has an invalid relation type")
     elif operation == "create_issue":
         reconstructed = {"operation": operation, **change}
