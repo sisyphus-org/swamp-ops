@@ -3765,6 +3765,33 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(replay["result"], "no_op")
             self.assertEqual(len(client.writes), 1)
 
+    def test_remove_links_rejects_concurrent_description_edit_before_update(self):
+        class ConcurrentEdit(FakeClient):
+            reads = 0
+
+            def get_issue(self, identifier):
+                self.reads += 1
+                if identifier == "SIS-59" and self.reads == 2:
+                    self.current["description"] = "concurrent user edit"
+                return super().get_issue(identifier)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = ConcurrentEdit()
+            client.current["description"] = "[kept](https://example.com)"
+            with self.assertRaisesRegex(lane.ContractError, "description.*drift"):
+                lane.execute_command(
+                    client,
+                    command(
+                        "update_issue",
+                        {"description_transform": "remove_links"},
+                        key="linear:SIS-59:update:remove-links-toctou",
+                    ),
+                    mode="apply",
+                    journal_path=Path(tmp) / "journal.json",
+                )
+            self.assertEqual(client.writes, [])
+            self.assertEqual(client.current["description"], "concurrent user edit")
+
     def test_update_issue_clears_project_and_milestone_together(self):
         with tempfile.TemporaryDirectory() as tmp:
             client = FakeClient()

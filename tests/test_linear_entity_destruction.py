@@ -1,4 +1,5 @@
 import copy
+import json
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -552,3 +553,136 @@ class LinearEntityDestructionTests(unittest.TestCase):
         self.assertTrue(recovered["result"]["recovered"])
         self.assertEqual(client.writes, [("delete", "project", "project-id")])
         verifier.assert_not_called()
+
+    def test_archive_crash_recovery_rejects_child_and_relation_drift(self):
+        for drift in ("child", "relation"):
+            with self.subTest(drift=drift), tempfile.TemporaryDirectory() as tmp:
+                class CrashArchive(DestructiveClient):
+                    crashed = False
+
+                    def archive_linear_entity(self, entity_type, entity_id):
+                        super().archive_linear_entity(entity_type, entity_id)
+                        if not self.crashed:
+                            self.crashed = True
+                            raise KeyboardInterrupt("death")
+
+                client = CrashArchive()
+                client.configure_nonempty_impact("issue")
+                raw = destructive_command(
+                    "archive_linear_entity",
+                    "issue",
+                    {"identifier": "SIS-77"},
+                    key=f"linear:destroy:archive-recovery-drift:{drift}",
+                )
+                planned = lane.execute_command(client, raw, mode="plan")
+                raw, verified = bind(raw, planned["before"])
+                journal = Path(tmp) / "j.json"
+                with mock.patch(
+                    "plugins.project_manager_linear.approval.verify_owner_approval",
+                    return_value=verified,
+                ):
+                    with self.assertRaises(KeyboardInterrupt):
+                        execute_claimed_task(
+                            raw, task_id="t_1234abcd", lane=lane, client=client,
+                            journal_path=journal, approval_now=NOW,
+                            approval_lease_seconds=1,
+                        )
+                    if drift == "child":
+                        client.children[0]["description"] = "dependency drift"
+                    else:
+                        client.issue_relations[0]["type"] = "blocks"
+                    with self.assertRaisesRegex(lane.ContractError, "impact.*drift"):
+                        execute_claimed_task(
+                            raw, task_id="t_1234abcd", lane=lane, client=client,
+                            journal_path=journal,
+                            approval_now=NOW + timedelta(seconds=2),
+                            approval_lease_seconds=1,
+                        )
+                recovery_path = journal.with_name(
+                    journal.name + ".linear-entity-destruction"
+                )
+                persisted_text = recovery_path.read_text(encoding="utf-8")
+                persisted = json.loads(persisted_text)
+                entry = next(iter(persisted["entries"].values()))
+                self.assertEqual(entry["phase"], "prepared")
+                self.assertEqual(recovery_path.stat().st_mode & 0o777, 0o600)
+                self.assertNotIn("dependency drift", persisted_text)
+                self.assertNotIn('"description"', persisted_text)
+
+    def test_delete_crash_recovery_rejects_dependency_drift(self):
+        cases = ("child", "relation", "project", "milestone", "link")
+        for drift in cases:
+            with self.subTest(drift=drift), tempfile.TemporaryDirectory() as tmp:
+                class CrashDelete(DestructiveClient):
+                    crashed = False
+
+                    def delete_linear_entity(self, entity_type, entity_id):
+                        super().delete_linear_entity(entity_type, entity_id)
+                        if not self.crashed:
+                            self.crashed = True
+                            raise KeyboardInterrupt("death")
+
+                client = CrashDelete()
+                entity_type = "issue" if drift in {"child", "relation"} else "project"
+                selector = (
+                    {"identifier": "SIS-77"}
+                    if entity_type == "issue"
+                    else {"name": "Empty project"}
+                )
+                client.configure_nonempty_impact(entity_type)
+                relation_before = copy.deepcopy(client.issue_relations)
+                milestone_before = copy.deepcopy(client.entities["milestones"])
+                project_before = copy.deepcopy(client.entities["projects"][0])
+                raw = destructive_command(
+                    "delete_linear_entity",
+                    entity_type,
+                    selector,
+                    key=f"linear:destroy:delete-recovery-drift:{drift}",
+                )
+                planned = lane.execute_command(client, raw, mode="plan")
+                raw, verified = bind(raw, planned["before"])
+                journal = Path(tmp) / "j.json"
+                with mock.patch(
+                    "plugins.project_manager_linear.approval.verify_owner_approval",
+                    return_value=verified,
+                ):
+                    with self.assertRaises(KeyboardInterrupt):
+                        execute_claimed_task(
+                            raw, task_id="t_1234abcd", lane=lane, client=client,
+                            journal_path=journal, approval_now=NOW,
+                            approval_lease_seconds=1,
+                        )
+                    if drift == "child":
+                        child = next(
+                            item for item in client.entities["issues"]
+                            if item["id"] == "child-id"
+                        )
+                        child["description"] = "dependency drift"
+                    elif drift == "relation":
+                        client.issue_relations = relation_before
+                    elif drift == "project":
+                        issue = next(
+                            item for item in client.entities["issues"]
+                            if item["id"] == "impacted-issue-id"
+                        )
+                        issue["description"] = "dependency drift"
+                    elif drift == "milestone":
+                        client.entities["milestones"] = milestone_before
+                    else:
+                        client.initiative_projects = [project_before]
+                    with self.assertRaisesRegex(lane.ContractError, "drift|cascade|remained"):
+                        execute_claimed_task(
+                            raw, task_id="t_1234abcd", lane=lane, client=client,
+                            journal_path=journal,
+                            approval_now=NOW + timedelta(seconds=2),
+                            approval_lease_seconds=1,
+                        )
+                recovery_path = journal.with_name(
+                    journal.name + ".linear-entity-destruction"
+                )
+                persisted_text = recovery_path.read_text(encoding="utf-8")
+                entry = next(iter(json.loads(persisted_text)["entries"].values()))
+                self.assertEqual(entry["phase"], "prepared")
+                self.assertEqual(recovery_path.stat().st_mode & 0o777, 0o600)
+                self.assertNotIn("dependency drift", persisted_text)
+                self.assertNotIn('"description"', persisted_text)

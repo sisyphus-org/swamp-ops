@@ -92,9 +92,39 @@ def _conflict_selector(item: dict[str, Any]) -> dict[str, Any]:
     """Identify the complete semantic entity selected by one child operation."""
     operation = item["operation"]
     change = item["change"]
+    target = item["target"]
+    relation_type = (
+        change.get("old_relation_type")
+        if operation == "replace_issue_relation"
+        else change.get("relation_type")
+    )
+    related_identifier = (
+        change.get("old_related_identifier")
+        if operation == "replace_issue_relation"
+        else change.get("related_identifier")
+    )
+    if (
+        operation in {
+            "create_issue_relation",
+            "remove_issue_relation",
+            "replace_issue_relation",
+        }
+        and relation_type == "related"
+        and isinstance(target.get("identifier"), str)
+        and isinstance(related_identifier, str)
+    ):
+        return {
+            "operation": operation,
+            "relation": {
+                "type": "related",
+                "endpoints": sorted(
+                    (target.get("identifier"), related_identifier)
+                ),
+            },
+        }
     selector: dict[str, Any] = {
         "operation": operation,
-        "target": item["target"],
+        "target": target,
     }
     fields = {
         "add_comment": ("body",),

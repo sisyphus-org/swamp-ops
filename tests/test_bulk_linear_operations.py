@@ -111,6 +111,40 @@ class BulkContractTests(unittest.TestCase):
         with self.assertRaisesRegex(lane.ContractError, "conflicting"):
             lane.validate_command(parent([item(0), conflicting]))
 
+    def test_source_and_pm_reject_reversed_symmetric_related_pair(self):
+        related = [
+            {
+                "operation": "create_issue_relation",
+                "target": {"type": "issue", "identifier": "SIS-10"},
+                "change": {
+                    "related_identifier": "SIS-11",
+                    "relation_type": "related",
+                },
+            },
+            {
+                "operation": "create_issue_relation",
+                "target": {"type": "issue", "identifier": "SIS-11"},
+                "change": {
+                    "related_identifier": "SIS-10",
+                    "relation_type": "related",
+                },
+            },
+        ]
+        with self.assertRaisesRegex(route.RouteError, "conflicting"):
+            route.parse_linear_request(
+                {"operation": "bulk_linear_operations", "items": related}
+            )
+        with self.assertRaisesRegex(lane.ContractError, "conflicting"):
+            lane.validate_command(parent(related))
+
+        directional = copy.deepcopy(related)
+        directional[0]["change"]["relation_type"] = "blocks"
+        directional[1]["change"]["relation_type"] = "blocks"
+        route.parse_linear_request(
+            {"operation": "bulk_linear_operations", "items": directional}
+        )
+        lane.validate_command(parent(directional))
+
     def test_derives_stable_domain_separated_child_identities_and_binds_order(self):
         team = {"type": "team", "identifier": "SIS"}
         workspace = {"type": "workspace", "identifier": "current"}

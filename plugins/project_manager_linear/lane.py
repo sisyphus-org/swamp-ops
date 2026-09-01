@@ -4138,6 +4138,17 @@ def execute_command(
         if "project" in change:
             mutation["project_id"] = desired_project_id
             mutation["milestone_id"] = desired_milestone_id
+        if description_transform == "remove_links":
+            fresh_issue = client.get_issue(identifier)
+            if (
+                not isinstance(fresh_issue, dict)
+                or fresh_issue.get("id") != issue.get("id")
+                or fresh_issue.get("identifier") != identifier
+                or fresh_issue.get("description") != issue.get("description")
+            ):
+                raise ContractError(
+                    "description transform pre-write description drifted"
+                )
         record_description_recovery("prepared")
         record_owner_recovery("prepared")
         client.update_issue_fields(issue["id"], **mutation)
