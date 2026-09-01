@@ -1028,6 +1028,9 @@ class WorkflowContractTests(unittest.TestCase):
             "A blocked mutating route is not proof that the external mutation did not happen",
             "bounded read-only reconciliation",
             "Never report that an entity is absent or a write failed solely from task status",
+            "authoritative mutation-scoped provenance",
+            "explicitly proves that no mutation was attempted",
+            "matching pre-existing entity",
         )
         for statement in required:
             with self.subTest(statement=statement):

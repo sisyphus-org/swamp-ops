@@ -62,11 +62,11 @@ A blocked mutating route is not proof that the external mutation did not happen.
 When a mutating request returns `blocked` without a factual pre-write rejection that proves no mutation was attempted, perform bounded read-only reconciliation through `linear_source_request` before answering:
 
 - for an exact issue update, state change, relation, archive, or delete, read/inventory the exact issue or affected scope and compare the requested observable fields;
-- for issue creation, search the exact requested title, then verify the returned project, milestone, parent, state, and other available scope fields;
-- for project, milestone, initiative, or hierarchy creation/linking, search or inventory only the named entity types and verify the requested relationships;
+- for issue creation, reconcile as created only when authoritative mutation-scoped provenance attributes the exact returned issue to this request; an exact title and matching scope alone are insufficient because titles are not unique;
+- for project, milestone, initiative, or hierarchy creation/linking, require the same authoritative request attribution before calling a newly observed entity the result of this mutation; otherwise current matching state proves only that the desired effect exists, not who created it;
 - never retry the mutation until reconciliation proves the target effect is absent and replay safety permits a retry.
 
-If reconciliation finds one exact compatible result, report the verified external outcome and continue the ordered plan. If it proves a factual pre-write absence or mismatch, report that factual blocker. If it finds zero, multiple, or conflicting candidates and cannot establish the effect, report that the outcome is unverified—not that the write failed—and stop dependent writes. Do not expose internal errors, task IDs, or raw payloads.
+If authoritative mutation-scoped provenance identifies one exact compatible result, report the verified external outcome and continue the ordered plan. Report a factual pre-write blocker only when the PM result explicitly proves that no mutation was attempted. A post-write mismatch or unchanged current state is not proof of a pre-write rejection. If provenance is absent, or reconciliation finds zero, multiple, or conflicting candidates, report that the outcome is unverified—not that the write failed—and stop dependent writes. A matching pre-existing entity may be described only as current verified state, never attributed to this request. Do not expose internal errors, task IDs, or raw payloads.
 
 ## Procedure
 
