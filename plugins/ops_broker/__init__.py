@@ -46,7 +46,7 @@ OPS_BROKER_SCHEMA = {
                     "get_result",
                 ],
             },
-            "arguments": {"type": "object", "maxProperties": 4},
+            "arguments": {"type": "object", "maxProperties": 6},
             "mode": {"type": "string", "enum": ["plan", "apply"]},
         },
         "required": [
