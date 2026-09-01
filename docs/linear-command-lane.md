@@ -13,14 +13,14 @@ Required envelope:
   "correlation_id": "UUIDv4",
   "idempotency_key": "linear:SIS-59:read:2026-08-28",
   "source_profile": "swe",
-  "operation": "read_issue | search_linear | inventory_linear | change_state | update_issue | add_comment | create_issue | converge_hierarchy | create_standalone_issue | converge_issue_tree | create_project | create_milestone | update_project | update_milestone | create_initiative | update_initiative | link_project_to_initiative",
+  "operation": "read_issue | search_linear | inventory_linear | change_state | update_issue | add_comment | create_issue | create_issue_relation | remove_issue_relation | replace_issue_relation | ...",
   "target": {"type": "issue", "identifier": "SIS-N"},
   "change": {},
   "policy": {"mode": "standard"}
 }
 ```
 
-`{"mode":"standard"}` remains the default and byte-for-byte backward compatible. The exact fixed-shape `owner_approved` attestation reference documented in [linear-owner-approval.md](linear-owner-approval.md) is accepted only for a parent-only `update_issue`. Standard mode may safely attach a top-level issue; replacing or clearing an existing parent requires consumed owner authorization from the common PM gate.
+`{"mode":"standard"}` remains the default. The existing exact fixed-shape `owner_approved` attestation reference documented in [linear-owner-approval.md](linear-owner-approval.md) is accepted only for parent-only `update_issue` and exact issue-relation removal/replacement. Relation removal/replacement always reject standard policy.
 
 The validator rejects unknown fields, arbitrary GraphQL or MCP method names, URLs, fuzzy identifiers, arrays/bulk targets, unsupported operations and unbounded payloads. After exact issue resolution, the execution lane additionally rejects targets whose resolved team is not `SIS`. `idempotency_key` is 8–200 characters, starts with an alphanumeric character, and thereafter uses only `A-Za-z0-9:._/-`.
 
@@ -35,6 +35,9 @@ The lane accepts only `linear-command.v2` and emits/accepts only `linear-result.
 - `search_linear`: the same complete inventory scope plus an exact non-empty query. PM exhausts fixed 100-node cursor pages with cursor and duplicate validation, then applies deterministic Python Unicode `casefold()` substring matching to issue identifiers/titles and entity names. There is no 100-item total cap and no server-side/raw query passthrough.
 - `change_state`: `change` must contain only `state`; exact allowlist is `Backlog`, `Todo`, `Research`, `In Progress`, `In Review`.
 - `update_issue`: `change` is a non-empty subset of `description`, safe `state`, and `High|Medium|Low` priority for one exact `SIS-N`; apply uses exact read-back and literal replay is a verified no-op.
+- `create_issue_relation`: safely creates one exact `blocks`, `blocked_by`, or symmetric `related` relation between same-team non-self `SIS-N` issues.
+- `remove_issue_relation`: owner-approved only; resolves exactly one existing relation from exact endpoint identifiers/type and deletes it with immediate full-inventory read-back. Zero or ambiguous matches fail closed.
+- `replace_issue_relation`: owner-approved only; binds exact old and new endpoint/type facts, canonicalizes `blocked_by`, treats `related` symmetrically, creates the missing deterministic new relation before deleting the old relation, and compensates/fails closed on partial failure or read-back drift. Its recovery journal stores hashes and phase only; source/public output contains no relation IDs.
 - `add_comment`: `change` must contain only `body`, 1–4000 characters. The public comment body remains exactly this user-authored text; reserved internal marker text cannot be supplied by the caller.
 - `create_issue`: `target` is exactly `{"type":"team","identifier":"SIS"}` and `change` contains bounded `title`, `description`, exact `parent_identifier`, safe `state`, and `High|Medium|Low` priority. The public issue description remains exactly user-authored.
 - `converge_hierarchy`: `target` is exactly `{"type":"team","identifier":"SIS"}` and `change` contains exactly one `project`, one `milestone`, and one top-level `issue`, with no entity UUID fields. Names/titles are 1–200 characters; optional descriptions are at most 10,000 characters; optional issue state uses the safe-state allowlist. The trusted PM lane derives candidate UUIDv4 IDs internally from the semantic idempotency key with separate project/milestone/issue domain strings. Team identity is the unique exact Linear key `SIS`; its mutable display name is not an identity field. Project and milestone resolution first checks candidate IDs, then may reuse one unambiguous exact-name entity only after exact `SIS` team-ID scope/project and supplied-description verification. Issue resolution remains deterministic-ID-only; a same-title issue with another ID fails closed. Missing entities are created, supplied-field drift fails closed, and omitted optional fields are neither sent nor compared.
@@ -47,7 +50,7 @@ The lane accepts only `linear-command.v2` and emits/accepts only `linear-result.
 - `update_initiative`: selects one exact existing initiative by current `name`, then updates a non-empty subset of `new_name`, `description`, and `target_date` with exact read-back and no-op replay.
 - `link_project_to_initiative`: adds one unique exact existing `SIS` project to one unique exact existing initiative. The relation uses a deterministic caller UUIDv4 and exact initiative-project read-back. Unlink is intentionally unavailable. Live schema introspection confirmed `InitiativeCreateInput.id`, nullable `InitiativeCreateInput.targetDate` / `InitiativeUpdateInput.targetDate`, and `InitiativeToProjectCreateInput.id`, `initiativeId`, and `projectId`.
 
-`Done`, `Canceled`, `Duplicate`, arbitrary/raw search, initiative unlink/reparenting/status/owner/labels, archive/delete, relation deletion, bulk and unrestricted structure changes remain unavailable and fail closed. Owner approval enables only exact issue-parent replacement or clear through `update_issue`; see [linear-owner-approval.md](linear-owner-approval.md).
+`Done`, `Canceled`, `Duplicate`, arbitrary/raw search, initiative unlink/reparenting/status/owner/labels, archive/issue deletion, bulk relation mutation and unrestricted structure changes remain unavailable. Owner approval enables only exact issue-parent replacement/clear and exact single relation removal/rewire; see [linear-owner-approval.md](linear-owner-approval.md).
 
 ### Read-only credential boundary
 
@@ -61,6 +64,10 @@ HERMES_PROFILE=project-manager python scripts/linear_pm_readonly_smoke.py \
   --entity-type issues --entity-type projects \
   --entity-type milestones --entity-type initiatives \
   --exclude-archived
+
+# Exact read-only relation inventory hash/count; performs no mutation.
+HERMES_PROFILE=project-manager python scripts/linear_pm_readonly_smoke.py \
+  --live --operation inventory_issue_relations --identifier SIS-77
 ```
 
 ### SIS-77 hierarchy tracer contract (live proof post-deploy)
@@ -113,7 +120,7 @@ LINEAR_TOKEN=... HERMES_HOME=/Users/hermes/.hermes/profiles/project-manager \
   --mode apply
 ```
 
-The normal journal is `$HERMES_HOME/linear-command-lane/journal.json`. It stores only SHA-256 hashes of idempotency keys and global mutation requests; it stores no source profile, command/session/delivery identity, command body, comment text, or credential.
+The normal journal is `$HERMES_HOME/linear-command-lane/journal.json`. It stores only SHA-256 hashes of idempotency keys and global mutation requests. Owner-approved relation and parent-only changes additionally use sibling recovery journals containing only request/approval/intent/complete-command/before/after SHA-256 values and a bounded phase; they contain no raw relation IDs, endpoint facts, command body, task ID, or credential. The common PM boundary separately stores the exact task and command/correlation/idempotency/source identities needed to prevent one delivery from recovering another approval.
 
 ## Idempotency and recovery
 
@@ -125,6 +132,7 @@ The normal journal is `$HERMES_HOME/linear-command-lane/journal.json`. It stores
 - Read-back blockers expose only a stable ordered list from `id/title`, `description`, `state`, `priority`, `parent`, `project`, `milestone`, and `team`. They never include live values, GraphQL payloads, entity UUIDs, or backend details.
 - Standalone/tree apply searches deterministic IDs before every write. On replay after a lost journal or partial write it reconciles the existing exact object or returns the precise allowlisted mismatch fields; it never creates a second object. The bounded tree repeats this independently for every child and verifies its exact parent after each write.
 - A local hash-only journal detects cross-operation or changed-global-request reuse after a successful verified apply, while allowing identical different-profile/session deliveries to converge under the same key.
+- Owner-approved apply has a separate atomic lease journal. First execution retains the live verify/re-plan TOCTOU gate; only one exact command/task delivery claims the approval. A stale claim can re-enter only with exact prepared lane evidence, while unexplained state drift and evidence-less stale claims fail closed. Completion is permanent and replay-safe: exact completed state is read back as a no-op, never re-mutated.
 - Apply always reads back the exact `SIS-N` target or deterministic entity ID. Missing/mismatched read-back is an error, never success.
 - Hierarchy apply holds the same single journal-wide lock across preflight, all creates, exact scoped list read-backs, and journal commit. It creates only missing project → milestone → issue entities. Existing project/milestone entities may be reused by unique exact name after strict scope and supplied-description checks; new issues always retain the internally derived UUIDv4 and never reuse a title-only match. A lost journal, crash after any intermediate create, literal replay, or concurrent replay converges without duplicate entities. Every currently reachable project scope (projects, then milestones/issues when the project exists, plus an explicitly requested state) is read before the first write; each intermediate create is verified before the next write.
 - Hierarchy plan/apply/no-op results contain typed `before` and `after` snapshots with the real live IDs of reused project/milestone entities, the deterministic issue ID, names/titles, supplied descriptions/state, structural project/milestone/team/parent IDs, and issue identifier/URL when present in live data. Plan actions never expose descriptions or hidden metadata; they contain at most fixed SHA-256 hashes and bounded lengths. `verified=true` is emitted only after exact scoped read-back matches all supplied scalar and structural fields (including a read-only already-converged plan/no-op).

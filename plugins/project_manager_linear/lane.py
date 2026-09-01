@@ -34,6 +34,8 @@ OPERATIONS = {
     "create_standalone_issue",
     "converge_issue_tree",
     "create_issue_relation",
+    "remove_issue_relation",
+    "replace_issue_relation",
     "create_project",
     "create_milestone",
     "update_project",
@@ -151,6 +153,11 @@ mutation LaneIssueRelationCreate($input: IssueRelationCreateInput!) {
       id type issue { id identifier } relatedIssue { id identifier }
     }
   }
+}
+"""
+ISSUE_RELATION_DELETE = """
+mutation LaneIssueRelationDelete($id: String!) {
+  issueRelationDelete(id: $id) { success }
 }
 """
 PARENT_CHILDREN_QUERY = """
@@ -594,6 +601,16 @@ class LinearClient:
         )["issueRelationCreate"]
         if result.get("success") is not True:
             raise ContractError("Linear issue relation creation did not succeed")
+
+    def delete_issue_relation(self, relation_id: str) -> None:
+        """Delete one previously resolved relation through a fixed mutation."""
+        if not isinstance(relation_id, str) or not relation_id:
+            raise ContractError("Linear issue relation deletion id is invalid")
+        result = self.execute(ISSUE_RELATION_DELETE, {"id": relation_id})[
+            "issueRelationDelete"
+        ]
+        if result.get("success") is not True:
+            raise ContractError("Linear issue relation deletion did not succeed")
 
     @staticmethod
     def _cursor_paginate(fetch: Any, label: str) -> list[dict[str, Any]]:
@@ -1225,6 +1242,38 @@ def validate_command(raw: Any) -> dict[str, Any]:
             )
         if related_identifier == target["identifier"]:
             raise ContractError("create_issue_relation cannot relate an issue to itself")
+    elif operation in {"remove_issue_relation", "replace_issue_relation"}:
+        expected = (
+            {"related_identifier", "relation_type"}
+            if operation == "remove_issue_relation"
+            else {
+                "old_related_identifier",
+                "old_relation_type",
+                "new_related_identifier",
+                "new_relation_type",
+            }
+        )
+        if set(change) != expected:
+            raise ContractError(f"{operation} change has invalid fields")
+        endpoint_fields = (
+            ("related_identifier",)
+            if operation == "remove_issue_relation"
+            else ("old_related_identifier", "new_related_identifier")
+        )
+        type_fields = (
+            ("relation_type",)
+            if operation == "remove_issue_relation"
+            else ("old_relation_type", "new_relation_type")
+        )
+        for field in endpoint_fields:
+            endpoint = change.get(field)
+            if not isinstance(endpoint, str) or not ISSUE_IDENTIFIER.fullmatch(endpoint):
+                raise ContractError(f"{operation} {field} must be an exact SIS-N identifier")
+            if endpoint == target["identifier"]:
+                raise ContractError(f"{operation} cannot relate an issue to itself")
+        for field in type_fields:
+            if change.get(field) not in ISSUE_RELATION_TYPES:
+                raise ContractError(f"{operation} {field} is not in the bounded allowlist")
     elif operation == "update_sub_issues":
         if set(change) != {"description"}:
             raise ContractError("update_sub_issues supports exactly description")
@@ -1305,12 +1354,17 @@ def validate_command(raw: Any) -> dict[str, Any]:
         approval.validate_policy(raw["policy"])
     except approval.ApprovalError as exc:
         raise ContractError(str(exc)) from exc
-    if raw["policy"].get("mode") == "owner_approved" and not (
+    owner_approvable = (
         operation == "update_issue" and set(change) == {"parent_identifier"}
-    ):
+    ) or operation in {"remove_issue_relation", "replace_issue_relation"}
+    if raw["policy"].get("mode") == "owner_approved" and not owner_approvable:
         raise ContractError(
-            "owner_approved policy is allowed only for a parent-only update_issue"
+            "owner_approved policy is not allowed for this exact operation"
         )
+    if operation in {"remove_issue_relation", "replace_issue_relation"} and raw[
+        "policy"
+    ].get("mode") != "owner_approved":
+        raise ContractError(f"{operation} requires owner_approved policy")
     return raw
 
 
@@ -1675,6 +1729,75 @@ def write_journal(path: Path, entries: dict[str, str]) -> None:
     temporary.replace(path)
 
 
+def load_relation_recovery_journal(path: Path) -> dict[str, dict[str, str]]:
+    """Load exact command/approval-bound phases for owner-approved recovery."""
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ContractError("issue relation recovery journal is unreadable") from exc
+    if (
+        not isinstance(raw, dict)
+        or set(raw) != {"schema_version", "entries"}
+        or raw.get("schema_version") != 2
+        or not isinstance(raw.get("entries"), dict)
+    ):
+        raise ContractError("issue relation recovery journal has an invalid shape")
+    entries = raw["entries"]
+    for key, entry in entries.items():
+        if (
+            not isinstance(key, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", key)
+            or not isinstance(entry, dict)
+            or set(entry)
+            != {
+                "request_hash",
+                "approval_checksum",
+                "intent_hash",
+                "command_hash",
+                "before_state_hash",
+                "after_state_hash",
+                "phase",
+            }
+            or any(
+                not isinstance(entry.get(field), str)
+                or re.fullmatch(r"[0-9a-f]{64}", entry[field]) is None
+                for field in (
+                    "request_hash",
+                    "approval_checksum",
+                    "intent_hash",
+                    "command_hash",
+                    "before_state_hash",
+                    "after_state_hash",
+                )
+            )
+            or entry.get("phase") not in {"prepared", "new_created", "completed"}
+        ):
+            raise ContractError("issue relation recovery journal has an invalid shape")
+    return entries
+
+
+def write_relation_recovery_journal(
+    path: Path, entries: dict[str, dict[str, str]]
+) -> None:
+    """Atomically persist relation recovery hashes without raw relation IDs."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+        json.dump({"schema_version": 2, "entries": entries}, handle, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temporary, 0o600)
+    temporary.replace(path)
+    directory = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
 @contextmanager
 def command_lock(journal_path: Path):
     """Serialize all local mutation applies sharing one journal."""
@@ -1715,6 +1838,7 @@ def execute_command(
                     "target": command["target"],
                     "change": command["change"],
                 },
+                expected_command=command,
             )
         except approval.ApprovalError as exc:
             raise ContractError(str(exc)) from exc
@@ -1967,6 +2091,616 @@ def execute_command(
         raise ContractError(f"exact target is not in the SIS team: {identifier}")
     before = issue_snapshot(issue)
     base = result_base(command, issue, mode)
+    if command["operation"] in {"remove_issue_relation", "replace_issue_relation"}:
+        change = command["change"]
+        operation = command["operation"]
+        endpoint_fields = (
+            ("related_identifier",)
+            if operation == "remove_issue_relation"
+            else ("old_related_identifier", "new_related_identifier")
+        )
+        endpoints: dict[str, dict[str, Any]] = {}
+        for field in endpoint_fields:
+            related_identifier = change[field]
+            related = client.get_issue(related_identifier)
+            if (
+                not isinstance(related, dict)
+                or related.get("identifier") != related_identifier
+                or not isinstance(related.get("id"), str)
+                or not related["id"].strip()
+            ):
+                raise ContractError(
+                    f"exact related Linear issue not found: {related_identifier}"
+                )
+            related_team = related.get("team")
+            if (
+                not isinstance(related_team, dict)
+                or related_team.get("id") != team["id"]
+                or related_team.get("key") != "SIS"
+            ):
+                raise ContractError(
+                    f"exact related target is not in the SIS team: {related_identifier}"
+                )
+            endpoints[field] = related
+
+        def canonical_spec(related: dict[str, Any], relation_type: str) -> dict[str, Any]:
+            if relation_type == "blocked_by":
+                source, destination, linear_type = related, issue, "blocks"
+            elif relation_type == "blocks":
+                source, destination, linear_type = issue, related, "blocks"
+            else:
+                source, destination = sorted(
+                    (issue, related), key=lambda item: item["identifier"]
+                )
+                linear_type = "related"
+            return {
+                "source": source,
+                "destination": destination,
+                "linear_type": linear_type,
+            }
+
+        def normalized_relation(candidate: Any) -> dict[str, Any]:
+            if not isinstance(candidate, dict):
+                raise ContractError("issue relation inventory payload is invalid")
+            relation_id = candidate.get("id")
+            source = candidate.get("issue")
+            destination = candidate.get("relatedIssue")
+            if (
+                not isinstance(relation_id, str)
+                or not relation_id
+                or not isinstance(source, dict)
+                or not isinstance(destination, dict)
+                or not isinstance(source.get("id"), str)
+                or not source["id"]
+                or not isinstance(destination.get("id"), str)
+                or not destination["id"]
+                or not isinstance(source.get("identifier"), str)
+                or ISSUE_IDENTIFIER.fullmatch(source["identifier"]) is None
+                or not isinstance(destination.get("identifier"), str)
+                or ISSUE_IDENTIFIER.fullmatch(destination["identifier"]) is None
+                or candidate.get("type") not in {"blocks", "related"}
+            ):
+                raise ContractError("issue relation inventory payload is invalid")
+            return {
+                "id": relation_id,
+                "type": candidate["type"],
+                "issue": {
+                    "id": source["id"],
+                    "identifier": source["identifier"],
+                },
+                "relatedIssue": {
+                    "id": destination["id"],
+                    "identifier": destination["identifier"],
+                },
+            }
+
+        def change_relation_matches(candidate: dict[str, Any], spec: dict[str, Any]) -> bool:
+            source = candidate["issue"]
+            destination = candidate["relatedIssue"]
+            direct = (
+                source["id"] == spec["source"]["id"]
+                and source["identifier"] == spec["source"]["identifier"]
+                and destination["id"] == spec["destination"]["id"]
+                and destination["identifier"] == spec["destination"]["identifier"]
+            )
+            reverse = (
+                spec["linear_type"] == "related"
+                and source["id"] == spec["destination"]["id"]
+                and source["identifier"] == spec["destination"]["identifier"]
+                and destination["id"] == spec["source"]["id"]
+                and destination["identifier"] == spec["source"]["identifier"]
+            )
+            return candidate["type"] == spec["linear_type"] and (direct or reverse)
+
+        raw_inventory = client.list_issue_relations(identifier)
+        if not isinstance(raw_inventory, list):
+            raise ContractError("issue relation inventory payload is invalid")
+        inventory = sorted(
+            (normalized_relation(item) for item in raw_inventory),
+            key=lambda item: item["id"],
+        )
+        before_inventory = {"identifier": identifier, "inventory": inventory}
+        current_inventory_hash = hashlib.sha256(
+            json.dumps(
+                before_inventory,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        recovery_path = (
+            journal_path.with_name(journal_path.name + ".issue-relations")
+            if journal_path is not None
+            else None
+        )
+        recovery_entries = (
+            load_relation_recovery_journal(recovery_path)
+            if recovery_path is not None
+            else {}
+        )
+        recovery = recovery_entries.get(key_hash)
+        approval_reference = command["policy"]["approval"]
+        exact_recovery_binding = {
+            "approval_checksum": approval_reference["checksum"],
+            "intent_hash": approval_reference["intent_hash"],
+            "command_hash": hashlib.sha256(
+                json.dumps(
+                    command,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
+        }
+        if recovery is not None and (
+            recovery["request_hash"] != request_hash
+            or any(
+                recovery[field] != value
+                for field, value in exact_recovery_binding.items()
+            )
+        ):
+            raise ContractError("issue relation recovery journal request conflict")
+
+        def public_recovery_evidence(
+            entry: dict[str, str] | None,
+        ) -> dict[str, str]:
+            if entry is None:
+                raise ContractError("issue relation recovery evidence is missing")
+            return {
+                "schema_version": "linear-owner-recovery.v1",
+                **exact_recovery_binding,
+                "before_state_hash": entry["before_state_hash"],
+                "after_state_hash": entry["after_state_hash"],
+                "phase": entry["phase"],
+            }
+
+        def inventory_state_hash(items: list[dict[str, Any]]) -> str:
+            return hashlib.sha256(
+                json.dumps(
+                    {"identifier": identifier, "inventory": items},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest()
+
+        def record_recovery(
+            *,
+            before_state_hash: str,
+            after_state_hash: str,
+            phase: str,
+        ) -> None:
+            if recovery_path is None or mode != "apply":
+                return
+            recovery_entries[key_hash] = {
+                "request_hash": request_hash,
+                **exact_recovery_binding,
+                "before_state_hash": (
+                    recovery["before_state_hash"]
+                    if recovery is not None
+                    else before_state_hash
+                ),
+                "after_state_hash": (
+                    recovery["after_state_hash"]
+                    if recovery is not None
+                    else after_state_hash
+                ),
+                "phase": phase,
+            }
+            write_relation_recovery_journal(recovery_path, recovery_entries)
+
+        if operation == "remove_issue_relation":
+            old_public = {
+                "identifier": identifier,
+                "related_identifier": change["related_identifier"],
+                "relation_type": change["relation_type"],
+            }
+            old_spec = canonical_spec(
+                endpoints["related_identifier"], change["relation_type"]
+            )
+            old_matches = [item for item in inventory if change_relation_matches(item, old_spec)]
+            if not old_matches:
+                recovered = (
+                    recovery is not None
+                    and recovery["after_state_hash"] == current_inventory_hash
+                    and recovery["phase"] in {"prepared", "completed"}
+                )
+                if journal.get(key_hash) == request_hash or recovered:
+                    if recovered:
+                        assert recovery is not None
+                        record_recovery(
+                            before_state_hash=recovery["before_state_hash"],
+                            after_state_hash=recovery["after_state_hash"],
+                            phase="completed",
+                        )
+                    return {
+                        **base,
+                        "target": {"type": "issue_relation", **old_public},
+                        "result": "no_op",
+                        "before": before_inventory,
+                        "after": {**old_public, "present": False},
+                        "plan": [],
+                        "no_op": True,
+                        "verified": True,
+                        "recovered": True,
+                        "recovery_evidence": public_recovery_evidence(
+                            recovery_entries.get(key_hash, recovery)
+                        ),
+                    }
+                raise ContractError("exact issue relation was not found")
+            if len(old_matches) != 1:
+                raise ContractError("exact issue relation is ambiguous")
+            plan = [{"action": "remove_issue_relation", **old_public}]
+            relation_base = {
+                **base,
+                "target": {"type": "issue_relation", **old_public},
+            }
+            if mode == "plan":
+                return {
+                    **relation_base,
+                    "result": "planned",
+                    "before": before_inventory,
+                    "after": {**old_public, "present": False},
+                    "plan": plan,
+                    "no_op": False,
+                    "verified": False,
+                }
+            expected_inventory = [
+                item for item in inventory if item["id"] != old_matches[0]["id"]
+            ]
+            expected_after_hash = inventory_state_hash(expected_inventory)
+            record_recovery(
+                before_state_hash=current_inventory_hash,
+                after_state_hash=expected_after_hash,
+                phase="prepared",
+            )
+            client.delete_issue_relation(old_matches[0]["id"])
+            verified_inventory = sorted(
+                (
+                    normalized_relation(item)
+                    for item in client.list_issue_relations(identifier)
+                ),
+                key=lambda item: item["id"],
+            )
+            if verified_inventory != expected_inventory:
+                old_relation = old_matches[0]
+                try:
+                    if old_relation["id"] not in {
+                        item["id"] for item in verified_inventory
+                    }:
+                        client.create_issue_relation(
+                            relation_id=old_relation["id"],
+                            issue_id=old_relation["issue"]["id"],
+                            related_issue_id=old_relation["relatedIssue"]["id"],
+                            relation_type=old_relation["type"],
+                        )
+                    compensated = sorted(
+                        (
+                            normalized_relation(item)
+                            for item in client.list_issue_relations(identifier)
+                        ),
+                        key=lambda item: item["id"],
+                    )
+                except Exception as compensation_exc:
+                    raise ContractError(
+                        "issue relation removal compensation failed closed"
+                    ) from compensation_exc
+                if recovery_path is not None:
+                    recovery_entries.pop(key_hash, None)
+                    write_relation_recovery_journal(recovery_path, recovery_entries)
+                if compensated != inventory:
+                    raise ContractError(
+                        "issue relation removal compensation failed closed"
+                    )
+                raise ContractError(
+                    "issue relation removal read-back drift was compensated"
+                )
+            record_recovery(
+                before_state_hash=current_inventory_hash,
+                after_state_hash=expected_after_hash,
+                phase="completed",
+            )
+            completed_recovery = recovery_entries[key_hash]
+            return finish(
+                {
+                    **relation_base,
+                    "result": "applied",
+                    "before": before_inventory,
+                    "after": {**old_public, "present": False},
+                    "plan": plan,
+                    "no_op": False,
+                    "verified": True,
+                    "recovery_evidence": public_recovery_evidence(
+                        completed_recovery
+                    ),
+                }
+            )
+        else:
+            old_public = {
+                "identifier": identifier,
+                "related_identifier": change["old_related_identifier"],
+                "relation_type": change["old_relation_type"],
+            }
+            new_public = {
+                "identifier": identifier,
+                "related_identifier": change["new_related_identifier"],
+                "relation_type": change["new_relation_type"],
+            }
+            old_spec = canonical_spec(
+                endpoints["old_related_identifier"], change["old_relation_type"]
+            )
+            new_spec = canonical_spec(
+                endpoints["new_related_identifier"], change["new_relation_type"]
+            )
+            new_relation_semantic = json.dumps(
+                {
+                    "issue_identifier": new_spec["source"]["identifier"],
+                    "related_identifier": new_spec["destination"]["identifier"],
+                    "type": new_spec["linear_type"],
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            new_relation_id = deterministic_uuid4(
+                "linear-command:issue-relation:v2", new_relation_semantic
+            )
+            old_matches = [item for item in inventory if change_relation_matches(item, old_spec)]
+            new_matches = [item for item in inventory if change_relation_matches(item, new_spec)]
+            if len(new_matches) > 1:
+                raise ContractError("exact new issue relation is ambiguous")
+            if not old_matches:
+                recovered = (
+                    recovery is not None
+                    and recovery["after_state_hash"] == current_inventory_hash
+                    and recovery["phase"]
+                    in {"prepared", "new_created", "completed"}
+                )
+                if (
+                    len(new_matches) == 1
+                    and (journal.get(key_hash) == request_hash or recovered)
+                ):
+                    if recovered:
+                        assert recovery is not None
+                        record_recovery(
+                            before_state_hash=recovery["before_state_hash"],
+                            after_state_hash=recovery["after_state_hash"],
+                            phase="completed",
+                        )
+                    return {
+                        **base,
+                        "target": {
+                            "type": "issue_relation_replacement",
+                            "old": old_public,
+                            "new": new_public,
+                        },
+                        "result": "no_op",
+                        "before": before_inventory,
+                        "after": new_public,
+                        "plan": [],
+                        "no_op": True,
+                        "verified": True,
+                        "recovered": True,
+                        "recovery_evidence": public_recovery_evidence(
+                            recovery_entries.get(key_hash, recovery)
+                        ),
+                    }
+                raise ContractError("exact old issue relation was not found")
+            if len(old_matches) != 1:
+                raise ContractError("exact old issue relation is ambiguous")
+            plan = []
+            if not new_matches:
+                plan.append({"action": "create_issue_relation", **new_public})
+            if old_matches[0]["id"] != (new_matches[0]["id"] if new_matches else None):
+                plan.append({"action": "remove_issue_relation", **old_public})
+            relation_base = {
+                **base,
+                "target": {
+                    "type": "issue_relation_replacement",
+                    "old": old_public,
+                    "new": new_public,
+                },
+            }
+            intermediate_recovered = False
+            if recovery is not None and len(new_matches) == 1:
+                without_new = [
+                    item for item in inventory if item["id"] != new_matches[0]["id"]
+                ]
+                without_old = [
+                    item for item in inventory if item["id"] != old_matches[0]["id"]
+                ]
+                intermediate_recovered = (
+                    new_matches[0]["id"] == new_relation_id
+                    and inventory_state_hash(without_new)
+                    == recovery["before_state_hash"]
+                    and inventory_state_hash(without_old)
+                    == recovery["after_state_hash"]
+                    and recovery["phase"] in {"prepared", "new_created"}
+                )
+            if mode == "plan":
+                result = {
+                    **relation_base,
+                    "result": "planned" if plan else "no_op",
+                    "before": before_inventory,
+                    "after": new_public,
+                    "plan": plan,
+                    "no_op": not plan,
+                    "verified": not plan,
+                }
+                if intermediate_recovered:
+                    result["recovered"] = True
+                    result["recovery_evidence"] = public_recovery_evidence(recovery)
+                return result
+            if not plan:
+                record_recovery(
+                    before_state_hash=current_inventory_hash,
+                    after_state_hash=current_inventory_hash,
+                    phase="completed",
+                )
+                completed_recovery = recovery_entries.get(key_hash)
+                return finish(
+                    {
+                        **relation_base,
+                        "result": "no_op",
+                        "before": before_inventory,
+                        "after": new_public,
+                        "plan": [],
+                        "no_op": True,
+                        "verified": True,
+                        **(
+                            {
+                                "recovery_evidence": public_recovery_evidence(
+                                    completed_recovery
+                                )
+                            }
+                            if completed_recovery is not None
+                            else {}
+                        ),
+                    }
+                )
+            expected_inventory = [
+                item for item in inventory if item["id"] != old_matches[0]["id"]
+            ]
+            if not new_matches:
+                expected_inventory.append(
+                    {
+                        "id": new_relation_id,
+                        "type": new_spec["linear_type"],
+                        "issue": {
+                            "id": new_spec["source"]["id"],
+                            "identifier": new_spec["source"]["identifier"],
+                        },
+                        "relatedIssue": {
+                            "id": new_spec["destination"]["id"],
+                            "identifier": new_spec["destination"]["identifier"],
+                        },
+                    }
+                )
+                expected_inventory.sort(key=lambda item: item["id"])
+            expected_after_hash = inventory_state_hash(expected_inventory)
+            record_recovery(
+                before_state_hash=current_inventory_hash,
+                after_state_hash=expected_after_hash,
+                phase="prepared",
+            )
+            created_new = False
+            new_relation = new_matches[0] if new_matches else None
+            if new_relation is None:
+                client.create_issue_relation(
+                    relation_id=new_relation_id,
+                    issue_id=new_spec["source"]["id"],
+                    related_issue_id=new_spec["destination"]["id"],
+                    relation_type=new_spec["linear_type"],
+                )
+                read_back = normalized_relation(
+                    client.get_issue_relation(new_relation_id)
+                )
+                if (
+                    read_back["id"] != new_relation_id
+                    or not change_relation_matches(read_back, new_spec)
+                ):
+                    raise ContractError(
+                        "issue relation replacement create read-back verification failed"
+                    )
+                created_new = True
+                new_relation = read_back
+                record_recovery(
+                    before_state_hash=current_inventory_hash,
+                    after_state_hash=expected_after_hash,
+                    phase="new_created",
+                )
+            try:
+                client.delete_issue_relation(old_matches[0]["id"])
+            except Exception as exc:
+                if created_new and new_relation is not None:
+                    try:
+                        client.delete_issue_relation(new_relation["id"])
+                    except Exception as compensation_exc:
+                        raise ContractError(
+                            "issue relation replacement failed and compensation failed closed"
+                        ) from compensation_exc
+                    compensated = sorted(
+                        (
+                            normalized_relation(item)
+                            for item in client.list_issue_relations(identifier)
+                        ),
+                        key=lambda item: item["id"],
+                    )
+                    if compensated != inventory:
+                        raise ContractError(
+                            "issue relation replacement compensation read-back failed"
+                        ) from exc
+                    if recovery_path is not None:
+                        recovery_entries.pop(key_hash, None)
+                        write_relation_recovery_journal(
+                            recovery_path, recovery_entries
+                        )
+                raise ContractError(
+                    "issue relation replacement delete failed; created relation was compensated"
+                ) from exc
+            verified_inventory = sorted(
+                (
+                    normalized_relation(item)
+                    for item in client.list_issue_relations(identifier)
+                ),
+                key=lambda item: item["id"],
+            )
+            if verified_inventory != expected_inventory:
+                try:
+                    verified_ids = {item["id"] for item in verified_inventory}
+                    old_relation = old_matches[0]
+                    if old_relation["id"] not in verified_ids:
+                        client.create_issue_relation(
+                            relation_id=old_relation["id"],
+                            issue_id=old_relation["issue"]["id"],
+                            related_issue_id=old_relation["relatedIssue"]["id"],
+                            relation_type=old_relation["type"],
+                        )
+                    if (
+                        created_new
+                        and new_relation is not None
+                        and new_relation["id"] in verified_ids
+                    ):
+                        client.delete_issue_relation(new_relation["id"])
+                    compensated = sorted(
+                        (
+                            normalized_relation(item)
+                            for item in client.list_issue_relations(identifier)
+                        ),
+                        key=lambda item: item["id"],
+                    )
+                except Exception as compensation_exc:
+                    raise ContractError(
+                        "issue relation replacement compensation failed closed"
+                    ) from compensation_exc
+                if compensated != inventory:
+                    raise ContractError(
+                        "issue relation replacement compensation failed closed"
+                    )
+                if recovery_path is not None:
+                    recovery_entries.pop(key_hash, None)
+                    write_relation_recovery_journal(recovery_path, recovery_entries)
+                raise ContractError(
+                    "issue relation replacement read-back drift was compensated"
+                )
+            record_recovery(
+                before_state_hash=current_inventory_hash,
+                after_state_hash=expected_after_hash,
+                phase="completed",
+            )
+            completed_recovery = recovery_entries[key_hash]
+            return finish(
+                {
+                    **relation_base,
+                    "result": "applied",
+                    "before": before_inventory,
+                    "after": new_public,
+                    "plan": plan,
+                    "no_op": False,
+                    "verified": True,
+                    "recovery_evidence": public_recovery_evidence(
+                        completed_recovery
+                    ),
+                }
+            )
+        raise ContractError("issue relation change apply path is unavailable")
     if command["operation"] == "create_issue_relation":
         change = command["change"]
         related_identifier = change["related_identifier"]
@@ -2671,8 +3405,124 @@ def execute_command(
 
         fields = update_mismatches(issue)
         before_update = update_snapshot(issue)
+        owner_parent_recovery = (
+            command["policy"].get("mode") == "owner_approved"
+            and "parent_identifier" in change
+        )
+        owner_recovery_path = (
+            journal_path.with_name(journal_path.name + ".owner-updates")
+            if owner_parent_recovery and journal_path is not None
+            else None
+        )
+        owner_recovery_entries = (
+            load_relation_recovery_journal(owner_recovery_path)
+            if owner_recovery_path is not None
+            else {}
+        )
+        owner_recovery = owner_recovery_entries.get(key_hash)
+        expected_owner_after = dict(before_update)
+        expected_owner_after.update(change)
+
+        def owner_state_hash(value: dict[str, Any]) -> str:
+            return hashlib.sha256(
+                json.dumps(
+                    value,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+
+        owner_before_hash = owner_state_hash(before_update)
+        owner_after_hash = owner_state_hash(expected_owner_after)
+        owner_exact_binding: dict[str, str] | None = None
+        if owner_parent_recovery:
+            approval_reference = command["policy"]["approval"]
+            owner_exact_binding = {
+                "approval_checksum": approval_reference["checksum"],
+                "intent_hash": approval_reference["intent_hash"],
+                "command_hash": hashlib.sha256(
+                    json.dumps(
+                        command,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
+            }
+            if owner_recovery is not None and (
+                owner_recovery["request_hash"] != request_hash
+                or any(
+                    owner_recovery[field] != value
+                    for field, value in owner_exact_binding.items()
+                )
+            ):
+                raise ContractError("owner-approved issue recovery request conflict")
+
+        def owner_recovery_evidence(entry: dict[str, str]) -> dict[str, str]:
+            if owner_exact_binding is None:
+                raise ContractError("owner-approved issue recovery binding is missing")
+            return {
+                "schema_version": "linear-owner-recovery.v1",
+                **owner_exact_binding,
+                "before_state_hash": entry["before_state_hash"],
+                "after_state_hash": entry["after_state_hash"],
+                "phase": entry["phase"],
+            }
+
+        def record_owner_recovery(phase: str) -> dict[str, str] | None:
+            if owner_recovery_path is None or mode != "apply":
+                return None
+            if owner_exact_binding is None:
+                raise ContractError("owner-approved issue recovery binding is missing")
+            entry = {
+                "request_hash": request_hash,
+                **owner_exact_binding,
+                "before_state_hash": (
+                    owner_recovery["before_state_hash"]
+                    if owner_recovery is not None
+                    else owner_before_hash
+                ),
+                "after_state_hash": (
+                    owner_recovery["after_state_hash"]
+                    if owner_recovery is not None
+                    else owner_after_hash
+                ),
+                "phase": phase,
+            }
+            owner_recovery_entries[key_hash] = entry
+            write_relation_recovery_journal(
+                owner_recovery_path, owner_recovery_entries
+            )
+            return entry
+
+        if owner_recovery is not None:
+            if owner_before_hash == owner_recovery["after_state_hash"]:
+                completed_recovery = (
+                    record_owner_recovery("completed")
+                    if mode == "apply"
+                    else owner_recovery
+                )
+                if completed_recovery is None:
+                    raise ContractError("owner-approved issue recovery evidence is missing")
+                return {
+                    **base,
+                    "result": "no_op",
+                    "before": before_update,
+                    "after": before_update,
+                    "plan": [],
+                    "no_op": True,
+                    "verified": True,
+                    "recovered": True,
+                    "recovery_evidence": owner_recovery_evidence(
+                        completed_recovery
+                    ),
+                }
+            if owner_before_hash != owner_recovery["before_state_hash"]:
+                raise ContractError("owner-approved issue recovery state drifted")
         if not fields:
-            return finish({
+            completed_recovery = record_owner_recovery("completed")
+            result = {
                 **base,
                 "result": "no_op",
                 "before": before_update,
@@ -2680,7 +3530,12 @@ def execute_command(
                 "plan": [],
                 "no_op": True,
                 "verified": True,
-            })
+            }
+            if completed_recovery is not None:
+                result["recovery_evidence"] = owner_recovery_evidence(
+                    completed_recovery
+                )
+            return finish(result)
         managed_fields = [
             field
             for field in (
@@ -2737,6 +3592,7 @@ def execute_command(
         if "project" in change:
             mutation["project_id"] = desired_project_id
             mutation["milestone_id"] = desired_milestone_id
+        record_owner_recovery("prepared")
         client.update_issue_fields(issue["id"], **mutation)
         verified_issue = client.get_issue(identifier)
         if not isinstance(verified_issue, dict):
@@ -2746,7 +3602,8 @@ def execute_command(
         fields = update_mismatches(verified_issue)
         if fields:
             raise ContractError(_COMPARISON.mismatch_message("update_issue", fields))
-        return finish({
+        completed_recovery = record_owner_recovery("completed")
+        result = {
             **base,
             "result": "applied",
             "before": before_update,
@@ -2754,7 +3611,12 @@ def execute_command(
             "plan": plan,
             "no_op": False,
             "verified": True,
-        })
+        }
+        if completed_recovery is not None:
+            result["recovery_evidence"] = owner_recovery_evidence(
+                completed_recovery
+            )
+        return finish(result)
     if command["operation"] == "change_state":
         requested = command["change"]["state"]
         states = [item for item in client.list_states(issue["team"]["id"]) if item["name"] == requested]

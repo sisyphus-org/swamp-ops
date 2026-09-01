@@ -85,8 +85,12 @@ def validate_intent(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != {"operation", "target", "change"}:
         raise ContractError("intent must contain exactly operation, target and change")
     operation = value.get("operation")
-    if operation != "update_issue":
-        raise ContractError("intent operation must be update_issue")
+    if operation not in {
+        "update_issue",
+        "remove_issue_relation",
+        "replace_issue_relation",
+    }:
+        raise ContractError("intent operation is not owner-approvable")
     target = value.get("target")
     if (
         not isinstance(target, dict)
@@ -99,15 +103,50 @@ def validate_intent(value: Any) -> dict[str, Any]:
     change = value.get("change")
     if not isinstance(change, dict):
         raise ContractError("intent change must be an object")
-    if set(change) != {"parent_identifier"}:
-        raise ContractError("update_issue requires exactly parent_identifier")
-    parent = change.get("parent_identifier")
-    if parent is not None and (
-        not isinstance(parent, str) or ISSUE_IDENTIFIER.fullmatch(parent) is None
-    ):
-        raise ContractError("update_issue parent_identifier must be exact SIS-N or null")
-    if parent == target["identifier"]:
-        raise ContractError("update_issue cannot parent an issue to itself")
+    if operation == "update_issue":
+        if set(change) != {"parent_identifier"}:
+            raise ContractError("update_issue requires exactly parent_identifier")
+        parent = change.get("parent_identifier")
+        if parent is not None and (
+            not isinstance(parent, str) or ISSUE_IDENTIFIER.fullmatch(parent) is None
+        ):
+            raise ContractError("update_issue parent_identifier must be exact SIS-N or null")
+        if parent == target["identifier"]:
+            raise ContractError("update_issue cannot parent an issue to itself")
+        return value
+    fields = (
+        {"related_identifier", "relation_type"}
+        if operation == "remove_issue_relation"
+        else {
+            "old_related_identifier",
+            "old_relation_type",
+            "new_related_identifier",
+            "new_relation_type",
+        }
+    )
+    if set(change) != fields:
+        raise ContractError(f"{operation} change fields are invalid")
+    endpoint_fields = (
+        ("related_identifier",)
+        if operation == "remove_issue_relation"
+        else ("old_related_identifier", "new_related_identifier")
+    )
+    type_fields = (
+        ("relation_type",)
+        if operation == "remove_issue_relation"
+        else ("old_relation_type", "new_relation_type")
+    )
+    for field in endpoint_fields:
+        endpoint = change.get(field)
+        if (
+            not isinstance(endpoint, str)
+            or ISSUE_IDENTIFIER.fullmatch(endpoint) is None
+            or endpoint == target["identifier"]
+        ):
+            raise ContractError(f"{operation} {field} must be a distinct exact SIS-N")
+    for field in type_fields:
+        if change.get(field) not in {"blocks", "blocked_by", "related"}:
+            raise ContractError(f"{operation} {field} is invalid")
     return value
 
 

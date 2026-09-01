@@ -167,6 +167,8 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                     "create_standalone_issue",
                     "converge_issue_tree",
                     "create_issue_relation",
+                    "remove_issue_relation",
+                    "replace_issue_relation",
                     "create_project",
                     "create_milestone",
                     "update_project",
@@ -198,7 +200,23 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                 "type": "string",
                 "pattern": "^SIS-[1-9][0-9]*$",
             },
+            "old_related_identifier": {
+                "type": "string",
+                "pattern": "^SIS-[1-9][0-9]*$",
+            },
+            "new_related_identifier": {
+                "type": "string",
+                "pattern": "^SIS-[1-9][0-9]*$",
+            },
             "relation_type": {
+                "type": "string",
+                "enum": ["blocks", "blocked_by", "related"],
+            },
+            "old_relation_type": {
+                "type": "string",
+                "enum": ["blocks", "blocked_by", "related"],
+            },
+            "new_relation_type": {
                 "type": "string",
                 "enum": ["blocks", "blocked_by", "related"],
             },
@@ -433,6 +451,32 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                 ],
                 "properties": {
                     "operation": {"const": "create_issue_relation"}
+                },
+            },
+            {
+                "required": [
+                    "operation",
+                    "identifier",
+                    "related_identifier",
+                    "relation_type",
+                    "approval",
+                ],
+                "properties": {
+                    "operation": {"const": "remove_issue_relation"}
+                },
+            },
+            {
+                "required": [
+                    "operation",
+                    "identifier",
+                    "old_related_identifier",
+                    "old_relation_type",
+                    "new_related_identifier",
+                    "new_relation_type",
+                    "approval",
+                ],
+                "properties": {
+                    "operation": {"const": "replace_issue_relation"}
                 },
             },
             {
@@ -939,7 +983,7 @@ def _public_target(result: dict[str, Any]) -> tuple[dict[str, Any], dict[str, An
     after = result.get("after")
     if operation in {"search_linear", "inventory_linear"}:
         return _public_workspace_read(result)
-    if operation == "create_issue_relation":
+    if operation in {"create_issue_relation", "remove_issue_relation"}:
         target = result.get("target")
         expected_fields = {
             "type",
@@ -967,9 +1011,53 @@ def _public_target(result: dict[str, Any]) -> tuple[dict[str, Any], dict[str, An
             or after.get("identifier") != identifier
             or after.get("related_identifier") != related_identifier
             or after.get("relation_type") != relation_type
+            or (
+                operation == "remove_issue_relation"
+                and after.get("present") is not False
+            )
         ):
             raise RouteError("verified issue relation has invalid public facts")
         return dict(target), None
+    if operation == "replace_issue_relation":
+        target = result.get("target")
+        if (
+            not isinstance(target, dict)
+            or set(target) != {"type", "old", "new"}
+            or target.get("type") != "issue_relation_replacement"
+            or not isinstance(target.get("old"), dict)
+            or not isinstance(target.get("new"), dict)
+            or not isinstance(after, dict)
+        ):
+            raise RouteError("verified issue relation replacement lacks public facts")
+        for label in ("old", "new"):
+            facts = target[label]
+            if (
+                set(facts)
+                != {"identifier", "related_identifier", "relation_type"}
+                or not isinstance(facts.get("identifier"), str)
+                or PUBLIC_ISSUE_IDENTIFIER.fullmatch(facts["identifier"]) is None
+                or not isinstance(facts.get("related_identifier"), str)
+                or PUBLIC_ISSUE_IDENTIFIER.fullmatch(facts["related_identifier"])
+                is None
+                or facts["identifier"] == facts["related_identifier"]
+                or facts.get("relation_type")
+                not in {"blocks", "blocked_by", "related"}
+            ):
+                raise RouteError(
+                    "verified issue relation replacement has invalid public facts"
+                )
+        if (
+            target["old"]["identifier"] != target["new"]["identifier"]
+            or any(after.get(field) != target["new"][field] for field in target["new"])
+        ):
+            raise RouteError(
+                "verified issue relation replacement conflicts with completion facts"
+            )
+        return {
+            "type": "issue_relation_replacement",
+            "old": dict(target["old"]),
+            "new": dict(target["new"]),
+        }, None
     if operation in {"create_initiative", "update_initiative"}:
         target = result.get("target")
         if (
@@ -1333,6 +1421,32 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
                 "relation_type",
             }
             and args.get("operation") == "create_issue_relation"
+        ):
+            request = dict(args)
+        elif (
+            args.get("operation") == "remove_issue_relation"
+            and set(args)
+            == {
+                "operation",
+                "identifier",
+                "related_identifier",
+                "relation_type",
+                "approval",
+            }
+        ):
+            request = dict(args)
+        elif (
+            args.get("operation") == "replace_issue_relation"
+            and set(args)
+            == {
+                "operation",
+                "identifier",
+                "old_related_identifier",
+                "old_relation_type",
+                "new_related_identifier",
+                "new_relation_type",
+                "approval",
+            }
         ):
             request = dict(args)
         elif (

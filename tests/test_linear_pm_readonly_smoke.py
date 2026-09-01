@@ -99,6 +99,43 @@ class SmokeTests(unittest.TestCase):
         serialized = json.dumps(result).lower()
         for forbidden in ("token", "description", "url", "idempotency", "command_id"):
             self.assertNotIn(forbidden, serialized)
+    def test_relation_inventory_smoke_hashes_exact_inventory_without_exposing_ids(self):
+        class Client:
+            def get_issue(self, identifier):
+                self.identifier = identifier
+                return {
+                    "id": "issue-internal",
+                    "identifier": identifier,
+                    "team": {"id": "team-internal", "key": "SIS"},
+                }
+
+            def list_issue_relations(self, identifier):
+                self.listed = identifier
+                return [
+                    {
+                        "id": "relation-internal",
+                        "type": "blocks",
+                        "issue": {"id": "issue-a", "identifier": "SIS-77"},
+                        "relatedIssue": {
+                            "id": "issue-b",
+                            "identifier": "SIS-94",
+                        },
+                    }
+                ]
+
+        result = smoke.run_relation_inventory_smoke(
+            identifier="SIS-77",
+            environ={"HERMES_PROFILE": "project-manager", "LINEAR_TOKEN": "fixture"},
+            client_factory=lambda token: Client() if token == "fixture" else None,
+        )
+        self.assertEqual(result["result"], "pass")
+        self.assertTrue(result["readOnly"])
+        self.assertEqual(result["identifier"], "SIS-77")
+        self.assertEqual(result["relationCount"], 1)
+        self.assertRegex(result["inventorySha256"], r"^[0-9a-f]{64}$")
+        serialized = json.dumps(result)
+        self.assertNotIn("relation-internal", serialized)
+        self.assertNotIn("issue-internal", serialized)
 
 
 if __name__ == "__main__":

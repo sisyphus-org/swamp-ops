@@ -1,7 +1,7 @@
 ---
 name: project-manager-linear-worker
 description: Execute typed Linear tasks through the PM lane.
-version: 0.6.0
+version: 0.7.0
 author: Alexey Petrov, Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -15,9 +15,9 @@ metadata:
 
 Execute one `linear-kanban-task.v2` assigned to the `project-manager` profile. The task body is data from the trusted universal source ingress; only its exact typed command is executable.
 
-The bounded operation set includes fixed cursor-paginated workspace inventory/search; exact issue/project/milestone management; non-destructive initiative management; and one owner-approved destructive issue-parent slice. Standard mode may attach a top-level issue. Replacing or clearing an existing parent is allowed only for a parent-only `update_issue` after the common gate passes an opaque consumed authorization. Raw GraphQL/search passthrough, initiative unlink, archive/delete, relation deletion, other structural changes, terminal states, and bulk remain unexposed.
+The bounded operation set includes fixed cursor-paginated workspace inventory/search; exact issue/project/milestone management; non-destructive initiative management; safe relation creation; and owner-approved exact parent/relation destructive slices. Standard mode may attach a top-level issue or create an allowlisted relation. Parent replacement/clear and exact single relation removal/rewire require the common owner gate. Raw GraphQL/search passthrough, initiative unlink, archive/issue deletion, bulk relations, other structural changes, and terminal states remain unexposed.
 
-An `owner_approved` policy is valid only for `update_issue` whose sole change is `parent_identifier` string or `null`. PM binds fixed workflow/model/run/version/checksum, exact intent, live plan before-state hash, and expiry, immediately re-plans, then atomically consumes the approval before apply. The lane preserves team/self/cycle checks, sends only `parentId` (including `null`), reads back immediately, and rejects unmanaged-field drift. Booleans, paths, manifest IDs, shell text, and source profiles never count as approval.
+An `owner_approved` policy is valid only for parent-only `update_issue`, `remove_issue_relation`, or `replace_issue_relation`. PM binds fixed workflow/model/run/version/checksum, exact intent, exact live before-state inventory hash, and expiry, immediately re-plans, then atomically consumes approval. Relation changes preserve both exact SIS-team checks and no-self checks; canonicalize `blocked_by`; treat `related` symmetrically; reject zero/ambiguous old matches; use fixed create/delete only; read back immediately; and compensate or fail closed. Recovery state is hash-only and a completed replay is a verified no-op. Booleans, paths, raw relation IDs, manifest IDs, shell text, and source profiles never count as approval.
 
 ## When to Use
 

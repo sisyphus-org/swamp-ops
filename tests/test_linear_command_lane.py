@@ -1,5 +1,6 @@
 import concurrent.futures
 import contextlib
+import copy
 import importlib.util
 import io
 import json
@@ -81,6 +82,45 @@ def relation_command(
         "relation_type": relation_type,
     }
     return raw
+
+
+def relation_change_command(
+    operation="remove_issue_relation",
+    key="linear:SIS:relation-change:fixture",
+):
+    raw = command(operation, {}, key)
+    raw["target"] = {"type": "issue", "identifier": "SIS-59"}
+    raw["policy"] = owner_policy()
+    raw["change"] = {
+        "related_identifier": "SIS-56",
+        "relation_type": "blocked_by",
+    }
+    if operation == "replace_issue_relation":
+        raw["change"] = {
+            "old_related_identifier": "SIS-56",
+            "old_relation_type": "blocked_by",
+            "new_related_identifier": "SIS-57",
+            "new_relation_type": "related",
+        }
+    return raw
+
+
+def consumed_owner_authorization(raw):
+    approval_module = lane._load_approval()
+    verified = approval_module.VerifiedOwnerApproval(
+        {},
+        {
+            "operation": raw["operation"],
+            "target": raw["target"],
+            "change": raw["change"],
+        },
+        "c" * 64,
+        "a" * 64,
+        _marker=approval_module._VERIFIED_MARKER,
+    )
+    return approval_module.ConsumedOwnerApproval(
+        verified, _marker=approval_module._CONSUMED_MARKER
+    )
 
 
 def hierarchy_command(key="linear:SIS:hierarchy:health"):
@@ -489,6 +529,12 @@ class FakeClient:
             }
         )
 
+    def delete_issue_relation(self, relation_id):
+        self.writes.append(("delete_issue_relation", relation_id))
+        self.issue_relations = [
+            item for item in self.issue_relations if item["id"] != relation_id
+        ]
+
 
 class FakeHierarchyClient:
     def __init__(self):
@@ -723,6 +769,24 @@ class ContractTests(unittest.TestCase):
             validated["change"],
             {"related_identifier": "SIS-56", "relation_type": "blocked_by"},
         )
+
+    def test_relation_removal_and_replacement_require_owner_policy_and_exact_changes(self):
+        for operation in ("remove_issue_relation", "replace_issue_relation"):
+            with self.subTest(operation=operation):
+                approved = relation_change_command(operation)
+                self.assertEqual(
+                    lane.validate_command(approved)["policy"]["mode"],
+                    "owner_approved",
+                )
+                standard = json.loads(json.dumps(approved))
+                standard["policy"] = {"mode": "standard"}
+                with self.assertRaisesRegex(lane.ContractError, "owner_approved"):
+                    lane.validate_command(standard)
+
+        forged = relation_change_command("replace_issue_relation")
+        forged["change"]["relation_id"] = "raw-id"
+        with self.assertRaises(lane.ContractError):
+            lane.validate_command(forged)
 
     def test_hierarchy_malformed_payloads_fail_before_any_preflight_or_write(self):
         malformed = hierarchy_command()
@@ -983,6 +1047,22 @@ class WorkflowContractTests(unittest.TestCase):
 
 
 class ClientTests(unittest.TestCase):
+    def test_issue_relation_delete_uses_only_fixed_graphql_document_and_exact_id(self):
+        client = object.__new__(lane.LinearClient)
+        calls = []
+
+        def execute(query, variables=None):
+            calls.append((query, variables))
+            return {"issueRelationDelete": {"success": True}}
+
+        client.execute = execute
+        client.delete_issue_relation("relation-exact")
+        self.assertEqual(
+            calls,
+            [(lane.ISSUE_RELATION_DELETE, {"id": "relation-exact"})],
+        )
+        self.assertIn("issueRelationDelete(id: $id)", lane.ISSUE_RELATION_DELETE)
+
     def test_workspace_core_reads_paginate_to_exhaustion_with_fixed_queries(self):
         client = object.__new__(lane.LinearClient)
         calls = []
@@ -1589,6 +1669,444 @@ class ExecutionTests(unittest.TestCase):
             1,
         )
         self.assertEqual(client.writes[0][-1], "related")
+
+    def test_relation_change_plan_canonicalizes_blocked_by_and_related_symmetry(self):
+        blocked = FakeClient()
+        blocked.issue_relations = [
+            {
+                "id": "relation-old",
+                "type": "blocks",
+                "issue": {"id": "parent-uuid", "identifier": "SIS-56"},
+                "relatedIssue": {"id": "issue-uuid", "identifier": "SIS-59"},
+            }
+        ]
+        removal = lane.execute_command(
+            blocked,
+            relation_change_command("remove_issue_relation"),
+            mode="plan",
+        )
+        self.assertEqual(
+            removal["plan"],
+            [
+                {
+                    "action": "remove_issue_relation",
+                    "identifier": "SIS-59",
+                    "related_identifier": "SIS-56",
+                    "relation_type": "blocked_by",
+                }
+            ],
+        )
+        self.assertEqual(removal["before"]["inventory"][0]["id"], "relation-old")
+
+        symmetric = FakeClient()
+        symmetric.related["related-57"] = {
+            **issue("Todo"),
+            "id": "related-57",
+            "identifier": "SIS-57",
+            "team": {"id": "team-uuid", "key": "SIS"},
+        }
+        symmetric.issue_relations = [
+            {
+                "id": "relation-related",
+                "type": "related",
+                "issue": {"id": "related-57", "identifier": "SIS-57"},
+                "relatedIssue": {"id": "issue-uuid", "identifier": "SIS-59"},
+            }
+        ]
+        replace = relation_change_command("replace_issue_relation")
+        replace["change"] = {
+            "old_related_identifier": "SIS-57",
+            "old_relation_type": "related",
+            "new_related_identifier": "SIS-56",
+            "new_relation_type": "blocks",
+        }
+        planned = lane.execute_command(symmetric, replace, mode="plan")
+        self.assertEqual(
+            planned["plan"],
+            [
+                {
+                    "action": "create_issue_relation",
+                    "identifier": "SIS-59",
+                    "related_identifier": "SIS-56",
+                    "relation_type": "blocks",
+                },
+                {
+                    "action": "remove_issue_relation",
+                    "identifier": "SIS-59",
+                    "related_identifier": "SIS-57",
+                    "relation_type": "related",
+                },
+            ],
+        )
+
+    def test_relation_change_fails_on_zero_or_ambiguous_exact_old_and_ambiguous_new(self):
+        missing = FakeClient()
+        duplicate = FakeClient()
+        duplicate.issue_relations = [
+            {
+                "id": relation_id,
+                "type": "blocks",
+                "issue": {"id": "parent-uuid", "identifier": "SIS-56"},
+                "relatedIssue": {"id": "issue-uuid", "identifier": "SIS-59"},
+            }
+            for relation_id in ("relation-a", "relation-b")
+        ]
+        for client, message in (
+            (missing, "not found"),
+            (duplicate, "ambiguous"),
+        ):
+            with self.subTest(message=message), self.assertRaisesRegex(
+                lane.ContractError, message
+            ):
+                lane.execute_command(
+                    client,
+                    relation_change_command("remove_issue_relation"),
+                    mode="plan",
+                )
+
+        new_duplicate = FakeClient()
+        new_duplicate.issue_relations = [
+            {
+                "id": "relation-old",
+                "type": "blocks",
+                "issue": {"id": "parent-uuid", "identifier": "SIS-56"},
+                "relatedIssue": {"id": "issue-uuid", "identifier": "SIS-59"},
+            },
+            *[
+                {
+                    "id": relation_id,
+                    "type": "related",
+                    "issue": {"id": "issue-uuid", "identifier": "SIS-59"},
+                    "relatedIssue": {
+                        "id": "parent-uuid",
+                        "identifier": "SIS-56",
+                    },
+                }
+                for relation_id in ("new-a", "new-b")
+            ],
+        ]
+        raw = relation_change_command("replace_issue_relation")
+        raw["change"] = {
+            "old_related_identifier": "SIS-56",
+            "old_relation_type": "blocked_by",
+            "new_related_identifier": "SIS-56",
+            "new_relation_type": "related",
+        }
+        with self.assertRaisesRegex(lane.ContractError, "new issue relation is ambiguous"):
+            lane.execute_command(new_duplicate, raw, mode="plan")
+
+    def test_exact_relation_removal_deletes_once_reads_back_and_replays_without_duplicate(self):
+        client = FakeClient()
+        client.issue_relations = [
+            {
+                "id": "relation-old",
+                "type": "blocks",
+                "issue": {"id": "parent-uuid", "identifier": "SIS-56"},
+                "relatedIssue": {"id": "issue-uuid", "identifier": "SIS-59"},
+            }
+        ]
+        raw = relation_change_command("remove_issue_relation")
+        authorization = consumed_owner_authorization(raw)
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Path(tmp) / "journal.json"
+            applied = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=journal,
+                owner_approval_authorization=authorization,
+            )
+            replay = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=journal,
+                owner_approval_authorization=authorization,
+            )
+        self.assertEqual(applied["result"], "applied")
+        self.assertTrue(applied["verified"])
+        self.assertEqual(replay["result"], "no_op")
+        self.assertEqual(
+            [write for write in client.writes if write[0] == "delete_issue_relation"],
+            [("delete_issue_relation", "relation-old")],
+        )
+        self.assertNotIn('"id":', json.dumps(applied["after"]))
+
+    def test_relation_removal_readback_drift_restores_deleted_relation_and_fails_closed(self):
+        class DriftAfterRemoval(FakeClient):
+            def delete_issue_relation(self, relation_id):
+                super().delete_issue_relation(relation_id)
+                if relation_id == "relation-old":
+                    self.issue_relations.append(
+                        {
+                            "id": "external-drift",
+                            "type": "blocks",
+                            "issue": {"id": "issue-uuid", "identifier": "SIS-59"},
+                            "relatedIssue": {
+                                "id": "external-uuid",
+                                "identifier": "SIS-88",
+                            },
+                        }
+                    )
+
+        client = DriftAfterRemoval()
+        client.issue_relations = [
+            {
+                "id": "relation-old",
+                "type": "blocks",
+                "issue": {"id": "parent-uuid", "identifier": "SIS-56"},
+                "relatedIssue": {"id": "issue-uuid", "identifier": "SIS-59"},
+            }
+        ]
+        raw = relation_change_command("remove_issue_relation")
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(
+            lane.ContractError, "compensation failed closed"
+        ):
+            lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "journal.json",
+                owner_approval_authorization=consumed_owner_authorization(raw),
+            )
+        self.assertIn("relation-old", {item["id"] for item in client.issue_relations})
+
+    def test_relation_removal_recovers_after_crash_between_delete_and_completion_journal(self):
+        class CrashAfterDelete(FakeClient):
+            crashed = False
+
+            def delete_issue_relation(self, relation_id):
+                super().delete_issue_relation(relation_id)
+                if not self.crashed:
+                    self.crashed = True
+                    raise KeyboardInterrupt("simulated process death")
+
+        client = CrashAfterDelete()
+        client.issue_relations = [
+            {
+                "id": "relation-old",
+                "type": "blocks",
+                "issue": {"id": "parent-uuid", "identifier": "SIS-56"},
+                "relatedIssue": {"id": "issue-uuid", "identifier": "SIS-59"},
+            }
+        ]
+        raw = relation_change_command("remove_issue_relation")
+        authorization = consumed_owner_authorization(raw)
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Path(tmp) / "journal.json"
+            with self.assertRaises(KeyboardInterrupt):
+                lane.execute_command(
+                    client,
+                    raw,
+                    mode="apply",
+                    journal_path=journal,
+                    owner_approval_authorization=authorization,
+                )
+            replay = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=journal,
+                owner_approval_authorization=authorization,
+            )
+        self.assertEqual(replay["result"], "no_op")
+        self.assertTrue(replay["verified"])
+        self.assertEqual(
+            [item[0] for item in client.writes], ["delete_issue_relation"]
+        )
+
+    def test_exact_relation_replacement_creates_then_deletes_and_literal_replay_is_noop(self):
+        client = FakeClient()
+        client.issue_relations = [
+            {
+                "id": "relation-old",
+                "type": "blocks",
+                "issue": {"id": "parent-uuid", "identifier": "SIS-56"},
+                "relatedIssue": {"id": "issue-uuid", "identifier": "SIS-59"},
+            }
+        ]
+        raw = relation_change_command("replace_issue_relation")
+        raw["change"] = {
+            "old_related_identifier": "SIS-56",
+            "old_relation_type": "blocked_by",
+            "new_related_identifier": "SIS-56",
+            "new_relation_type": "related",
+        }
+        authorization = consumed_owner_authorization(raw)
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Path(tmp) / "journal.json"
+            applied = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=journal,
+                owner_approval_authorization=authorization,
+            )
+            replay = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=journal,
+                owner_approval_authorization=authorization,
+            )
+        writes = [item[0] for item in client.writes]
+        self.assertEqual(
+            writes,
+            ["create_issue_relation", "delete_issue_relation"],
+        )
+        self.assertEqual(applied["result"], "applied")
+        self.assertEqual(replay["result"], "no_op")
+        self.assertEqual(len(client.issue_relations), 1)
+        self.assertEqual(client.issue_relations[0]["type"], "related")
+        self.assertNotIn('"id":', json.dumps(applied["after"]))
+
+    def test_relation_replacement_recovers_after_crash_without_duplicate(self):
+        class CrashAfterOldDelete(FakeClient):
+            crashed = False
+
+            def delete_issue_relation(self, relation_id):
+                super().delete_issue_relation(relation_id)
+                if relation_id == "relation-old" and not self.crashed:
+                    self.crashed = True
+                    raise KeyboardInterrupt("simulated process death")
+
+        client = CrashAfterOldDelete()
+        client.issue_relations = [
+            {
+                "id": "relation-old",
+                "type": "blocks",
+                "issue": {"id": "parent-uuid", "identifier": "SIS-56"},
+                "relatedIssue": {"id": "issue-uuid", "identifier": "SIS-59"},
+            }
+        ]
+        raw = relation_change_command("replace_issue_relation")
+        raw["change"] = {
+            "old_related_identifier": "SIS-56",
+            "old_relation_type": "blocked_by",
+            "new_related_identifier": "SIS-56",
+            "new_relation_type": "related",
+        }
+        authorization = consumed_owner_authorization(raw)
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Path(tmp) / "journal.json"
+            with self.assertRaises(KeyboardInterrupt):
+                lane.execute_command(
+                    client,
+                    raw,
+                    mode="apply",
+                    journal_path=journal,
+                    owner_approval_authorization=authorization,
+                )
+            replay = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=journal,
+                owner_approval_authorization=authorization,
+            )
+        self.assertEqual(replay["result"], "no_op")
+        self.assertEqual(
+            [item[0] for item in client.writes],
+            ["create_issue_relation", "delete_issue_relation"],
+        )
+        self.assertEqual(len(client.issue_relations), 1)
+
+    def test_relation_replacement_delete_failure_removes_created_relation_and_restores_before_state(self):
+        class RejectOldDelete(FakeClient):
+            def delete_issue_relation(self, relation_id):
+                if relation_id == "relation-old":
+                    self.writes.append(("delete_issue_relation", relation_id))
+                    raise RuntimeError("delete rejected")
+                super().delete_issue_relation(relation_id)
+
+        client = RejectOldDelete()
+        original = {
+            "id": "relation-old",
+            "type": "blocks",
+            "issue": {"id": "parent-uuid", "identifier": "SIS-56"},
+            "relatedIssue": {"id": "issue-uuid", "identifier": "SIS-59"},
+        }
+        client.issue_relations = [copy.deepcopy(original)]
+        raw = relation_change_command("replace_issue_relation")
+        raw["change"] = {
+            "old_related_identifier": "SIS-56",
+            "old_relation_type": "blocked_by",
+            "new_related_identifier": "SIS-56",
+            "new_relation_type": "related",
+        }
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(
+            lane.ContractError, "was compensated"
+        ):
+            lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "journal.json",
+                owner_approval_authorization=consumed_owner_authorization(raw),
+            )
+        self.assertEqual(client.issue_relations, [original])
+        self.assertEqual(
+            [item[0] for item in client.writes],
+            [
+                "create_issue_relation",
+                "delete_issue_relation",
+                "delete_issue_relation",
+            ],
+        )
+
+    def test_relation_replacement_readback_drift_compensates_owned_mutations_and_fails_closed(self):
+        class DriftAfterDelete(FakeClient):
+            def delete_issue_relation(self, relation_id):
+                super().delete_issue_relation(relation_id)
+                if relation_id == "relation-old":
+                    self.issue_relations.append(
+                        {
+                            "id": "external-drift",
+                            "type": "blocks",
+                            "issue": {"id": "issue-uuid", "identifier": "SIS-59"},
+                            "relatedIssue": {
+                                "id": "external-uuid",
+                                "identifier": "SIS-88",
+                            },
+                        }
+                    )
+
+        client = DriftAfterDelete()
+        client.issue_relations = [
+            {
+                "id": "relation-old",
+                "type": "blocks",
+                "issue": {"id": "parent-uuid", "identifier": "SIS-56"},
+                "relatedIssue": {"id": "issue-uuid", "identifier": "SIS-59"},
+            }
+        ]
+        raw = relation_change_command("replace_issue_relation")
+        raw["change"] = {
+            "old_related_identifier": "SIS-56",
+            "old_relation_type": "blocked_by",
+            "new_related_identifier": "SIS-56",
+            "new_relation_type": "related",
+        }
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(
+            lane.ContractError, "compensation failed closed"
+        ):
+            lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "journal.json",
+                owner_approval_authorization=consumed_owner_authorization(raw),
+            )
+        by_id = {item["id"]: item for item in client.issue_relations}
+        self.assertIn("relation-old", by_id)
+        self.assertNotIn(
+            next(
+                write[1]
+                for write in client.writes
+                if write[0] == "create_issue_relation"
+            ),
+            by_id,
+        )
 
     def test_issue_relation_rejects_missing_or_wrong_team_related_issue(self):
         missing = FakeClient()
@@ -2784,7 +3302,10 @@ class ExecutionTests(unittest.TestCase):
                 return policy
 
             @staticmethod
-            def require_consumed_owner_approval(authorization, *, expected_intent):
+            def require_consumed_owner_approval(
+                authorization, *, expected_intent, expected_command
+            ):
+                del expected_command
                 if authorization is not consumed:
                     raise Gate.ApprovalError("apply requires consumed owner approval")
                 if expected_intent["operation"] != "update_issue" or set(expected_intent["change"]) != {"parent_identifier"}:
@@ -2897,7 +3418,10 @@ class ExecutionTests(unittest.TestCase):
                 return policy
 
             @staticmethod
-            def require_consumed_owner_approval(_authorization, *, expected_intent):
+            def require_consumed_owner_approval(
+                _authorization, *, expected_intent, expected_command
+            ):
+                del expected_intent, expected_command
                 return None
 
         class DriftingClearClient(FakeClient):

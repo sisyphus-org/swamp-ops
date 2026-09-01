@@ -21,6 +21,7 @@ from plugins.project_manager_linear import lane as bundled_lane  # noqa: E402
 
 
 ENTITY_TYPES = ("issues", "projects", "milestones", "initiatives")
+ISSUE_IDENTIFIER = bundled_lane.ISSUE_IDENTIFIER
 
 
 def build_command(
@@ -129,28 +130,118 @@ def run_smoke(
     }
 
 
+def run_relation_inventory_smoke(
+    *,
+    identifier: str,
+    environ: Mapping[str, str] = os.environ,
+    client_factory: Any | None = None,
+) -> dict[str, Any]:
+    """Read and hash one exact issue relation inventory without exposing raw IDs."""
+    if environ.get("HERMES_PROFILE") != "project-manager":
+        raise RuntimeError("live Linear read smoke requires project-manager profile")
+    token = str(environ.get("LINEAR_TOKEN") or "").strip()
+    if not token:
+        raise RuntimeError("project-manager LINEAR_TOKEN is missing")
+    if not isinstance(identifier, str) or ISSUE_IDENTIFIER.fullmatch(identifier) is None:
+        raise ValueError("identifier must be an exact SIS-N issue")
+    factory = client_factory or bundled_lane.LinearClient
+    client = factory(token)
+    issue = client.get_issue(identifier)
+    team = issue.get("team") if isinstance(issue, dict) else None
+    if (
+        not isinstance(issue, dict)
+        or issue.get("identifier") != identifier
+        or not isinstance(issue.get("id"), str)
+        or not issue["id"]
+        or not isinstance(team, dict)
+        or team.get("key") != "SIS"
+        or not isinstance(team.get("id"), str)
+        or not team["id"]
+    ):
+        raise RuntimeError("exact relation inventory target is not a SIS issue")
+    inventory = client.list_issue_relations(identifier)
+    if not isinstance(inventory, list):
+        raise RuntimeError("relation inventory payload is invalid")
+    normalized = []
+    for relation in inventory:
+        source = relation.get("issue") if isinstance(relation, dict) else None
+        destination = relation.get("relatedIssue") if isinstance(relation, dict) else None
+        if (
+            not isinstance(relation, dict)
+            or set(relation) != {"id", "type", "issue", "relatedIssue"}
+            or not isinstance(relation.get("id"), str)
+            or not relation["id"]
+            or relation.get("type") not in {"blocks", "related"}
+            or not isinstance(source, dict)
+            or set(source) != {"id", "identifier"}
+            or not isinstance(destination, dict)
+            or set(destination) != {"id", "identifier"}
+            or any(
+                not isinstance(endpoint.get("id"), str)
+                or not endpoint["id"]
+                or not isinstance(endpoint.get("identifier"), str)
+                or ISSUE_IDENTIFIER.fullmatch(endpoint["identifier"]) is None
+                for endpoint in (source, destination)
+            )
+        ):
+            raise RuntimeError("relation inventory payload is invalid")
+        normalized.append(relation)
+    normalized.sort(key=lambda item: item["id"])
+    digest = hashlib.sha256(
+        json.dumps(
+            {"identifier": identifier, "inventory": normalized},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    return {
+        "result": "pass",
+        "readOnly": True,
+        "operation": "inventory_issue_relations",
+        "identifier": identifier,
+        "relationCount": len(normalized),
+        "inventorySha256": digest,
+        "verified": True,
+    }
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--live", action="store_true", help="Required live-network acknowledgement")
     parser.add_argument(
         "--operation",
         required=True,
-        choices=("search_linear", "inventory_linear"),
+        choices=("search_linear", "inventory_linear", "inventory_issue_relations"),
     )
     parser.add_argument(
         "--entity-type",
         action="append",
         dest="entity_types",
-        required=True,
+        required=False,
         choices=ENTITY_TYPES,
     )
     parser.add_argument("--query")
-    archive = parser.add_mutually_exclusive_group(required=True)
+    parser.add_argument("--identifier")
+    archive = parser.add_mutually_exclusive_group(required=False)
     archive.add_argument("--include-archived", action="store_true")
     archive.add_argument("--exclude-archived", action="store_true")
     args = parser.parse_args(argv)
     if not args.live:
         parser.error("--live is required")
+    if args.operation == "inventory_issue_relations":
+        if (
+            args.identifier is None
+            or args.entity_types
+            or args.query is not None
+            or args.include_archived
+            or args.exclude_archived
+        ):
+            parser.error("inventory_issue_relations requires only --identifier")
+        return args
+    if not args.entity_types or args.identifier is not None:
+        parser.error("workspace reads require --entity-type and forbid --identifier")
+    if not (args.include_archived or args.exclude_archived):
+        parser.error("workspace reads require an explicit archive mode")
     if (args.operation == "search_linear") != (args.query is not None):
         parser.error("search_linear requires --query; inventory_linear forbids it")
     return args
@@ -159,12 +250,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
-        result = run_smoke(
-            operation=args.operation,
-            entity_types=args.entity_types,
-            include_archived=args.include_archived,
-            query=args.query,
-        )
+        if args.operation == "inventory_issue_relations":
+            result = run_relation_inventory_smoke(identifier=args.identifier)
+        else:
+            result = run_smoke(
+                operation=args.operation,
+                entity_types=args.entity_types,
+                include_archived=args.include_archived,
+                query=args.query,
+            )
     except (RuntimeError, ValueError, bundled_lane.ContractError) as exc:
         print(json.dumps({"result": "fail", "error": str(exc)}, ensure_ascii=False))
         return 1

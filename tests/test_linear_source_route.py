@@ -177,6 +177,85 @@ class ParseTests(unittest.TestCase):
             {"related_identifier": "SIS-94", "relation_type": "blocked_by"},
         )
 
+    def test_owner_approved_relation_removal_and_replacement_become_exact_commands(self):
+        reference = approval_reference()
+        cases = (
+            (
+                {
+                    "operation": "remove_issue_relation",
+                    "identifier": "SIS-77",
+                    "related_identifier": "SIS-94",
+                    "relation_type": "blocked_by",
+                    "approval": reference,
+                },
+                {
+                    "related_identifier": "SIS-94",
+                    "relation_type": "blocked_by",
+                },
+            ),
+            (
+                {
+                    "operation": "replace_issue_relation",
+                    "identifier": "SIS-77",
+                    "old_related_identifier": "SIS-94",
+                    "old_relation_type": "blocked_by",
+                    "new_related_identifier": "SIS-95",
+                    "new_relation_type": "related",
+                    "approval": reference,
+                },
+                {
+                    "old_related_identifier": "SIS-94",
+                    "old_relation_type": "blocked_by",
+                    "new_related_identifier": "SIS-95",
+                    "new_relation_type": "related",
+                },
+            ),
+        )
+        for request, expected_change in cases:
+            with self.subTest(operation=request["operation"]):
+                parsed = route.parse_linear_request(
+                    request,
+                    source_profile="default",
+                    uuid_factory=uuid_factory(),
+                )
+                self.assertEqual(parsed.command["operation"], request["operation"])
+                self.assertEqual(
+                    parsed.command["target"],
+                    {"type": "issue", "identifier": "SIS-77"},
+                )
+                self.assertEqual(parsed.command["change"], expected_change)
+                self.assertEqual(
+                    parsed.command["policy"],
+                    {"mode": "owner_approved", "approval": reference},
+                )
+
+    def test_relation_removal_and_replacement_fail_closed_without_exact_approval(self):
+        cases = (
+            {
+                "operation": "remove_issue_relation",
+                "identifier": "SIS-77",
+                "related_identifier": "SIS-94",
+                "relation_type": "blocks",
+            },
+            {
+                "operation": "replace_issue_relation",
+                "identifier": "SIS-77",
+                "old_related_identifier": "SIS-94",
+                "old_relation_type": "blocks",
+                "new_related_identifier": "SIS-95",
+                "new_relation_type": "related",
+            },
+        )
+        for request in cases:
+            with self.subTest(operation=request["operation"]), self.assertRaisesRegex(
+                route.RouteError, "owner approval"
+            ):
+                route.parse_linear_request(
+                    request,
+                    source_profile="default",
+                    uuid_factory=uuid_factory(),
+                )
+
     def test_issue_relation_source_shape_rejects_self_internal_ids_and_unbounded_types(self):
         invalid = (
             {

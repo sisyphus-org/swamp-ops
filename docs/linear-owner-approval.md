@@ -1,14 +1,20 @@
-# Linear owner-approved destructive reparenting and clear
+# Linear owner-approved destructive parent and issue-relation changes
 
-This repository implements one destructive Linear slice: replacing the existing parent of one exact `SIS-N` issue, or clearing that parent, through the existing `update_issue` operation. Archive/delete, terminal states, relation deletion, bulk, arbitrary GraphQL, arbitrary shell, and every other destructive operation remain unavailable.
+This repository exposes three narrowly owner-approved destructive slices only:
+
+1. replace or clear the parent of one exact `SIS-N` issue through parent-only `update_issue`;
+2. remove one exact existing issue relation by two exact `SIS-N` endpoints and `relation_type`;
+3. replace/rewire one exact existing issue relation with one exact new endpoint/type relation.
+
+Terminal states, archive/delete of issues, bulk targets, initiative unlink, and every other destructive lifecycle operation remain unavailable.
 
 ## Trust boundaries
 
 ```text
-source profile → exact approval reference + parent-only update_issue → PM Kanban task
+source profile → exact approval reference + exact typed intent → PM Kanban task
 source/SWE → ops_broker typed plan/start request → Swamp read-only plan
 owner Telegram session → ops_broker owner-only approve → Swamp attestation
-persisted linear-command.v2 → PM common approval gate → bounded Linear parentId mutation
+persisted linear-command.v2 → PM common approval gate → bounded Linear mutation
 ```
 
 - Project Manager remains the sole holder of `LINEAR_TOKEN` and sole Linear mutation boundary.
@@ -16,61 +22,73 @@ persisted linear-command.v2 → PM common approval gate → bounded Linear paren
 - Broker caller identity comes from the authenticated session. A request body cannot claim owner identity.
 - Only the policy-bound Telegram owner may approve. A2A peers may plan and start the suspended attestation workflow but cannot approve it.
 
-## Exact approval intent
+## Exact approval intents
 
-`linear-destructive-owner-approval-plan.v1` now accepts exactly:
+`linear-destructive-owner-approval-plan.v1` accepts only a parent-only update or one of these exact relation shapes:
 
 ```json
 {
-  "operation": "update_issue",
+  "operation": "remove_issue_relation",
   "target": {"type": "issue", "identifier": "SIS-77"},
-  "change": {"parent_identifier": null}
+  "change": {
+    "related_identifier": "SIS-94",
+    "relation_type": "blocked_by"
+  }
 }
 ```
 
-`parent_identifier` may instead be one exact uppercase `SIS-N` string. No second change field is allowed. The plan also binds one exact SHA-256 hash of the lane's before-state and one UTC RFC3339 expiry no more than 24 hours in the future. It is deterministic, read-only, and checksum-bound.
+```json
+{
+  "operation": "replace_issue_relation",
+  "target": {"type": "issue", "identifier": "SIS-77"},
+  "change": {
+    "old_related_identifier": "SIS-94",
+    "old_relation_type": "blocked_by",
+    "new_related_identifier": "SIS-95",
+    "new_relation_type": "related"
+  }
+}
+```
 
-`linear-destructive-owner-approval-attestation.v1` is emitted only after the fixed workflow suspends at `approve-linear-destructive-intent`, the authenticated owner approves that exact run, and the immutable plan artifact is reloaded by fixed model, workflow run ID, artifact version, and checksum. The attestation is an approval fact, not a Linear write.
+Every endpoint is exact uppercase `SIS-N`, every relation type is exactly `blocks`, `blocked_by`, or `related`, and no endpoint may equal the target. Raw relation IDs are never accepted from source. No additional change field is allowed. The plan binds the exact canonical SHA-256 of the PM lane's full before-state relation inventory, including internal relation identity used only inside the trusted approval/executor boundary, plus a UTC RFC3339 expiry no more than 24 hours in the future. The public/source projection never exposes those IDs or inventory bytes.
 
-Intent is transported as canonical bounded base64url. Broker commands are fixed argv with `shell=False`; callers cannot supply command strings, paths, source profiles, raw manifest IDs, or approval booleans.
+The attestation is emitted only after the fixed workflow suspends at `approve-linear-destructive-intent`, the authenticated owner approves that exact run, and the immutable plan artifact is reloaded by fixed model, workflow run ID, artifact version, and checksum. Intent transport remains canonical bounded base64url. Broker commands remain fixed `shell=False` argv.
 
 ## Source policy reference
 
-Without `approval`, source emits exactly:
-
-```json
-{"mode":"standard"}
-```
-
-With the one fixed structural `approval` object, source emits exactly:
+Without approval, source emits exactly `{"mode":"standard"}`. Relation removal and replacement reject that policy before Linear access. With approval, source accepts only the existing fixed structural reference shape and emits exactly:
 
 ```json
 {"mode":"owner_approved","approval":{...fixed reference fields...}}
 ```
 
-The reference contains only fixed workflow/model, attestation run UUID, positive artifact version, attestation checksum, intent hash, before-state hash, and expiry. It is accepted only on a parent-only `update_issue`. Source exposes no arbitrary `policy`, approval boolean, path, manifest, shell text, or caller-selected workflow/model.
+The reference contains only fixed workflow/model, attestation run UUID, positive artifact version, attestation checksum, intent hash, before-state hash, and expiry. Source exposes no arbitrary policy, approval boolean, path, manifest, shell text, caller-selected workflow/model, or raw relation ID. Policy remains part of semantic replay identity.
 
-The semantic idempotency key includes the complete policy. Literal approval replay therefore preserves identity, while standard and owner-approved requests cannot collide.
+## PM relation behavior
 
-## PM gate and lane behavior
+PM resolves the target and every old/new endpoint independently and requires both/all issues to belong to the same exact `SIS` team. It canonicalizes `blocked_by` by reversing the API endpoints into Linear `blocks`; `related` is symmetric and canonicalized by identifier ordering. Removal requires exactly one matching live relation; zero and ambiguous matches fail closed. Replacement requires exactly one old match and at most one exact new match.
 
-Standard mode keeps the existing safe attach behavior: attaching a currently top-level issue to one exact same-team, non-self, non-cyclic parent is allowed. Standard clear and replacement remain blocked.
+The before-state is the complete bounded `relations + inverseRelations` inventory, normalized and sorted by internal ID before hashing. Plans and source/public output contain only endpoint identifiers and user-facing relation types.
 
-For owner-approved clear or replacement, PM:
+Linear's current schema was checked and exposes `issueRelationUpdate`, but the approved executor contract for this slice explicitly uses the existing deterministic create plus a fixed `issueRelationDelete` document. Rewire therefore:
 
-1. builds the normal read-only lane plan;
-2. derives the exact semantic intent hash and canonical before-state hash;
-3. loads only the fixed Swamp workflow history and attestation model/version from `/Users/hermes/workspaces/swamp-ops-runtime`;
-4. requires the exact run and explicit approval step to have succeeded;
-5. binds workflow, model, run, version, checksum, parent-only intent, before-state, expiry, and original plan inputs;
-6. immediately re-plans live Linear and requires the same before-state hash, operation, target, and concrete plan;
-7. atomically consumes the attestation checksum immediately before apply;
-8. passes the opaque consumed authorization to the lane.
+1. records hash-only recovery state under the journal lock;
+2. creates the exact deterministic new relation only when absent;
+3. immediately reads it back by deterministic ID and verifies canonical endpoints/type;
+4. deletes the one resolved old relation;
+5. immediately re-inventories and requires the exact expected full inventory;
+6. records verified completion only after convergence.
 
-The lane cannot be called directly with a boolean or forged authorization. It preserves exact target/team, self-parent, ancestry/cycle, and parent-shape checks. Apply sends only `parentId`—including explicit `null` for clear—then immediately reads the exact target back. The requested parent must match exactly and all unmanaged issue fields must remain unchanged. A literal already-converged replay is a verified no-op.
+If old deletion fails, a newly created relation is deleted and the exact before inventory is re-read. If final read-back drifts, the lane restores the old relation and removes only the new relation it created, then either proves exact compensation or reports compensation failure closed. A partial rewire is never reported successful.
 
-Wrong, expired, forged, already-consumed, changed-before-state, plan/target drift, cycle, wrong-team, and read-back drift all fail closed.
+The public `pm_linear_execute` path delegates the persisted task to `execute_claimed_task`. Before first apply, that boundary atomically records a durable 30-second apply lease bound to the approval checksum, intent hash, approved before-state hash, full canonical command hash, command/correlation/idempotency identities, source profile, and exact Kanban task ID. The existing live re-plan remains the final TOCTOU gate before that first claim. A concurrent caller cannot mint apply authority.
+
+Relation and parent-only update paths durably prepare exact before/after recovery hashes before writing. After process death, only the same task and complete persisted command may re-enter after the lease expires, and only when the lane proves an exact prepared/intermediate/completed recovery state carrying the same approval, intent, and command hashes. A changed command ID, correlation ID, idempotency key, source profile, task, intent, policy artifact, or unexplained live state conflicts and fails closed. A prepared journal whose live state is still the original before-state is not recovery evidence and cannot revive a stale claim.
+
+Verified read-back permanently marks the approval completed with its exact completed recovery-evidence hash. Completed approval can never authorize another mutation; an exact completed replay is accepted only as the already-converged verified no-op. Relation delete/create and reparent crash replay therefore need no fresh owner approval and issue no duplicate relation or second parent write.
+
+Wrong/expired/forged approval, wrong intent, wrong before hash, changed live plan, wrong team, self relation, zero/ambiguous old match, ambiguous new match, read-back drift, partial failure, and recovery-journal conflict all fail closed.
 
 ## Deliberately unavailable
 
-Terminal states, archive, issue deletion, relation deletion, unlink, project/initiative destructive lifecycle operations, bulk targets, and arbitrary queries remain rejected before Linear mutation. The approval contract does not authorize them.
+Terminal states, archive, issue deletion, bulk relation operations, initiative unlink, arbitrary GraphQL, arbitrary relation IDs, and all other destructive project/initiative/issue lifecycle operations remain rejected before mutation.

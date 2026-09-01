@@ -5,9 +5,10 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 import subprocess
 from collections.abc import Iterator, Mapping
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -72,9 +73,24 @@ class VerifiedOwnerApproval(Mapping[str, Any]):
 class ConsumedOwnerApproval:
     """Opaque one-use authorization accepted by the mutation lane."""
 
-    __slots__ = ("_intent", "_checksum", "_marker")
+    __slots__ = (
+        "_intent",
+        "_checksum",
+        "_command_hash",
+        "_task_id",
+        "_generation",
+        "_marker",
+    )
 
-    def __init__(self, verified: VerifiedOwnerApproval, *, _marker: object) -> None:
+    def __init__(
+        self,
+        verified: VerifiedOwnerApproval,
+        *,
+        _marker: object,
+        command_hash: str | None = None,
+        task_id: str | None = None,
+        generation: int = 1,
+    ) -> None:
         if (
             _marker is not _CONSUMED_MARKER
             or not isinstance(verified, VerifiedOwnerApproval)
@@ -83,19 +99,105 @@ class ConsumedOwnerApproval:
             raise ApprovalError("consumed owner approval cannot be constructed by callers")
         self._intent = verified._intent
         self._checksum = verified._checksum
+        self._command_hash = command_hash
+        self._task_id = task_id
+        self._generation = generation
         self._marker = _marker
+
+    @classmethod
+    def _from_binding(
+        cls,
+        *,
+        intent: dict[str, Any],
+        checksum: str,
+        command_hash: str,
+        task_id: str,
+        generation: int,
+    ) -> "ConsumedOwnerApproval":
+        value = object.__new__(cls)
+        value._intent = intent
+        value._checksum = checksum
+        value._command_hash = command_hash
+        value._task_id = task_id
+        value._generation = generation
+        value._marker = _CONSUMED_MARKER
+        return value
 
 
 def require_consumed_owner_approval(
-    authorization: Any, *, expected_intent: dict[str, Any]
+    authorization: Any,
+    *,
+    expected_intent: dict[str, Any],
+    expected_command: dict[str, Any] | None = None,
 ) -> None:
     """Fail closed unless authorization came from atomic one-time consumption."""
     if (
         not isinstance(authorization, ConsumedOwnerApproval)
         or authorization._marker is not _CONSUMED_MARKER
         or authorization._intent != expected_intent
+        or (
+            authorization._command_hash is not None
+            and (
+                expected_command is None
+                or authorization._command_hash != command_binding_hash(expected_command)
+            )
+        )
     ):
         raise ApprovalError("apply requires a consumed owner approval for the exact intent")
+
+
+def command_binding_hash(command: Any) -> str:
+    """Hash the complete persisted command, including delivery identity and policy."""
+    if not isinstance(command, dict):
+        raise ApprovalError("owner approval command binding is invalid")
+    required = {
+        "schema_version",
+        "command_id",
+        "correlation_id",
+        "idempotency_key",
+        "source_profile",
+        "operation",
+        "target",
+        "change",
+        "policy",
+    }
+    if set(command) != required:
+        raise ApprovalError("owner approval command binding is invalid")
+    return contract.canonical_sha256(command)
+
+
+def _execution_binding(
+    *, command: dict[str, Any], task_id: str, checksum: str, before_state_hash: str
+) -> dict[str, str]:
+    if not isinstance(task_id, str) or re.fullmatch(r"t_[a-f0-9]{8,}", task_id) is None:
+        raise ApprovalError("owner approval task binding is invalid")
+    reference = command.get("policy", {}).get("approval")
+    if not isinstance(reference, dict) or reference.get("checksum") != checksum:
+        raise ApprovalError("owner approval command binding is invalid")
+    intent = {
+        "operation": command.get("operation"),
+        "target": command.get("target"),
+        "change": command.get("change"),
+    }
+    intent_hash = contract.canonical_sha256(intent)
+    if reference.get("intent_hash") != intent_hash:
+        raise ApprovalError("owner approval intent binding is invalid")
+    if reference.get("before_state_hash") != before_state_hash:
+        raise ApprovalError("owner approval before-state binding is invalid")
+    fields = ("command_id", "correlation_id", "idempotency_key", "source_profile")
+    if any(not isinstance(command.get(field), str) or not command[field] for field in fields):
+        raise ApprovalError("owner approval command identity is invalid")
+    return {
+        "approval_checksum": checksum,
+        "intent_hash": intent_hash,
+        "before_state_hash": before_state_hash,
+        "command_hash": command_binding_hash(command),
+        "command_id": command["command_id"],
+        "correlation_id": command["correlation_id"],
+        "idempotency_key": command["idempotency_key"],
+        "source_profile": command["source_profile"],
+        "task_id": task_id,
+    }
 
 
 def validate_policy(policy: Any) -> dict[str, Any]:
@@ -352,10 +454,352 @@ def verify_owner_approval(
     )
 
 
+_BINDING_FIELDS = {
+    "approval_checksum",
+    "intent_hash",
+    "before_state_hash",
+    "command_hash",
+    "command_id",
+    "correlation_id",
+    "idempotency_key",
+    "source_profile",
+    "task_id",
+}
+_ENTRY_FIELDS = {
+    "state",
+    "binding",
+    "lease_expires_at",
+    "generation",
+    "recovery_evidence_hash",
+}
+_RECOVERY_FIELDS = {
+    "schema_version",
+    "approval_checksum",
+    "intent_hash",
+    "command_hash",
+    "before_state_hash",
+    "after_state_hash",
+    "phase",
+}
+
+
+def _utc_text(value: datetime) -> str:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ApprovalError("owner approval claim time must be timezone-aware")
+    return value.astimezone(timezone.utc).isoformat(timespec="microseconds").replace(
+        "+00:00", "Z"
+    )
+
+
+def _parse_utc_text(value: Any) -> datetime:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        raise ApprovalError("owner approval apply journal is invalid")
+    try:
+        return datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError as exc:
+        raise ApprovalError("owner approval apply journal is invalid") from exc
+
+
+def _load_apply_journal(path: Path) -> dict[str, dict[str, Any]]:
+    if not path.exists():
+        return {}
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ApprovalError("owner approval apply journal is invalid") from exc
+    if (
+        not isinstance(loaded, dict)
+        or set(loaded) != {"schema_version", "entries"}
+        or loaded.get("schema_version") != 2
+        or not isinstance(loaded.get("entries"), dict)
+    ):
+        raise ApprovalError("owner approval apply journal is invalid")
+    entries = loaded["entries"]
+    for checksum, entry in entries.items():
+        binding = entry.get("binding") if isinstance(entry, dict) else None
+        if (
+            not isinstance(checksum, str)
+            or contract.SHA256.fullmatch(checksum) is None
+            or not isinstance(entry, dict)
+            or set(entry) != _ENTRY_FIELDS
+            or entry.get("state") not in {"applying", "completed"}
+            or not isinstance(binding, dict)
+            or set(binding) != _BINDING_FIELDS
+            or binding.get("approval_checksum") != checksum
+            or any(not isinstance(value, str) or not value for value in binding.values())
+            or any(
+                contract.SHA256.fullmatch(binding[field]) is None
+                for field in (
+                    "approval_checksum",
+                    "intent_hash",
+                    "before_state_hash",
+                    "command_hash",
+                )
+            )
+            or not isinstance(entry.get("generation"), int)
+            or isinstance(entry.get("generation"), bool)
+            or entry["generation"] < 1
+            or (
+                entry.get("recovery_evidence_hash") is not None
+                and (
+                    not isinstance(entry["recovery_evidence_hash"], str)
+                    or contract.SHA256.fullmatch(entry["recovery_evidence_hash"])
+                    is None
+                )
+            )
+        ):
+            raise ApprovalError("owner approval apply journal is invalid")
+        _parse_utc_text(entry.get("lease_expires_at"))
+        if entry["state"] == "completed" and entry["recovery_evidence_hash"] is None:
+            raise ApprovalError("owner approval apply journal is invalid")
+    return entries
+
+
+def _write_apply_journal(path: Path, entries: dict[str, dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+        json.dump({"schema_version": 2, "entries": entries}, handle, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temporary, 0o600)
+    temporary.replace(path)
+    directory = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
+def _validate_recovery_evidence(
+    evidence: Any, *, binding: dict[str, str], completed: bool
+) -> str:
+    if (
+        not isinstance(evidence, dict)
+        or set(evidence) != _RECOVERY_FIELDS
+        or evidence.get("schema_version") != "linear-owner-recovery.v1"
+        or evidence.get("approval_checksum") != binding["approval_checksum"]
+        or evidence.get("intent_hash") != binding["intent_hash"]
+        or evidence.get("command_hash") != binding["command_hash"]
+        or evidence.get("before_state_hash") != binding["before_state_hash"]
+        or not isinstance(evidence.get("after_state_hash"), str)
+        or contract.SHA256.fullmatch(evidence["after_state_hash"]) is None
+        or evidence.get("phase")
+        not in ({"completed"} if completed else {"prepared", "completed"})
+    ):
+        raise ApprovalError("owner approval exact recovery evidence is required")
+    return contract.canonical_sha256(evidence)
+
+
+def _with_apply_journal(
+    journal_path: Path, action: Callable[[dict[str, dict[str, Any]]], Any]
+) -> Any:
+    journal_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = journal_path.with_suffix(journal_path.suffix + ".lock")
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        os.chmod(lock_path, 0o600)
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            return action(_load_apply_journal(journal_path))
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def claim_owner_approval(
+    verified: VerifiedOwnerApproval,
+    *,
+    command: dict[str, Any],
+    task_id: str,
+    journal_path: Path,
+    now: datetime | None = None,
+    lease_seconds: int = 30,
+) -> ConsumedOwnerApproval:
+    """Atomically claim one exact approval for one persisted command/task delivery."""
+    if (
+        not isinstance(verified, VerifiedOwnerApproval)
+        or verified._marker is not _VERIFIED_MARKER
+    ):
+        raise ApprovalError("owner approval must be verified before claim")
+    if (
+        not isinstance(lease_seconds, int)
+        or isinstance(lease_seconds, bool)
+        or not 1 <= lease_seconds <= 300
+    ):
+        raise ApprovalError("owner approval lease must be between 1 and 300 seconds")
+    current = now or datetime.now(timezone.utc)
+    binding = _execution_binding(
+        command=command,
+        task_id=task_id,
+        checksum=verified._checksum,
+        before_state_hash=verified._before_state_hash,
+    )
+
+    def claim(entries: dict[str, dict[str, Any]]) -> ConsumedOwnerApproval:
+        if binding["approval_checksum"] in entries:
+            existing = entries[binding["approval_checksum"]]
+            if existing["binding"] != binding:
+                raise ApprovalError("owner approval apply binding conflicts")
+            if existing["state"] == "completed":
+                raise ApprovalError("owner approval apply is completed and non-reusable")
+            raise ApprovalError("owner approval apply is already claimed")
+        entries[binding["approval_checksum"]] = {
+            "state": "applying",
+            "binding": binding,
+            "lease_expires_at": _utc_text(current + timedelta(seconds=lease_seconds)),
+            "generation": 1,
+            "recovery_evidence_hash": None,
+        }
+        _write_apply_journal(journal_path, entries)
+        return ConsumedOwnerApproval(
+            verified,
+            _marker=_CONSUMED_MARKER,
+            command_hash=binding["command_hash"],
+            task_id=task_id,
+            generation=1,
+        )
+
+    return _with_apply_journal(journal_path, claim)
+
+
+def recover_owner_approval(
+    policy: Any,
+    *,
+    command: dict[str, Any],
+    task_id: str,
+    journal_path: Path,
+    recovery_evidence: Any,
+    now: datetime | None = None,
+    lease_seconds: int = 30,
+) -> ConsumedOwnerApproval:
+    """Re-enter a stale exact apply only when its prepared mutation is proven."""
+    validate_policy(policy)
+    if policy.get("mode") != "owner_approved":
+        raise ApprovalError("owner_approved policy is required")
+    if (
+        not isinstance(lease_seconds, int)
+        or isinstance(lease_seconds, bool)
+        or not 1 <= lease_seconds <= 300
+    ):
+        raise ApprovalError("owner approval lease must be between 1 and 300 seconds")
+    reference = policy["approval"]
+    binding = _execution_binding(
+        command=command,
+        task_id=task_id,
+        checksum=reference["checksum"],
+        before_state_hash=reference["before_state_hash"],
+    )
+    current = now or datetime.now(timezone.utc)
+
+    def recover(entries: dict[str, dict[str, Any]]) -> ConsumedOwnerApproval:
+        entry = entries.get(binding["approval_checksum"])
+        if entry is None:
+            raise ApprovalError("owner approval apply claim does not exist")
+        if entry["binding"] != binding:
+            raise ApprovalError("owner approval apply binding conflicts")
+        if entry["state"] == "completed":
+            raise ApprovalError("owner approval apply is completed and non-reusable")
+        if _parse_utc_text(entry["lease_expires_at"]) > current.astimezone(timezone.utc):
+            raise ApprovalError("owner approval apply is already claimed")
+        _validate_recovery_evidence(recovery_evidence, binding=binding, completed=False)
+        generation = entry["generation"] + 1
+        entry.update(
+            {
+                "lease_expires_at": _utc_text(
+                    current + timedelta(seconds=lease_seconds)
+                ),
+                "generation": generation,
+            }
+        )
+        _write_apply_journal(journal_path, entries)
+        return ConsumedOwnerApproval._from_binding(
+            intent={
+                "operation": command["operation"],
+                "target": command["target"],
+                "change": command["change"],
+            },
+            checksum=binding["approval_checksum"],
+            command_hash=binding["command_hash"],
+            task_id=task_id,
+            generation=generation,
+        )
+
+    return _with_apply_journal(journal_path, recover)
+
+
+def complete_owner_approval(
+    authorization: ConsumedOwnerApproval,
+    *,
+    journal_path: Path,
+    recovery_evidence: Any,
+) -> None:
+    """Permanently complete an exact claimed approval after verified read-back."""
+    if (
+        not isinstance(authorization, ConsumedOwnerApproval)
+        or authorization._marker is not _CONSUMED_MARKER
+        or authorization._command_hash is None
+        or authorization._task_id is None
+    ):
+        raise ApprovalError("owner approval completion authorization is invalid")
+
+    def complete(entries: dict[str, dict[str, Any]]) -> None:
+        entry = entries.get(authorization._checksum)
+        if entry is None or entry["binding"].get("command_hash") != authorization._command_hash:
+            raise ApprovalError("owner approval completion binding conflicts")
+        if entry["binding"].get("task_id") != authorization._task_id:
+            raise ApprovalError("owner approval completion binding conflicts")
+        if entry["state"] == "completed":
+            raise ApprovalError("owner approval apply is completed and non-reusable")
+        if entry["generation"] != authorization._generation:
+            raise ApprovalError("owner approval completion lease was superseded")
+        evidence_hash = _validate_recovery_evidence(
+            recovery_evidence, binding=entry["binding"], completed=True
+        )
+        entry["state"] = "completed"
+        entry["recovery_evidence_hash"] = evidence_hash
+        _write_apply_journal(journal_path, entries)
+
+    _with_apply_journal(journal_path, complete)
+
+
+def completed_owner_approval_matches(
+    policy: Any,
+    *,
+    command: dict[str, Any],
+    task_id: str,
+    journal_path: Path,
+    recovery_evidence: Any,
+) -> bool:
+    """Validate an exact completed replay without minting mutation authority."""
+    validate_policy(policy)
+    reference = policy["approval"]
+    binding = _execution_binding(
+        command=command,
+        task_id=task_id,
+        checksum=reference["checksum"],
+        before_state_hash=reference["before_state_hash"],
+    )
+
+    def matches(entries: dict[str, dict[str, Any]]) -> bool:
+        entry = entries.get(binding["approval_checksum"])
+        if entry is None or entry["binding"] != binding:
+            raise ApprovalError("owner approval apply binding conflicts")
+        if entry["state"] != "completed":
+            return False
+        evidence_hash = _validate_recovery_evidence(
+            recovery_evidence, binding=binding, completed=True
+        )
+        if entry["recovery_evidence_hash"] != evidence_hash:
+            raise ApprovalError("owner approval completed recovery evidence conflicts")
+        return True
+
+    return bool(_with_apply_journal(journal_path, matches))
+
+
 def consume_owner_approval(
     verified: VerifiedOwnerApproval, *, journal_path: Path
 ) -> ConsumedOwnerApproval:
-    """Atomically spend a previously verified approval and mint apply authority."""
+    """Legacy atomic one-use authorization for direct lane compatibility tests."""
     if (
         not isinstance(verified, VerifiedOwnerApproval)
         or verified._marker is not _VERIFIED_MARKER

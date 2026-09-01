@@ -558,6 +558,58 @@ def parse_linear_request(
                 raise RouteError("target must be an exact SIS-N identifier")
             target = {"type": "issue", "identifier": identifier}
             change = {}
+        elif operation in {"remove_issue_relation", "replace_issue_relation"}:
+            if operation == "remove_issue_relation":
+                expected_fields = {
+                    "operation",
+                    "identifier",
+                    "related_identifier",
+                    "relation_type",
+                    "approval",
+                }
+                relation_fields = ("related_identifier",)
+                type_fields = ("relation_type",)
+            else:
+                expected_fields = {
+                    "operation",
+                    "identifier",
+                    "old_related_identifier",
+                    "old_relation_type",
+                    "new_related_identifier",
+                    "new_relation_type",
+                    "approval",
+                }
+                relation_fields = (
+                    "old_related_identifier",
+                    "new_related_identifier",
+                )
+                type_fields = ("old_relation_type", "new_relation_type")
+            if set(request) != expected_fields:
+                raise RouteError(
+                    f"{operation} requires exact endpoints, relation types, and owner approval"
+                )
+            identifier = request.get("identifier")
+            if not isinstance(identifier, str) or not re.fullmatch(
+                r"SIS-[1-9][0-9]*", identifier
+            ):
+                raise RouteError("target must be an exact SIS-N identifier")
+            for field in relation_fields:
+                endpoint = request.get(field)
+                if not isinstance(endpoint, str) or not re.fullmatch(
+                    r"SIS-[1-9][0-9]*", endpoint
+                ):
+                    raise RouteError(f"{field} must be an exact SIS-N identifier")
+                if endpoint == identifier:
+                    raise RouteError("an issue cannot be related to itself")
+            for field in type_fields:
+                if request.get(field) not in ISSUE_RELATION_TYPES:
+                    raise RouteError(f"{field} is not in the bounded allowlist")
+            approval_reference = _validate_approval_reference(request["approval"])
+            target = {"type": "issue", "identifier": identifier}
+            change = {
+                field: request[field]
+                for field in (*relation_fields, *type_fields)
+            }
         elif operation == "create_issue_relation":
             if set(request) != {
                 "operation",

@@ -13,7 +13,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from plugins.project_manager_linear import approval
-from plugins.project_manager_linear import execute_pm_command
+from plugins.project_manager_linear import execute_claimed_task, execute_pm_command
 from plugins.project_manager_linear import lane
 from scripts import linear_owner_approval as owner_approval
 from plugins.ops_broker import broker
@@ -118,6 +118,47 @@ def history(*, status="succeeded", run_id=ATTEST_RUN_ID, workflow=None):
 
 
 class PlanContractTests(unittest.TestCase):
+    def test_plan_contract_accepts_only_exact_relation_removal_and_replacement_intents(self):
+        intents = (
+            {
+                "operation": "remove_issue_relation",
+                "target": {"type": "issue", "identifier": "SIS-77"},
+                "change": {
+                    "related_identifier": "SIS-94",
+                    "relation_type": "blocked_by",
+                },
+            },
+            {
+                "operation": "replace_issue_relation",
+                "target": {"type": "issue", "identifier": "SIS-77"},
+                "change": {
+                    "old_related_identifier": "SIS-94",
+                    "old_relation_type": "blocked_by",
+                    "new_related_identifier": "SIS-95",
+                    "new_relation_type": "related",
+                },
+            },
+        )
+        for exact_intent in intents:
+            with self.subTest(operation=exact_intent["operation"]):
+                result = owner_approval.build_plan(
+                    exact_intent, BEFORE_HASH, EXPIRES, now=NOW
+                )
+                self.assertEqual(result["intent"], exact_intent)
+                self.assertEqual(result["plannedActions"], [exact_intent])
+
+        forged = copy.deepcopy(intents[1])
+        forged["change"]["relation_id"] = "raw-id"
+        wrong_type = copy.deepcopy(intents[0])
+        wrong_type["change"]["relation_type"] = "duplicate"
+        self_relation = copy.deepcopy(intents[0])
+        self_relation["change"]["related_identifier"] = "SIS-77"
+        for invalid in (forged, wrong_type, self_relation):
+            with self.subTest(invalid=invalid), self.assertRaises(
+                owner_approval.ContractError
+            ):
+                owner_approval.build_plan(invalid, BEFORE_HASH, EXPIRES, now=NOW)
+
     def test_plan_is_deterministic_read_only_expiring_and_checksum_bound(self):
         first = plan()
         second = plan()
@@ -220,6 +261,28 @@ class PolicyValidationTests(unittest.TestCase):
 
 
 class PmExecutionBoundaryTests(unittest.TestCase):
+    @staticmethod
+    def bind_owner_command(raw, before):
+        bound = copy.deepcopy(raw)
+        exact_intent = {
+            "operation": bound["operation"],
+            "target": bound["target"],
+            "change": bound["change"],
+        }
+        before_hash = owner_approval.canonical_sha256(before)
+        bound["policy"]["approval"]["intent_hash"] = (
+            owner_approval.canonical_sha256(exact_intent)
+        )
+        bound["policy"]["approval"]["before_state_hash"] = before_hash
+        verified = approval.VerifiedOwnerApproval(
+            {},
+            exact_intent,
+            before_hash,
+            bound["policy"]["approval"]["checksum"],
+            _marker=approval._VERIFIED_MARKER,
+        )
+        return bound, verified
+
     class FakeLane:
         def __init__(self, plans=None):
             self.modes = []
@@ -299,6 +362,133 @@ class PmExecutionBoundaryTests(unittest.TestCase):
                 {"identifier": "SIS-77", "parent_identifier": "SIS-1"}
             ),
         )
+
+    def test_relation_owner_gate_binds_exact_relation_plan_target_and_inventory_hash(self):
+        relation_plan = self.FakeLane.plan_result()
+        relation_plan.update(
+            {
+                "operation": "remove_issue_relation",
+                "target": {
+                    "type": "issue_relation",
+                    "identifier": "SIS-77",
+                    "related_identifier": "SIS-94",
+                    "relation_type": "blocked_by",
+                },
+                "before": {
+                    "identifier": "SIS-77",
+                    "inventory": [
+                        {
+                            "id": "internal-relation-id",
+                            "type": "blocks",
+                            "issue": {"id": "issue-94", "identifier": "SIS-94"},
+                            "relatedIssue": {
+                                "id": "issue-77",
+                                "identifier": "SIS-77",
+                            },
+                        }
+                    ],
+                },
+                "plan": [
+                    {
+                        "action": "remove_issue_relation",
+                        "identifier": "SIS-77",
+                        "related_identifier": "SIS-94",
+                        "relation_type": "blocked_by",
+                    }
+                ],
+            }
+        )
+        fake_lane = self.FakeLane([relation_plan, copy.deepcopy(relation_plan)])
+        command = {
+            "schema_version": "linear-command.v2",
+            "command_id": "33333333-3333-4333-8333-333333333333",
+            "correlation_id": "44444444-4444-4444-8444-444444444444",
+            "idempotency_key": "linear:v2:" + "d" * 32,
+            "source_profile": "swe",
+            "operation": "remove_issue_relation",
+            "target": {"type": "issue", "identifier": "SIS-77"},
+            "change": {
+                "related_identifier": "SIS-94",
+                "relation_type": "blocked_by",
+            },
+            "policy": policy(),
+        }
+        verified = object()
+        authorization = object()
+        with tempfile.TemporaryDirectory() as tmp, mock.patch(
+            "plugins.project_manager_linear.approval.verify_owner_approval",
+            return_value=verified,
+        ) as verify, mock.patch(
+            "plugins.project_manager_linear.approval.consume_owner_approval",
+            return_value=authorization,
+        ):
+            execute_pm_command(
+                command,
+                lane=fake_lane,
+                client=object(),
+                journal_path=Path(tmp) / "journal.json",
+            )
+        self.assertEqual(
+            verify.call_args.kwargs["expected_before_state_hash"],
+            owner_approval.canonical_sha256(relation_plan["before"]),
+        )
+        self.assertEqual(fake_lane.modes, ["plan", "plan", "apply"])
+
+    def test_completed_relation_recovery_replay_returns_verified_noop_without_reconsuming_approval(self):
+        recovered = self.FakeLane.plan_result()
+        recovered.update(
+            {
+                "operation": "remove_issue_relation",
+                "target": {
+                    "type": "issue_relation",
+                    "identifier": "SIS-77",
+                    "related_identifier": "SIS-94",
+                    "relation_type": "blocked_by",
+                },
+                "result": "no_op",
+                "before": {"identifier": "SIS-77", "inventory": []},
+                "after": {
+                    "identifier": "SIS-77",
+                    "related_identifier": "SIS-94",
+                    "relation_type": "blocked_by",
+                    "present": False,
+                },
+                "plan": [],
+                "no_op": True,
+                "verified": True,
+                "recovered": True,
+            }
+        )
+        fake_lane = self.FakeLane([recovered])
+        command = {
+            "schema_version": "linear-command.v2",
+            "command_id": "33333333-3333-4333-8333-333333333333",
+            "correlation_id": "44444444-4444-4444-8444-444444444444",
+            "idempotency_key": "linear:v2:" + "e" * 32,
+            "source_profile": "swe",
+            "operation": "remove_issue_relation",
+            "target": {"type": "issue", "identifier": "SIS-77"},
+            "change": {
+                "related_identifier": "SIS-94",
+                "relation_type": "blocked_by",
+            },
+            "policy": policy(),
+        }
+        with tempfile.TemporaryDirectory() as tmp, mock.patch(
+            "plugins.project_manager_linear.approval.verify_owner_approval"
+        ) as verify, mock.patch(
+            "plugins.project_manager_linear.approval.consume_owner_approval"
+        ) as consume:
+            result = execute_pm_command(
+                command,
+                lane=fake_lane,
+                client=object(),
+                journal_path=Path(tmp) / "journal.json",
+            )
+        self.assertEqual(result, {"plan": recovered, "result": recovered})
+        self.assertEqual(fake_lane.modes, ["plan"])
+        verify.assert_not_called()
+        consume.assert_not_called()
 
     def test_live_before_state_drift_after_verification_fails_without_consuming_or_mutating(self):
         original = self.FakeLane.plan_result()
@@ -392,8 +582,300 @@ class PmExecutionBoundaryTests(unittest.TestCase):
         self.assertEqual(fake_lane.authorizations, [authorization])
         consume.assert_called_once()
 
+    def test_public_claimed_task_recovers_relation_delete_after_process_crash(self):
+        from tests.test_linear_command_lane import FakeClient, relation_change_command
+
+        class CrashAfterDelete(FakeClient):
+            crashed = False
+
+            def delete_issue_relation(self, relation_id):
+                super().delete_issue_relation(relation_id)
+                if not self.crashed:
+                    self.crashed = True
+                    raise KeyboardInterrupt("simulated process death")
+
+        client = CrashAfterDelete()
+        client.issue_relations = [
+            {
+                "id": "relation-old",
+                "type": "blocks",
+                "issue": {"id": "parent-uuid", "identifier": "SIS-56"},
+                "relatedIssue": {"id": "issue-uuid", "identifier": "SIS-59"},
+            }
+        ]
+        raw = relation_change_command("remove_issue_relation")
+        initial = lane.execute_command(client, raw, mode="plan")
+        raw, verified = self.bind_owner_command(raw, initial["before"])
+        with tempfile.TemporaryDirectory() as tmp, mock.patch(
+            "plugins.project_manager_linear.approval.verify_owner_approval",
+            return_value=verified,
+        ) as verify:
+            journal = Path(tmp) / "journal.json"
+            with self.assertRaises(KeyboardInterrupt):
+                execute_claimed_task(
+                    raw,
+                    task_id="t_1234abcd",
+                    lane=lane,
+                    client=client,
+                    journal_path=journal,
+                    approval_now=NOW,
+                    approval_lease_seconds=1,
+                )
+            verify.reset_mock()
+            for field, value in (
+                ("command_id", "55555555-5555-4555-8555-555555555555"),
+                ("correlation_id", "66666666-6666-4666-8666-666666666666"),
+                ("source_profile", "default"),
+            ):
+                different = copy.deepcopy(raw)
+                different[field] = value
+                with self.subTest(field=field), self.assertRaisesRegex(
+                    lane.ContractError, "conflict"
+                ):
+                    execute_claimed_task(
+                        different, task_id="t_1234abcd", lane=lane,
+                        client=client, journal_path=journal,
+                        approval_now=NOW + timedelta(seconds=2),
+                        approval_lease_seconds=1,
+                    )
+            recovered = execute_claimed_task(
+                raw,
+                task_id="t_1234abcd",
+                lane=lane,
+                client=client,
+                journal_path=journal,
+                approval_now=NOW + timedelta(seconds=2),
+                approval_lease_seconds=1,
+            )
+        self.assertEqual(recovered["result"]["result"], "no_op")
+        self.assertEqual(
+            [item[0] for item in client.writes], ["delete_issue_relation"]
+        )
+        verify.assert_not_called()
+
+    def test_public_claimed_task_recovers_reparent_write_after_process_crash(self):
+        from tests.test_linear_command_lane import FakeClient, command as lane_command
+
+        class CrashAfterReparent(FakeClient):
+            crashed = False
+
+            def update_issue_fields(self, issue_id, **fields):
+                super().update_issue_fields(issue_id, **fields)
+                if not self.crashed:
+                    self.crashed = True
+                    raise KeyboardInterrupt("simulated process death")
+
+        client = CrashAfterReparent()
+        raw = lane_command(
+            "update_issue",
+            {"parent_identifier": None},
+            key="linear:SIS-59:owner-parent:public-crash",
+        )
+        raw["policy"] = policy()
+        initial = lane.execute_command(client, raw, mode="plan")
+        raw, verified = self.bind_owner_command(raw, initial["before"])
+        with tempfile.TemporaryDirectory() as tmp, mock.patch(
+            "plugins.project_manager_linear.approval.verify_owner_approval",
+            return_value=verified,
+        ) as verify:
+            journal = Path(tmp) / "journal.json"
+            with self.assertRaises(KeyboardInterrupt):
+                execute_claimed_task(
+                    raw,
+                    task_id="t_1234abcd",
+                    lane=lane,
+                    client=client,
+                    journal_path=journal,
+                    approval_now=NOW,
+                    approval_lease_seconds=1,
+                )
+            verify.reset_mock()
+            recovered = execute_claimed_task(
+                raw,
+                task_id="t_1234abcd",
+                lane=lane,
+                client=client,
+                journal_path=journal,
+                approval_now=NOW + timedelta(seconds=2),
+                approval_lease_seconds=1,
+            )
+        self.assertEqual(recovered["result"]["result"], "no_op")
+        self.assertEqual(len([item for item in client.writes if item[0] == "fields"]), 1)
+        verify.assert_not_called()
+
+    def test_public_claimed_task_recovers_after_relation_create_without_duplicate(self):
+        from tests.test_linear_command_lane import FakeClient, relation_change_command
+
+        class CrashAfterCreate(FakeClient):
+            crashed = False
+
+            def create_issue_relation(self, **kwargs):
+                super().create_issue_relation(**kwargs)
+                if not self.crashed:
+                    self.crashed = True
+                    raise KeyboardInterrupt("simulated process death")
+
+        client = CrashAfterCreate()
+        client.issue_relations = [
+            {
+                "id": "relation-old", "type": "blocks",
+                "issue": {"id": "parent-uuid", "identifier": "SIS-56"},
+                "relatedIssue": {"id": "issue-uuid", "identifier": "SIS-59"},
+            }
+        ]
+        raw = relation_change_command("replace_issue_relation")
+        raw["change"] = {
+            "old_related_identifier": "SIS-56",
+            "old_relation_type": "blocked_by",
+            "new_related_identifier": "SIS-56",
+            "new_relation_type": "related",
+        }
+        initial = lane.execute_command(client, raw, mode="plan")
+        raw, verified = self.bind_owner_command(raw, initial["before"])
+        with tempfile.TemporaryDirectory() as tmp, mock.patch(
+            "plugins.project_manager_linear.approval.verify_owner_approval",
+            return_value=verified,
+        ) as verify:
+            journal = Path(tmp) / "journal.json"
+            with self.assertRaises(KeyboardInterrupt):
+                execute_claimed_task(
+                    raw, task_id="t_1234abcd", lane=lane, client=client,
+                    journal_path=journal, approval_now=NOW,
+                    approval_lease_seconds=1,
+                )
+            verify.reset_mock()
+            recovered = execute_claimed_task(
+                raw, task_id="t_1234abcd", lane=lane, client=client,
+                journal_path=journal, approval_now=NOW + timedelta(seconds=2),
+                approval_lease_seconds=1,
+            )
+        self.assertEqual(recovered["result"]["result"], "applied")
+        self.assertEqual(
+            [item[0] for item in client.writes],
+            ["create_issue_relation", "delete_issue_relation"],
+        )
+        self.assertEqual(len(client.issue_relations), 1)
+        verify.assert_not_called()
+
+    def test_public_claimed_task_concurrent_apply_completed_replay_and_evidenceless_stale(self):
+        from tests.test_linear_command_lane import FakeClient, command as lane_command
+
+        def owner_reparent(client, key):
+            raw = lane_command("update_issue", {"parent_identifier": None}, key=key)
+            raw["policy"] = policy()
+            planned = lane.execute_command(client, raw, mode="plan")
+            return self.bind_owner_command(raw, planned["before"])
+
+        class PausingReparent(FakeClient):
+            def __init__(self):
+                super().__init__()
+                self.mutated = threading.Event()
+                self.release = threading.Event()
+
+            def update_issue_fields(self, issue_id, **fields):
+                super().update_issue_fields(issue_id, **fields)
+                self.mutated.set()
+                self.release.wait(5)
+
+        concurrent_client = PausingReparent()
+        raw, verified = owner_reparent(
+            concurrent_client, "linear:SIS-59:owner-parent:concurrent"
+        )
+        with tempfile.TemporaryDirectory() as tmp, mock.patch(
+            "plugins.project_manager_linear.approval.verify_owner_approval",
+            return_value=verified,
+        ):
+            journal = Path(tmp) / "journal.json"
+            first, first_error = [], []
+
+            def run_first():
+                try:
+                    first.append(execute_claimed_task(
+                        raw, task_id="t_1234abcd", lane=lane,
+                        client=concurrent_client, journal_path=journal,
+                        approval_now=NOW, approval_lease_seconds=30,
+                    ))
+                except BaseException as exc:
+                    first_error.append(exc)
+
+            thread = threading.Thread(target=run_first)
+            thread.start()
+            self.assertTrue(concurrent_client.mutated.wait(5))
+            with self.assertRaisesRegex(approval.ApprovalError, "already claimed"):
+                execute_claimed_task(
+                    raw, task_id="t_1234abcd", lane=lane,
+                    client=concurrent_client, journal_path=journal,
+                    approval_now=NOW, approval_lease_seconds=30,
+                )
+            concurrent_client.release.set()
+            thread.join(5)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(first_error, [])
+            self.assertEqual(len(first), 1)
+            writes_before_replay = list(concurrent_client.writes)
+            replay = execute_claimed_task(
+                raw, task_id="t_1234abcd", lane=lane,
+                client=concurrent_client, journal_path=journal,
+                approval_now=NOW + timedelta(seconds=31),
+                approval_lease_seconds=30,
+            )
+            self.assertEqual(replay["result"]["result"], "no_op")
+            self.assertEqual(concurrent_client.writes, writes_before_replay)
+
+        class CrashBeforeWrite(FakeClient):
+            def update_issue_fields(self, issue_id, **fields):
+                del issue_id, fields
+                raise KeyboardInterrupt("simulated death before mutation")
+
+        no_evidence_client = CrashBeforeWrite()
+        raw, verified = owner_reparent(
+            no_evidence_client, "linear:SIS-59:owner-parent:no-evidence"
+        )
+        with tempfile.TemporaryDirectory() as tmp, mock.patch(
+            "plugins.project_manager_linear.approval.verify_owner_approval",
+            return_value=verified,
+        ):
+            journal = Path(tmp) / "journal.json"
+            with self.assertRaises(KeyboardInterrupt):
+                execute_claimed_task(
+                    raw, task_id="t_1234abcd", lane=lane,
+                    client=no_evidence_client, journal_path=journal,
+                    approval_now=NOW, approval_lease_seconds=1,
+                )
+            with self.assertRaisesRegex(approval.ApprovalError, "already claimed"):
+                execute_claimed_task(
+                    raw, task_id="t_1234abcd", lane=lane,
+                    client=no_evidence_client, journal_path=journal,
+                    approval_now=NOW + timedelta(seconds=2),
+                    approval_lease_seconds=1,
+                )
+
 
 class PmVerifierTests(unittest.TestCase):
+    @staticmethod
+    def owner_command():
+        return {
+            "schema_version": "linear-command.v2",
+            "command_id": "33333333-3333-4333-8333-333333333333",
+            "correlation_id": "44444444-4444-4444-8444-444444444444",
+            "idempotency_key": "linear:v2:" + "a" * 32,
+            "source_profile": "swe",
+            **intent(),
+            "policy": policy(),
+        }
+
+    @staticmethod
+    def recovery_evidence(command_value, *, phase="prepared"):
+        return {
+            "schema_version": "linear-owner-recovery.v1",
+            "approval_checksum": command_value["policy"]["approval"]["checksum"],
+            "intent_hash": command_value["policy"]["approval"]["intent_hash"],
+            "command_hash": approval.command_binding_hash(command_value),
+            "before_state_hash": BEFORE_HASH,
+            "after_state_hash": "d" * 64,
+            "phase": phase,
+        }
+
     def runner(self, attest=None, *, history_payload=None, artifact_payload=None):
         attest = attest or attestation()
         calls = []
@@ -492,6 +974,146 @@ class PmVerifierTests(unittest.TestCase):
                 thread.join()
             self.assertEqual(len(successes), 1)
             self.assertEqual(failures, ["owner approval was already consumed"])
+
+    def test_durable_exact_command_claim_allows_only_one_concurrent_apply(self):
+        verified = approval.VerifiedOwnerApproval(
+            attestation(), intent(), BEFORE_HASH, attestation()["checksum"],
+            _marker=approval._VERIFIED_MARKER,
+        )
+        command_value = self.owner_command()
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Path(tmp) / "approval-journal.json"
+            barrier = threading.Barrier(2)
+            successes = []
+            failures = []
+
+            def claim():
+                barrier.wait()
+                try:
+                    successes.append(
+                        approval.claim_owner_approval(
+                            verified,
+                            command=command_value,
+                            task_id="t_1234abcd",
+                            journal_path=journal,
+                            now=NOW,
+                            lease_seconds=30,
+                        )
+                    )
+                except approval.ApprovalError as exc:
+                    failures.append(str(exc))
+
+            threads = [threading.Thread(target=claim) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+        self.assertEqual(len(successes), 1)
+        self.assertEqual(failures, ["owner approval apply is already claimed"])
+
+    def test_stale_claim_requires_exact_recovery_evidence_and_command_identity(self):
+        verified = approval.VerifiedOwnerApproval(
+            attestation(), intent(), BEFORE_HASH, attestation()["checksum"],
+            _marker=approval._VERIFIED_MARKER,
+        )
+        command_value = self.owner_command()
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Path(tmp) / "approval-journal.json"
+            approval.claim_owner_approval(
+                verified,
+                command=command_value,
+                task_id="t_1234abcd",
+                journal_path=journal,
+                now=NOW,
+                lease_seconds=30,
+            )
+            stale = NOW + timedelta(seconds=31)
+            with self.assertRaisesRegex(approval.ApprovalError, "recovery evidence"):
+                approval.recover_owner_approval(
+                    command_value["policy"],
+                    command=command_value,
+                    task_id="t_1234abcd",
+                    journal_path=journal,
+                    recovery_evidence=None,
+                    now=stale,
+                )
+
+            for field, replacement in (
+                ("command_id", "55555555-5555-4555-8555-555555555555"),
+                ("correlation_id", "66666666-6666-4666-8666-666666666666"),
+                ("idempotency_key", "linear:v2:" + "f" * 32),
+                ("source_profile", "default"),
+            ):
+                different = copy.deepcopy(command_value)
+                different[field] = replacement
+                with self.subTest(field=field), self.assertRaisesRegex(
+                    approval.ApprovalError, "binding"
+                ):
+                    approval.recover_owner_approval(
+                        different["policy"],
+                        command=different,
+                        task_id="t_1234abcd",
+                        journal_path=journal,
+                        recovery_evidence=self.recovery_evidence(command_value),
+                        now=stale,
+                    )
+
+            changed_intent = copy.deepcopy(command_value)
+            changed_intent["change"] = {"parent_identifier": "SIS-2"}
+            with self.assertRaisesRegex(approval.ApprovalError, "intent binding"):
+                approval.recover_owner_approval(
+                    changed_intent["policy"],
+                    command=changed_intent,
+                    task_id="t_1234abcd",
+                    journal_path=journal,
+                    recovery_evidence=self.recovery_evidence(command_value),
+                    now=stale,
+                )
+            with self.assertRaisesRegex(approval.ApprovalError, "binding"):
+                approval.recover_owner_approval(
+                    command_value["policy"],
+                    command=command_value,
+                    task_id="t_deadbeef",
+                    journal_path=journal,
+                    recovery_evidence=self.recovery_evidence(command_value),
+                    now=stale,
+                )
+
+            recovered = approval.recover_owner_approval(
+                command_value["policy"],
+                command=command_value,
+                task_id="t_1234abcd",
+                journal_path=journal,
+                recovery_evidence=self.recovery_evidence(command_value),
+                now=stale,
+            )
+            approval.complete_owner_approval(
+                recovered,
+                journal_path=journal,
+                recovery_evidence=self.recovery_evidence(
+                    command_value, phase="completed"
+                ),
+            )
+            self.assertTrue(
+                approval.completed_owner_approval_matches(
+                    command_value["policy"],
+                    command=command_value,
+                    task_id="t_1234abcd",
+                    journal_path=journal,
+                    recovery_evidence=self.recovery_evidence(
+                        command_value, phase="completed"
+                    ),
+                )
+            )
+            with self.assertRaisesRegex(approval.ApprovalError, "completed"):
+                approval.recover_owner_approval(
+                    command_value["policy"],
+                    command=command_value,
+                    task_id="t_1234abcd",
+                    journal_path=journal,
+                    recovery_evidence=self.recovery_evidence(command_value),
+                    now=stale + timedelta(seconds=31),
+                )
 
     def test_lane_apply_rejects_owner_policy_without_consumed_gate(self):
         command = {
