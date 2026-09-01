@@ -1,7 +1,7 @@
 ---
 name: linear-source-request-routing
 description: Route Linear reads/writes through broker and Project Manager.
-version: 1.3.0
+version: 1.3.1
 author: Alexey Petrov, Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -55,6 +55,19 @@ A requested outcome may require several supported writes. Never claim that the l
 
 Submit only one source request at a time. After `queued`, stop as required. On completion, obtain the sanitized result, then continue the ordered plan automatically after each wake until the requested outcome is complete. Do not make the owner repeat the request, manually create an entity that the lane can create, or choose between an invented capability blocker and partial execution. A blocker stops only the dependent remainder of the plan; after semantic re-resolution, continue from already verified completed steps rather than recreating them.
 
+### Ambiguous post-write outcomes
+
+A blocked mutating route is not proof that the external mutation did not happen. A write can reach Linear and then fail during read-back, result serialization, or delivery. Never report that an entity is absent or a write failed solely from task status, a generic safe reason, or a missing result payload.
+
+When a mutating request returns `blocked` without a factual pre-write rejection that proves no mutation was attempted, perform bounded read-only reconciliation through `linear_source_request` before answering:
+
+- for an exact issue update, state change, relation, archive, or delete, read/inventory the exact issue or affected scope and compare the requested observable fields;
+- for issue creation, reconcile as created only when authoritative mutation-scoped provenance attributes the exact returned issue to this request; an exact title and matching scope alone are insufficient because titles are not unique;
+- for project, milestone, initiative, or hierarchy creation/linking, require the same authoritative request attribution before calling a newly observed entity the result of this mutation; otherwise current matching state proves only that the desired effect exists, not who created it;
+- never retry the mutation until reconciliation proves the target effect is absent and replay safety permits a retry.
+
+If authoritative mutation-scoped provenance identifies one exact compatible result, report the verified external outcome and continue the ordered plan. Report a factual pre-write blocker only when the PM result explicitly proves that no mutation was attempted. A post-write mismatch or unchanged current state is not proof of a pre-write rejection. If provenance is absent, or reconciliation finds zero, multiple, or conflicting candidates, report that the outcome is unverified—not that the write failed—and stop dependent writes. A matching pre-existing entity may be described only as current verified state, never attributed to this request. Do not expose internal errors, task IDs, or raw payloads.
+
 ## Procedure
 
 1. Resolve the target without needless confirmation:
@@ -87,9 +100,12 @@ Submit only one source request at a time. After `queued`, stop as required. On c
 6. On a Kanban wake, call `linear_source_request` once with the literal original semantic request to obtain the sanitized completion, then send one concise answer. Do not repeat raw lifecycle text.
 7. For a blocker, preserve the tool's sanitized factual `message`; never infer a
    different capability limitation, required parent, hierarchy shape, or other
-   cause from the operation type. If the tool says the safe reason is
-   unavailable, say only that. Do not expose internal identifiers unless the
-   user explicitly asks for diagnostic detail.
+   cause from the operation type. A factual pre-write rejection may be reported
+   directly. For an ambiguous post-write blocker or `safe reason unavailable`,
+   first apply the bounded read-only reconciliation procedure above; never turn
+   task status alone into a claim that the entity is absent or the write failed.
+   Do not expose internal identifiers unless the user explicitly asks for
+   diagnostic detail.
 
 ## User-facing response contract
 
