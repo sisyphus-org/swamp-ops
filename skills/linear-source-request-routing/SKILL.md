@@ -1,7 +1,7 @@
 ---
 name: linear-source-request-routing
 description: Route Linear reads/writes through broker and Project Manager.
-version: 1.2.0
+version: 1.3.0
 author: Alexey Petrov, Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -34,6 +34,26 @@ Use the typed Project Manager lane for every Linear read, creation, or mutation.
 - Route `bulk_linear_operations` with an ordered 1–50 `items` list. Each item is exactly `{operation,target,change}` in an already-supported mutating lane shape. Never add child approval/policy/IDs. Supply no parent approval when every child is standard-safe; if any child is owner-controlled, supply exactly one parent `approval` binding the full ordered intent and aggregate preflight.
 
 Do not use this path for fuzzy/missing mutation targets, server-side/raw search passthrough, nested/unbounded bulk or bulk selectors, arbitrary terminal names, nonterminal owner approval, standalone initiative unlink, account/team destruction, milestone archive, permanent issue deletion, caller-selected cascade, initiative reparenting, arbitrary teams, other structural changes, or per-task Telegram topics. Owner approval authorizes only the exact ordered intent and complete aggregate before/impact state.
+
+## Semantic resolution and composed outcomes
+
+Exactness applies only after semantic resolution. The owner's natural-language name is evidence of intent, not automatically the exact mutation target. Keep reasoning enabled and resolve named initiatives, projects, milestones, and issues before submitting an exact write:
+
+1. If the owner supplied an exact `SIS-N`, an exact copied entity name, or a canonical Linear URL whose target is unambiguous, preserve it.
+2. Otherwise call `search_linear` for the relevant entity type using the owner's meaningful name fragment. Search is case-insensitive Unicode substring matching; use broader `inventory_linear` only when the fragment cannot find a candidate.
+3. If search returns one unique plausible match, use that entity's exact returned name without asking for confirmation. Example: owner wording `crypto` resolves to the sole initiative `Crypto Intelligence`.
+4. If search returns multiple plausible matches, present only those candidates and ask one focused clarification. Do not guess between genuinely ambiguous entities.
+5. If search returns zero matches and the requested operation requires an existing entity, report the factual absence. If the owner explicitly asked to create that entity, use the supported create operation instead of treating absence as a blocker.
+
+A requested outcome may require several supported writes. Never claim that the lane lacks a capability merely because no single operation implements the whole sentence. Build the shortest safe ordered plan from the supported operations. For example, `initiative → new project → new milestone → issue` is:
+
+1. resolve the initiative with search;
+2. create/reuse the project;
+3. link the exact project to the exact initiative;
+4. create/reuse the milestone in that project;
+5. create the issue in the exact project/milestone scope.
+
+Submit only one source request at a time. After `queued`, stop as required. On completion, obtain the sanitized result, then continue the ordered plan automatically after each wake until the requested outcome is complete. Do not make the owner repeat the request, manually create an entity that the lane can create, or choose between an invented capability blocker and partial execution. A blocker stops only the dependent remainder of the plan; after semantic re-resolution, continue from already verified completed steps rather than recreating them.
 
 ## Procedure
 
