@@ -1,15 +1,14 @@
-# Linear owner-approved terminal, relation, archive, and delete changes
+# Linear owner-approved relation, parent, archive, and delete changes
 
 This repository exposes narrowly owner-approved destructive slices only:
 
-1. move one exact `SIS-N` issue through existing `change_state` to exactly `Done`, `Canceled`, or `Duplicate`;
-2. replace or clear the parent of one exact `SIS-N` issue through parent-only `update_issue`;
-3. remove one exact existing issue relation by two exact `SIS-N` endpoints and `relation_type`;
-4. replace/rewire one exact existing issue relation with one exact new endpoint/type relation;
-5. archive one exact issue, SIS-scoped project, or workspace initiative;
-6. delete/trash one exact issue, SIS-scoped project, project milestone, or workspace initiative.
+1. replace or clear the parent of one exact `SIS-N` issue through parent-only `update_issue`;
+2. remove one exact existing issue relation by two exact `SIS-N` endpoints and `relation_type`;
+3. replace/rewire one exact existing issue relation with one exact new endpoint/type relation;
+4. archive one exact issue, SIS-scoped project, or workspace initiative;
+5. delete/trash one exact issue, SIS-scoped project, project milestone, or workspace initiative.
 
-All other terminal names, nonterminal owner approval, bulk targets, caller-selected cascade flags, arbitrary entity types, and destructive lifecycle operations remain unavailable.
+Directly writable workflow-state transitions and exact duplicate relation creation never use this approval path. Arbitrary state names, nonterminal owner approval, bulk targets, caller-selected cascade flags, arbitrary entity types, and destructive lifecycle operations remain unavailable.
 
 ## Trust boundaries
 
@@ -27,15 +26,7 @@ persisted linear-command.v2 → PM common approval gate → bounded Linear mutat
 
 ## Exact approval intents
 
-`linear-destructive-owner-approval-plan.v1` accepts only one of the three exact terminal state intents, a parent-only update, or one of these exact relation shapes:
-
-```json
-{
-  "operation": "change_state",
-  "target": {"type": "issue", "identifier": "SIS-77"},
-  "change": {"state": "Duplicate"}
-}
-```
+`linear-destructive-owner-approval-plan.v1` accepts only a parent-only update, an exact destructive relation change, or a supported archive/delete intent. A `change_state` intent is rejected because directly writable states use the standard PM route; reserved `Duplicate` is created by a standard exact duplicate relation.
 
 ```json
 {
@@ -100,12 +91,6 @@ Verified read-back permanently marks the approval completed with its exact compl
 
 Wrong/expired/forged approval, wrong intent, wrong before hash, changed live plan, wrong team, self relation, zero/ambiguous old match, ambiguous new match, read-back drift, partial failure, and recovery-journal conflict all fail closed.
 
-## PM terminal-state behavior
-
-Standard policy remains blocked for `Done`, `Canceled`, and `Duplicate`. Owner approval is accepted only on `change_state` with exactly one of those names. PM resolves the exact name inside the target issue's exact `SIS` team and requires one unique state with a non-empty internal ID. The live SIS schema inventory fixes semantic type compatibility as `Done=completed`, `Canceled=canceled`, and `Duplicate=duplicate`. Missing, duplicate-name, or wrong-type state inventory fails before mutation.
-
-Apply uses the existing minimal `IssueUpdateInput {stateId}` mutation only. It writes prepared before/after state hashes before the API call, immediately reads the exact issue back, verifies state ID/name/type and every unmanaged field, and only then records completion. Crash after the write recovers through `execute_claimed_task` and the durable approval lease as one verified no-op; it never issues a second state mutation. Literal completed replay uses the same evidence and does not re-verify or re-consume approval.
-
 ## Archive/delete matrix and behavior
 
 The exact supported matrix is deliberately asymmetric:
@@ -125,4 +110,4 @@ The read-only live smoke `inventory_entity_destruction` introspects the current 
 
 ## Deliberately unavailable
 
-Arbitrary terminal names, nonterminal owner approval, account/team archive or delete, milestone archive, bulk selectors/cascade, caller-selected cascade, permanent issue deletion, initiative unlink as a standalone operation, arbitrary GraphQL, arbitrary relation IDs, and all other destructive lifecycle operations remain rejected before mutation.
+Arbitrary state names, owner approval on state transitions, account/team archive or delete, milestone archive, bulk selectors/cascade, caller-selected cascade, permanent issue deletion, initiative unlink as a standalone operation, arbitrary GraphQL, arbitrary relation IDs, and all other destructive lifecycle operations remain rejected before mutation.

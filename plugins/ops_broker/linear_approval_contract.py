@@ -87,7 +87,6 @@ def validate_intent(value: Any) -> dict[str, Any]:
     operation = value.get("operation")
     if operation not in {
         "bulk_linear_operations",
-        "change_state",
         "update_issue",
         "remove_issue_relation",
         "replace_issue_relation",
@@ -141,9 +140,6 @@ def validate_intent(value: Any) -> dict[str, Any]:
                 "remove_issue_relation", "replace_issue_relation",
                 "archive_linear_entity", "delete_linear_entity",
             } or (
-                item["operation"] == "change_state"
-                and child_change.get("state") in {"Done", "Canceled", "Duplicate"}
-            ) or (
                 item["operation"] == "update_issue"
                 and set(child_change) == {"parent_identifier"}
             )
@@ -198,16 +194,6 @@ def validate_intent(value: Any) -> dict[str, Any]:
     change = value.get("change")
     if not isinstance(change, dict):
         raise ContractError("intent change must be an object")
-    if operation == "change_state":
-        if set(change) != {"state"} or change.get("state") not in {
-            "Done",
-            "Canceled",
-            "Duplicate",
-        }:
-            raise ContractError(
-                "change_state requires exactly one owner-controlled terminal state"
-            )
-        return value
     if operation == "update_issue":
         if set(change) != {"parent_identifier"}:
             raise ContractError("update_issue requires exactly parent_identifier")

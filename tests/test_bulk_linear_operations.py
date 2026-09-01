@@ -635,6 +635,42 @@ class BulkExecutionTests(unittest.TestCase):
 
 
 class BulkSourceTests(unittest.TestCase):
+    def test_duplicate_relation_child_is_standard_safe_in_bulk(self):
+        request = {
+            "operation": "bulk_linear_operations",
+            "items": [
+                {
+                    "operation": "create_issue_relation",
+                    "target": {"type": "issue", "identifier": "SIS-102"},
+                    "change": {
+                        "related_identifier": "SIS-77",
+                        "relation_type": "duplicate",
+                    },
+                }
+            ],
+        }
+        parsed = route.parse_linear_request(request)
+        self.assertEqual(parsed.command["policy"], {"mode": "standard"})
+        child = bulk.derive_child_command(parsed.command, 0)
+        self.assertEqual(child["change"]["relation_type"], "duplicate")
+        self.assertEqual(child["policy"], {"mode": "standard"})
+
+    def test_terminal_state_child_does_not_require_parent_approval(self):
+        request = {
+            "operation": "bulk_linear_operations",
+            "items": [
+                {
+                    "operation": "change_state",
+                    "target": {"type": "issue", "identifier": "SIS-102"},
+                    "change": {"state": "Done"},
+                }
+            ],
+        }
+        parsed = route.parse_linear_request(request)
+        self.assertEqual(parsed.command["policy"], {"mode": "standard"})
+        child = bulk.derive_child_command(parsed.command, 0)
+        self.assertEqual(child["policy"], {"mode": "standard"})
+
     def test_source_accepts_only_exact_canonical_items_and_semantic_replay(self):
         request = {"operation": "bulk_linear_operations", "items": [item(0), item(1)]}
         parsed = route.parse_linear_request(request, uuid_factory=lambda: PARENT_IDS["command_id"])
