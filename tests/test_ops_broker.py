@@ -75,7 +75,7 @@ class RequestValidationTests(unittest.TestCase):
 
     def test_public_schema_allows_full_owner_attestation_start_shape(self):
         arguments = OPS_BROKER_SCHEMA["parameters"]["properties"]["arguments"]
-        self.assertGreaterEqual(arguments["maxProperties"], 6)
+        self.assertEqual(arguments["maxProperties"], 6)
 
     def test_validate_request_accepts_minimal_readonly_request(self):
         request = validate_request(
