@@ -101,6 +101,30 @@ class FakeLifecycle:
 
 
 class ExecutionTests(unittest.TestCase):
+    def test_workspace_read_executes_once_without_journal_or_plan_replay(self):
+        raw = command()
+        raw.update(
+            {
+                "operation": "inventory_linear",
+                "target": {"type": "workspace", "identifier": "current"},
+                "change": {
+                    "entity_types": ["issues"],
+                    "include_archived": False,
+                },
+            }
+        )
+        lane = FakeLane(apply_result="read")
+        output = execute_pm_command(
+            raw,
+            lane=lane,
+            client=object(),
+            journal_path=Path("/must/not/be/used.json"),
+        )
+        self.assertEqual([call[0] for call in lane.calls], ["validate", "apply"])
+        self.assertIsNone(lane.calls[-1][2])
+        self.assertEqual(output["result"]["result"], "read")
+        self.assertEqual(output["plan"], output["result"])
+
     def test_plan_runs_before_apply_and_returns_verified_result(self):
         lane = FakeLane()
         with tempfile.TemporaryDirectory() as tmp:
@@ -214,6 +238,57 @@ class ExecutionTests(unittest.TestCase):
         }
         self.assertEqual(human_summary(result), "Иерархия Linear готова.")
 
+    def test_human_summary_distinguishes_initiative_management(self):
+        expected = {
+            "create_initiative": "Инициатива Linear создана или уже существует.",
+            "update_initiative": "Инициатива Linear обновлена.",
+            "link_project_to_initiative": "Проект Linear добавлен в инициативу.",
+        }
+        for operation, summary in expected.items():
+            with self.subTest(operation=operation):
+                self.assertEqual(
+                    human_summary(
+                        {
+                            "operation": operation,
+                            "result": "applied",
+                            "verified": True,
+                            "target": {"type": "initiative", "identifier": "safe-name"},
+                        }
+                    ),
+                    summary,
+                )
+
+    def test_human_summary_distinguishes_project_and_milestone_management(self):
+        expected = {
+            "create_project": "Проект Linear создан или уже существует.",
+            "create_milestone": "Этап проекта Linear создан или уже существует.",
+            "update_project": "Проект Linear обновлён.",
+            "update_milestone": "Этап проекта Linear обновлён.",
+        }
+        for operation, summary in expected.items():
+            with self.subTest(operation=operation):
+                self.assertEqual(
+                    human_summary({"operation": operation, "result": "applied", "verified": True, "target": {"type": "project", "identifier": "safe-name"}}),
+                    summary,
+                )
+
+    def test_human_summary_distinguishes_workspace_reads(self):
+        for operation, expected in (
+            ("search_linear", "Поиск Linear выполнен."),
+            ("inventory_linear", "Инвентаризация Linear выполнена."),
+        ):
+            self.assertEqual(
+                human_summary(
+                    {
+                        "operation": operation,
+                        "result": "read",
+                        "verified": True,
+                        "target": {"type": "workspace", "identifier": "current"},
+                    }
+                ),
+                expected,
+            )
+
     def test_human_summary_renders_read_before_noop(self):
         read = {
             "operation": "read_issue",
@@ -241,14 +316,18 @@ class PluginTests(unittest.TestCase):
         )
         self.assertEqual(sanitized, "[credential-redacted]")
 
-    def test_pm_plugin_bundles_lane_without_mutable_runtime_dependency(self):
+    def test_pm_plugin_bundles_lane_without_mutable_development_checkout_dependency(self):
         plugin_root = ROOT / "plugins" / "project_manager_linear"
         self.assertTrue((plugin_root / "lane.py").is_file())
         source = "\n".join(
             path.read_text()
             for path in sorted(plugin_root.glob("*.py"))
         )
-        self.assertNotIn("swamp-ops-runtime", source)
+        self.assertNotIn('Path("/Users/hermes/workspaces/swamp-ops")', source)
+        self.assertIn(
+            'SWAMP_WORKSPACE = Path("/Users/hermes/workspaces/swamp-ops-runtime")',
+            (plugin_root / "approval.py").read_text(),
+        )
 
     def test_worker_skill_calls_no_arg_v2_tool_and_does_not_reconstruct_command(self):
         skill = (ROOT / "skills" / "project-manager-linear-worker" / "SKILL.md").read_text()

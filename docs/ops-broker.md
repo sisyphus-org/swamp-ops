@@ -26,9 +26,10 @@ A Hermes profile is not an OS sandbox. This broker limits delegated capability, 
 - The tool accepts five top-level fields and rejects `caller_profile`, arbitrary URLs, shell text, template paths, unknown fields, and non-UUID request IDs.
 - Every command is a fixed argv list executed with `shell=False`.
 - GitHub repositories, Swamp models, workflows, and data names are exact allowlists in `plugins/ops_broker/policy.json`.
-- Read-only operations require `mode: plan`; the two repository bootstrap gate operations require `mode: apply`.
-- Apply accepts only repository name plus immutable plan run ID/checksum/artifact version. It reloads and verifies artifact provenance before starting a suspended workflow.
-- Approval can resume only an exact apply run registered in broker audit and serialized by a lock for the policy-bound authenticated owner Telegram session; SWE has no approval operation. Recovery reads authoritative Swamp workflow/approval-step status and continues only the missing stage; completed runs are attested without replay.
+- Read-only operations require `mode: plan`; repository bootstrap apply and Linear owner-attestation start/approve operations require `mode: apply`.
+- The Linear owner-approval operations accept only a parent-only `update_issue`, exact single `remove_issue_relation`, or exact single `replace_issue_relation` intent. Relation intents contain only exact `SIS-N` endpoints and `blocks|blocked_by|related` types—never relation IDs. Every intent binds the exact before-state hash and expiry. Swamp produces an attestation only; it has no Linear credential and performs no Linear mutation.
+- Repository bootstrap apply still accepts only repository name plus immutable plan run ID/checksum/artifact version and reloads exact artifact provenance before starting its suspended workflow.
+- Approval can resume only an exact run registered in broker audit and serialized by a lock for the policy-bound authenticated owner Telegram session; SWE has no approval operation. Caller booleans, paths, manifest IDs, shell text, and source profiles cannot grant approval.
 - Audit records contain caller, request ID, operation, mode, status, approval state and checksum/run identities, but never command output, stderr, environment, or credentials.
 
 ## Initial operations
@@ -45,6 +46,9 @@ A Hermes profile is not an OS sandbox. This broker limits delegated capability, 
 | `swamp.plan_github_cloudflare_repository` | `repository` | `swe` or owner; read-only checksum-bound plan |
 | `swamp.start_github_cloudflare_repository_apply` | `repository`, `plan_run_id`, `plan_checksum`, `artifact_version` | `swe` or owner; starts exact workflow suspended at manual approval |
 | `swamp.approve_github_cloudflare_repository_apply` | `apply_run_id` | authenticated owner session only; locks and advances the exact run from authoritative Swamp state |
+| `swamp.plan_linear_destructive_owner_approval` | exact bounded `intent`, `before_state_hash`, `expires_at` | `swe` or owner; read-only plan only |
+| `swamp.start_linear_destructive_owner_approval_attest` | exact plan arguments plus `plan_run_id`, `plan_checksum`, `plan_artifact_version` | `swe` or owner; starts suspended attestation only |
+| `swamp.approve_linear_destructive_owner_approval_attest` | `attest_run_id` | authenticated owner session only; emits one-use PM policy reference, never mutates Linear |
 | `swamp.get_result` | `model`, `name` | yes, allowlisted artifacts only |
 
 The repository template is versioned locally under `templates/github-cloudflare-app`. It is rendered only with the validated repository name, a plan-generated 96-bit-nonce production Worker target, and a deterministic short preview Worker name. Plan binds template, exact Worker target and rendered manifests by SHA-256. The unique production target prevents overwrite collision without Cloudflare API access. The bootstrap does not query organization membership or read/manage secret values, metadata, visibility or grants. Apply creates new repositories only; adopt-existing and overwrite are intentionally unsupported. Verification proves the exact main tree, `branch-preview` reviewer, production Actions success and runtime health before success is reported; fixed organization secret-name availability is inferred only from that deployment/runtime proof.
@@ -76,7 +80,7 @@ mkdir -p /Users/hermes/.hermes/plugins
 rm -rf /Users/hermes/.hermes/plugins/ops_broker
 cp -R "$stage/plugins/ops_broker" /Users/hermes/.hermes/plugins/ops_broker
 hermes plugins doctor /Users/hermes/.hermes/plugins/ops_broker --ci
-for file in __init__.py broker.py plugin.yaml policy.json; do
+for file in __init__.py broker.py linear_approval_contract.py plugin.yaml policy.json; do
   cmp -s "$stage/plugins/ops_broker/$file" \
     "/Users/hermes/.hermes/plugins/ops_broker/$file"
 done
@@ -109,7 +113,7 @@ git -C /Users/hermes/workspaces/swamp-ops-runtime archive \
 rm -rf /Users/hermes/.hermes/plugins/ops_broker
 cp -R "$stage/plugins/ops_broker" /Users/hermes/.hermes/plugins/ops_broker
 hermes plugins doctor /Users/hermes/.hermes/plugins/ops_broker --ci
-for file in __init__.py broker.py plugin.yaml policy.json; do
+for file in __init__.py broker.py linear_approval_contract.py plugin.yaml policy.json; do
   cmp -s "$stage/plugins/ops_broker/$file" \
     "/Users/hermes/.hermes/plugins/ops_broker/$file"
 done
@@ -119,7 +123,7 @@ printf '%s\n' "$REVIEWED_SHA" > "$revision_tmp"
 mv "$revision_tmp" /Users/hermes/.hermes/plugin-data/ops-broker/runtime-revision
 ```
 
-The clean-tree precondition fails closed before moving the runtime revision. Checkout hooks are disabled for this operation, and the ignored `.swamp-sources.yaml` control-plane override is forbidden explicitly. Never merge, switch, or reset the development checkout as part of broker activation. Runtime policy and workspace are loaded only from the installed reviewed plugin; `OPS_BROKER_POLICY` and `OPS_BROKER_WORKSPACE` environment variables cannot override them. Plugin installation is extracted from the exact Git object named by `REVIEWED_SHA`, not copied from mutable worktree bytes; the four `cmp -s` checks enforce byte-for-byte equality before the block succeeds. The block then atomically records the attested revision. Every broker call rechecks exact HEAD and full worktree cleanliness against that attestation before executing an operation.
+The clean-tree precondition fails closed before moving the runtime revision. Checkout hooks are disabled for this operation, and the ignored `.swamp-sources.yaml` control-plane override is forbidden explicitly. Never merge, switch, or reset the development checkout as part of broker activation. Runtime policy and workspace are loaded only from the installed reviewed plugin; `OPS_BROKER_POLICY` and `OPS_BROKER_WORKSPACE` environment variables cannot override them. Plugin installation is extracted from the exact Git object named by `REVIEWED_SHA`, not copied from mutable worktree bytes; the five `cmp -s` checks enforce byte-for-byte equality before the block succeeds. The block then atomically records the attested revision. Every broker call rechecks exact HEAD and full worktree cleanliness against that attestation before executing an operation.
 
 Do not install the plugin into secondary profiles.
 
@@ -249,7 +253,7 @@ stage=$(mktemp -d /Users/hermes/workspaces/ops-broker-restart-check.XXXXXX)
 trap 'rm -rf "$stage"' EXIT
 git -C /Users/hermes/workspaces/swamp-ops-runtime archive \
   "$REVIEWED_SHA" plugins/ops_broker | tar -x -C "$stage"
-for file in __init__.py broker.py plugin.yaml policy.json; do
+for file in __init__.py broker.py linear_approval_contract.py plugin.yaml policy.json; do
   cmp -s "$stage/plugins/ops_broker/$file" \
     "/Users/hermes/.hermes/plugins/ops_broker/$file"
 done

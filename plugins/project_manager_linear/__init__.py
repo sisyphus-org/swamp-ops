@@ -137,9 +137,32 @@ def execute_pm_command(
     lane: Any,
     client: Any,
     journal_path: Path,
+    task_id: str | None = None,
+    approval_now: Any = None,
+    approval_lease_seconds: int = 30,
 ) -> dict[str, Any]:
     """Run deterministic plan then apply and require verified exact read-back."""
     validated = lane.validate_command(command)
+    if validated.get("operation") in {
+        "read_issue",
+        "inventory_sub_issues",
+        "search_linear",
+        "inventory_linear",
+    }:
+        result = lane.execute_command(
+            client,
+            validated,
+            mode="apply",
+            journal_path=None,
+        )
+        if (
+            not isinstance(result, dict)
+            or result.get("schema_version") != "linear-result.v2"
+            or result.get("verified") is not True
+            or result.get("result") != "read"
+        ):
+            raise RuntimeError("Linear read did not return a verified linear-result.v2")
+        return {"plan": result, "result": result}
     plan = lane.execute_command(
         client,
         validated,
@@ -150,12 +173,232 @@ def execute_pm_command(
         raise ProtocolVersionError(
             "Linear plan returned an unsupported schema; expected linear-result.v2"
         )
-    result = lane.execute_command(
-        client,
-        validated,
-        mode="apply",
-        journal_path=journal_path,
-    )
+    if (
+        validated["policy"].get("mode") == "owner_approved"
+        and task_id is None
+        and validated["operation"] in {"remove_issue_relation", "replace_issue_relation"}
+        and plan.get("recovered") is True
+    ):
+        operation = validated["operation"]
+        change = validated["change"]
+        identifier = validated["target"]["identifier"]
+        target = plan.get("target")
+        after = plan.get("after")
+        if operation == "remove_issue_relation":
+            expected_target = {
+                "type": "issue_relation",
+                "identifier": identifier,
+                "related_identifier": change["related_identifier"],
+                "relation_type": change["relation_type"],
+            }
+            expected_after = {
+                "identifier": identifier,
+                "related_identifier": change["related_identifier"],
+                "relation_type": change["relation_type"],
+                "present": False,
+            }
+        else:
+            expected_target = {
+                "type": "issue_relation_replacement",
+                "old": {
+                    "identifier": identifier,
+                    "related_identifier": change["old_related_identifier"],
+                    "relation_type": change["old_relation_type"],
+                },
+                "new": {
+                    "identifier": identifier,
+                    "related_identifier": change["new_related_identifier"],
+                    "relation_type": change["new_relation_type"],
+                },
+            }
+            expected_after = dict(expected_target["new"])
+        if (
+            plan.get("operation") != operation
+            or target != expected_target
+            or after != expected_after
+            or plan.get("result") != "no_op"
+            or plan.get("no_op") is not True
+            or plan.get("verified") is not True
+            or plan.get("plan") != []
+            or not isinstance(plan.get("before"), dict)
+        ):
+            raise RuntimeError("recovered Linear relation replay is invalid")
+        return {"plan": plan, "result": plan}
+    owner_approval_authorization = None
+    approval_journal = journal_path.with_name("owner-approval-apply-journal.json")
+    if validated["policy"].get("mode") == "owner_approved":
+        from .approval import (
+            ApprovalError,
+            claim_owner_approval,
+            completed_owner_approval_matches,
+            consume_owner_approval,
+            contract,
+            recover_owner_approval,
+            verify_owner_approval,
+        )
+
+        expected_intent = {
+            "operation": validated["operation"],
+            "target": validated["target"],
+            "change": validated["change"],
+        }
+        durable_recovery = task_id is not None and plan.get("recovered") is True
+        if durable_recovery:
+            assert task_id is not None
+            identity_fields = (
+                "command_id",
+                "correlation_id",
+                "idempotency_key",
+                "source_profile",
+                "operation",
+            )
+            if (
+                any(plan.get(field) != validated[field] for field in identity_fields)
+                or not isinstance(plan.get("recovery_evidence"), dict)
+            ):
+                raise ApprovalError("owner approval recovery result binding is invalid")
+            if (
+                plan.get("result") == "no_op"
+                and plan.get("no_op") is True
+                and plan.get("verified") is True
+                and plan.get("plan") == []
+                and completed_owner_approval_matches(
+                    validated["policy"],
+                    command=validated,
+                    task_id=task_id,
+                    journal_path=approval_journal,
+                    recovery_evidence=plan["recovery_evidence"],
+                )
+            ):
+                return {"plan": plan, "result": plan}
+            owner_approval_authorization = recover_owner_approval(
+                validated["policy"],
+                command=validated,
+                task_id=task_id,
+                journal_path=approval_journal,
+                recovery_evidence=plan["recovery_evidence"],
+                now=approval_now,
+                lease_seconds=approval_lease_seconds,
+            )
+        else:
+            before_state_hash = contract.canonical_sha256(plan.get("before"))
+            verified_approval = verify_owner_approval(
+                validated["policy"],
+                expected_intent=expected_intent,
+                expected_before_state_hash=before_state_hash,
+            )
+            # Verification is intentionally non-consuming. Re-read Linear
+            # immediately afterwards and bind apply to the exact same state and plan.
+            live_plan = lane.execute_command(
+                client,
+                validated,
+                mode="plan",
+                journal_path=journal_path,
+            )
+            if (
+                not isinstance(live_plan, dict)
+                or live_plan.get("schema_version") != "linear-result.v2"
+            ):
+                raise ProtocolVersionError(
+                    "Linear re-plan returned an unsupported schema; expected linear-result.v2"
+                )
+            approved_plan_binding = {
+                "operation": plan.get("operation"),
+                "target": plan.get("target"),
+                "plan": plan.get("plan"),
+            }
+            live_plan_binding = {
+                "operation": live_plan.get("operation"),
+                "target": live_plan.get("target"),
+                "plan": live_plan.get("plan"),
+            }
+            approved_target = approved_plan_binding["target"]
+            operation = expected_intent["operation"]
+            target_identifier = expected_intent["target"].get("identifier")
+            change = expected_intent["change"]
+            approved_before_matches = isinstance(plan.get("before"), dict)
+            live_before_matches = isinstance(live_plan.get("before"), dict)
+            if operation == "bulk_linear_operations":
+                approved_target_matches = approved_target == expected_intent["target"]
+                expected_items = change.get("items")
+                approved_before_matches = (
+                    isinstance(plan.get("before"), list)
+                    and isinstance(expected_items, list)
+                    and len(plan["before"]) == len(expected_items)
+                )
+                live_before_matches = (
+                    isinstance(live_plan.get("before"), list)
+                    and isinstance(expected_items, list)
+                    and len(live_plan["before"]) == len(expected_items)
+                )
+            elif operation in {"archive_linear_entity", "delete_linear_entity"}:
+                approved_target_matches = approved_target == expected_intent["target"]
+                approved_before_matches = isinstance(plan.get("before"), dict)
+                live_before_matches = isinstance(live_plan.get("before"), dict)
+            elif operation == "remove_issue_relation":
+                approved_target_matches = approved_target == {
+                    "type": "issue_relation",
+                    "identifier": target_identifier,
+                    "related_identifier": change["related_identifier"],
+                    "relation_type": change["relation_type"],
+                }
+            elif operation == "replace_issue_relation":
+                approved_target_matches = approved_target == {
+                    "type": "issue_relation_replacement",
+                    "old": {
+                        "identifier": target_identifier,
+                        "related_identifier": change["old_related_identifier"],
+                        "relation_type": change["old_relation_type"],
+                    },
+                    "new": {
+                        "identifier": target_identifier,
+                        "related_identifier": change["new_related_identifier"],
+                        "relation_type": change["new_relation_type"],
+                    },
+                }
+            else:
+                approved_target_matches = (
+                    isinstance(approved_target, dict)
+                    and approved_target.get("type")
+                    == expected_intent["target"]["type"]
+                    and approved_target.get("identifier") == target_identifier
+                )
+            if (
+                not approved_before_matches
+                or approved_plan_binding["operation"] != expected_intent["operation"]
+                or not approved_target_matches
+                or approved_plan_binding["plan"] is None
+                or not live_before_matches
+                or contract.canonical_sha256(live_plan.get("before"))
+                != before_state_hash
+                or contract.canonical_sha256(live_plan_binding)
+                != contract.canonical_sha256(approved_plan_binding)
+            ):
+                raise ApprovalError(
+                    "owner approval live before-state or operation plan/target drifted"
+                )
+            # This is the last action before entering the mutation path.
+            if task_id is None:
+                owner_approval_authorization = consume_owner_approval(
+                    verified_approval,
+                    journal_path=journal_path.with_name("owner-approval-journal.json"),
+                )
+            else:
+                owner_approval_authorization = claim_owner_approval(
+                    verified_approval,
+                    command=validated,
+                    task_id=task_id,
+                    journal_path=approval_journal,
+                    now=approval_now,
+                    lease_seconds=approval_lease_seconds,
+                )
+    apply_kwargs = {
+        "mode": "apply",
+        "journal_path": journal_path,
+    }
+    if owner_approval_authorization is not None:
+        apply_kwargs["owner_approval_authorization"] = owner_approval_authorization
+    result = lane.execute_command(client, validated, **apply_kwargs)
     if (
         not isinstance(result, dict)
         or result.get("schema_version") != "linear-result.v2"
@@ -166,7 +409,37 @@ def execute_pm_command(
                 "Linear apply returned an unsupported schema; expected linear-result.v2"
             )
         raise RuntimeError("Linear apply did not return a verified linear-result.v2")
+    if task_id is not None and owner_approval_authorization is not None:
+        from .approval import complete_owner_approval
+
+        complete_owner_approval(
+            owner_approval_authorization,
+            journal_path=approval_journal,
+            recovery_evidence=result.get("recovery_evidence"),
+        )
     return {"plan": plan, "result": result}
+
+
+def execute_claimed_task(
+    command: dict[str, Any],
+    *,
+    task_id: str,
+    lane: Any,
+    client: Any,
+    journal_path: Path,
+    approval_now: Any = None,
+    approval_lease_seconds: int = 30,
+) -> dict[str, Any]:
+    """Execute one exact persisted command under its durable claimed-task identity."""
+    return execute_pm_command(
+        command,
+        lane=lane,
+        client=client,
+        journal_path=journal_path,
+        task_id=task_id,
+        approval_now=approval_now,
+        approval_lease_seconds=approval_lease_seconds,
+    )
 
 
 def human_summary(result: dict[str, Any]) -> str:
@@ -181,8 +454,20 @@ def human_summary(result: dict[str, Any]) -> str:
         else ""
     )
     operation = result.get("operation")
-    if operation == "read_issue":
+    if operation == "bulk_linear_operations":
+        counts = result.get("counts")
+        total = counts.get("total") if isinstance(counts, dict) else None
+        lead = (
+            f"Пакет Linear выполнен: {total} операций."
+            if isinstance(total, int) and not isinstance(total, bool)
+            else "Пакет Linear выполнен."
+        )
+    elif operation == "read_issue":
         lead = "Задача Linear прочитана."
+    elif operation == "search_linear":
+        lead = "Поиск Linear выполнен."
+    elif operation == "inventory_linear":
+        lead = "Инвентаризация Linear выполнена."
     elif result.get("result") == "no_op" or result.get("no_op") is True:
         lead = "Запрос уже выполнен; повторных изменений не потребовалось."
     elif operation == "create_issue":
@@ -193,6 +478,24 @@ def human_summary(result: dict[str, Any]) -> str:
         lead = "Дерево задач Linear готово."
     elif operation == "converge_hierarchy":
         lead = "Иерархия Linear готова."
+    elif operation == "create_project":
+        lead = "Проект Linear создан или уже существует."
+    elif operation == "create_milestone":
+        lead = "Этап проекта Linear создан или уже существует."
+    elif operation == "update_project":
+        lead = "Проект Linear обновлён."
+    elif operation == "update_milestone":
+        lead = "Этап проекта Linear обновлён."
+    elif operation == "create_initiative":
+        lead = "Инициатива Linear создана или уже существует."
+    elif operation == "update_initiative":
+        lead = "Инициатива Linear обновлена."
+    elif operation == "link_project_to_initiative":
+        lead = "Проект Linear добавлен в инициативу."
+    elif operation == "archive_linear_entity":
+        lead = "Объект Linear архивирован."
+    elif operation == "delete_linear_entity":
+        lead = "Объект Linear удалён в соответствии с семантикой Linear."
     elif operation == "change_state":
         lead = "Статус Linear изменён."
     elif operation == "update_issue":
@@ -365,8 +668,9 @@ def handle_pm_linear_execute(args: dict[str, Any], **kwargs: Any) -> str:
             str(environ.get("HERMES_HOME") or "/Users/hermes/.hermes/profiles/project-manager")
         )
         journal = hermes_home / "linear-command-lane" / "journal.json"
-        execution = execute_pm_command(
+        execution = execute_claimed_task(
             command,
+            task_id=task_id,
             lane=lane,
             client=client,
             journal_path=journal,

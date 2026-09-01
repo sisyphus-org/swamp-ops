@@ -1,5 +1,6 @@
 import concurrent.futures
 import contextlib
+import copy
 import importlib.util
 import io
 import json
@@ -41,6 +42,22 @@ def command(operation="read_issue", change=None, key="linear:SIS-59:read:fixture
     }
 
 
+def owner_policy():
+    return {
+        "mode": "owner_approved",
+        "approval": {
+            "workflow": "linear-destructive-owner-approval-attest",
+            "model": "linear-destructive-owner-approval-attest",
+            "run_id": "55555555-5555-4555-8555-555555555555",
+            "artifact_version": 7,
+            "checksum": "a" * 64,
+            "intent_hash": "b" * 64,
+            "before_state_hash": "c" * 64,
+            "expires_at": "2026-08-31T23:00:00Z",
+        },
+    }
+
+
 def create_command(key="linear:SIS:create:fixture"):
     raw = command("read_issue", {}, key)
     raw["operation"] = "create_issue"
@@ -53,6 +70,57 @@ def create_command(key="linear:SIS:create:fixture"):
         "priority": "High",
     }
     return raw
+
+
+def relation_command(
+    relation_type="blocked_by", key="linear:SIS:relation:fixture"
+):
+    raw = command("create_issue_relation", {}, key)
+    raw["target"] = {"type": "issue", "identifier": "SIS-59"}
+    raw["change"] = {
+        "related_identifier": "SIS-56",
+        "relation_type": relation_type,
+    }
+    return raw
+
+
+def relation_change_command(
+    operation="remove_issue_relation",
+    key="linear:SIS:relation-change:fixture",
+):
+    raw = command(operation, {}, key)
+    raw["target"] = {"type": "issue", "identifier": "SIS-59"}
+    raw["policy"] = owner_policy()
+    raw["change"] = {
+        "related_identifier": "SIS-56",
+        "relation_type": "blocked_by",
+    }
+    if operation == "replace_issue_relation":
+        raw["change"] = {
+            "old_related_identifier": "SIS-56",
+            "old_relation_type": "blocked_by",
+            "new_related_identifier": "SIS-57",
+            "new_relation_type": "related",
+        }
+    return raw
+
+
+def consumed_owner_authorization(raw):
+    approval_module = lane._load_approval()
+    verified = approval_module.VerifiedOwnerApproval(
+        {},
+        {
+            "operation": raw["operation"],
+            "target": raw["target"],
+            "change": raw["change"],
+        },
+        "c" * 64,
+        "a" * 64,
+        _marker=approval_module._VERIFIED_MARKER,
+    )
+    return approval_module.ConsumedOwnerApproval(
+        verified, _marker=approval_module._CONSUMED_MARKER
+    )
 
 
 def hierarchy_command(key="linear:SIS:hierarchy:health"):
@@ -119,6 +187,95 @@ def issue_tree_command(key="linear:SIS:tree:shakespeare"):
     return raw
 
 
+def initiative_link_command(key="linear:SIS:initiative-link:fixture"):
+    raw = command("link_project_to_initiative", {}, key)
+    raw["target"] = {"type": "team", "identifier": "SIS"}
+    raw["change"] = {
+        "project": "Hermes Experience",
+        "initiative": "Personal operating system",
+    }
+    return raw
+
+
+def workspace_read_command(
+    operation="inventory_linear",
+    *,
+    entity_types=None,
+    include_archived=False,
+    query="STRASSE",
+    key="linear:workspace:read:fixture",
+):
+    raw = command(operation, {}, key)
+    raw["target"] = {"type": "workspace", "identifier": "current"}
+    raw["change"] = {
+        "entity_types": entity_types
+        if entity_types is not None
+        else ["issues", "projects", "milestones", "initiatives"],
+        "include_archived": include_archived,
+    }
+    if operation == "search_linear":
+        raw["change"] = {"query": query, **raw["change"]}
+    return raw
+
+
+def initiative_command(
+    operation="create_initiative", key="linear:workspace:initiative:fixture"
+):
+    raw = command(operation, {}, key)
+    raw["target"] = {"type": "workspace", "identifier": "current"}
+    raw["change"] = {
+        "name": "Personal operating system",
+        "description": "Connected personal systems",
+        "target_date": "2026-12-31",
+    }
+    if operation == "update_initiative":
+        raw["change"] = {
+            "name": "Personal operating system",
+            "new_name": "Personal systems",
+            "description": "Unified personal systems",
+            "target_date": None,
+        }
+    return raw
+
+
+def project_command(operation="create_project", key="linear:SIS:project:fixture"):
+    raw = command(operation, {}, key)
+    raw["target"] = {"type": "team", "identifier": "SIS"}
+    raw["change"] = {
+        "name": "Hermes Experience",
+        "description": "User-facing integrations",
+        "target_date": "2026-12-31",
+    }
+    if operation == "update_project":
+        raw["change"] = {
+            "name": "Hermes Experience",
+            "new_name": "Hermes Personal Experience",
+            "description": "Personal integrations",
+            "target_date": None,
+        }
+    return raw
+
+
+def milestone_command(operation="create_milestone", key="linear:SIS:milestone:fixture"):
+    raw = command(operation, {}, key)
+    raw["target"] = {"type": "team", "identifier": "SIS"}
+    raw["change"] = {
+        "project": "Hermes Experience",
+        "name": "Calendar integration",
+        "description": "Calendar milestone",
+        "target_date": "2026-10-01",
+    }
+    if operation == "update_milestone":
+        raw["change"] = {
+            "project": "Hermes Experience",
+            "name": "Calendar integration",
+            "new_name": "Calendar and reminders",
+            "description": "Calendar and reminders milestone",
+            "target_date": None,
+        }
+    return raw
+
+
 def issue(state="In Progress"):
     return {
         "id": "issue-uuid",
@@ -129,17 +286,64 @@ def issue(state="In Progress"):
         "team": {"id": "team-uuid", "key": "SIS"},
         "description": "Old description",
         "priority": lane.PRIORITIES["Low"],
+        "dueDate": None,
+        "estimate": None,
+        "assignee": None,
+        "labels": {"nodes": []},
+        "parent": {"id": "parent-uuid", "identifier": "SIS-1"},
+        "project": {"id": "project-uuid"},
+        "projectMilestone": {"id": "milestone-uuid"},
     }
 
 
 class FakeClient:
     def __init__(self, state="In Progress"):
         self.current = issue(state)
+        self.related = {}
         self.comments = []
         self.children = []
+        self.issue_relations = []
         self.writes = []
+        self.projects = [
+            {
+                "id": "project-uuid",
+                "name": "Current Project",
+                "teams": {"nodes": [{"id": "team-uuid"}]},
+            },
+            {
+                "id": "project-two",
+                "name": "Project Two",
+                "teams": {"nodes": [{"id": "team-uuid"}]},
+            },
+        ]
+        self.milestones = {
+            "project-uuid": [
+                {
+                    "id": "milestone-uuid",
+                    "name": "Current Milestone",
+                    "project": {"id": "project-uuid"},
+                }
+            ],
+            "project-two": [
+                {
+                    "id": "milestone-two",
+                    "name": "Milestone Two",
+                    "project": {"id": "project-two"},
+                }
+            ],
+        }
 
     def get_issue(self, identifier):
+        related = next(
+            (
+                item
+                for item in self.related.values()
+                if item.get("identifier") == identifier or item.get("id") == identifier
+            ),
+            None,
+        )
+        if related is not None:
+            return json.loads(json.dumps(related))
         if identifier == "SIS-56":
             parent = issue("In Progress")
             parent["id"] = "parent-uuid"
@@ -171,6 +375,20 @@ class FakeClient:
 
     def update_issue_fields(self, issue_id, **fields):
         self.writes.append(("fields", issue_id, fields))
+        if "title" in fields:
+            self.current["title"] = fields["title"]
+        if "assignee_id" in fields:
+            assignee_id = fields["assignee_id"]
+            self.current["assignee"] = (
+                None
+                if assignee_id is None
+                else next(user for user in self.list_users() if user["id"] == assignee_id)
+            )
+        if "label_ids" in fields:
+            by_id = {label["id"]: label for label in self.list_issue_labels("team-uuid")}
+            self.current["labels"] = {
+                "nodes": [by_id[label_id] for label_id in fields["label_ids"]]
+            }
         if "description" in fields:
             self.current["description"] = fields["description"]
         if "priority" in fields:
@@ -182,6 +400,49 @@ class FakeClient:
                 "name": state_id.removeprefix("state-"),
                 "type": "started",
             }
+        if "due_date" in fields:
+            self.current["dueDate"] = fields["due_date"]
+        if "estimate" in fields:
+            self.current["estimate"] = fields["estimate"]
+        if "parent_id" in fields:
+            parent_id = fields["parent_id"]
+            parent = self.related.get(parent_id)
+            self.current["parent"] = (
+                None
+                if parent is None
+                else {"id": parent["id"], "identifier": parent["identifier"]}
+            )
+        if "project_id" in fields:
+            self.current["project"] = (
+                None if fields["project_id"] is None else {"id": fields["project_id"]}
+            )
+        if "milestone_id" in fields:
+            self.current["projectMilestone"] = (
+                None
+                if fields["milestone_id"] is None
+                else {"id": fields["milestone_id"]}
+            )
+
+    def list_team_projects(self, team_id):
+        return json.loads(json.dumps(self.projects))
+
+    def list_project_milestones(self, project_id):
+        return json.loads(json.dumps(self.milestones.get(project_id, [])))
+
+    def list_users(self):
+        return [
+            {
+                "id": "user-alexey",
+                "name": "Alexey Petrov",
+                "email": "alexey@example.com",
+            }
+        ]
+
+    def list_issue_labels(self, team_id):
+        return [
+            {"id": "label-linear", "name": "area:linear"},
+            {"id": "label-owner", "name": "priority:owner"},
+        ]
 
     def list_comments(self, issue_id):
         return list(self.comments)
@@ -223,6 +484,56 @@ class FakeClient:
             }
         )
         self.children.append(created)
+
+    def list_issue_relations(self, identifier):
+        return json.loads(json.dumps(self.issue_relations))
+
+    def get_issue_relation(self, relation_id):
+        return next(
+            (
+                json.loads(json.dumps(item))
+                for item in self.issue_relations
+                if item["id"] == relation_id
+            ),
+            None,
+        )
+
+    def create_issue_relation(
+        self, *, relation_id, issue_id, related_issue_id, relation_type
+    ):
+        self.writes.append(
+            (
+                "create_issue_relation",
+                relation_id,
+                issue_id,
+                related_issue_id,
+                relation_type,
+            )
+        )
+        by_id = {
+            item["id"]: item
+            for item in (self.get_issue("SIS-59"), self.get_issue("SIS-56"))
+        }
+        self.issue_relations.append(
+            {
+                "id": relation_id,
+                "type": relation_type,
+                "issue": {
+                    "id": issue_id,
+                    "identifier": by_id[issue_id]["identifier"],
+                },
+                "relatedIssue": {
+                    "id": related_issue_id,
+                    "identifier": by_id[related_issue_id]["identifier"],
+                },
+            }
+        )
+
+    def delete_issue_relation(self, relation_id):
+        self.writes.append(("delete_issue_relation", relation_id))
+        self.issue_relations = [
+            item for item in self.issue_relations if item["id"] != relation_id
+        ]
 
 
 class FakeHierarchyClient:
@@ -406,6 +717,77 @@ class FakeIssueTreeClient(FakeHierarchyClient):
 
 
 class ContractTests(unittest.TestCase):
+    def test_accepts_exact_workspace_read_contracts(self):
+        inventory = lane.validate_command(
+            workspace_read_command(entity_types=["issues", "initiatives"])
+        )
+        search = lane.validate_command(
+            workspace_read_command(
+                "search_linear",
+                entity_types=["projects", "milestones"],
+                query="Straße",
+            )
+        )
+        self.assertEqual(
+            inventory["target"], {"type": "workspace", "identifier": "current"}
+        )
+        self.assertEqual(search["change"]["query"], "Straße")
+
+    def test_workspace_read_contracts_reject_unbounded_or_implicit_inputs(self):
+        cases = []
+        for entity_types in (
+            [],
+            ["issues", "issues"],
+            [["issues"]],
+            [None],
+            ["users"],
+        ):
+            cases.append(workspace_read_command(entity_types=entity_types))
+        raw = workspace_read_command(entity_types=["issues"])
+        raw["change"]["include_archived"] = 1
+        cases.append(raw)
+        for query in ("", "   "):
+            cases.append(
+                workspace_read_command(
+                    "search_linear", entity_types=["issues"], query=query
+                )
+            )
+        raw = workspace_read_command("search_linear", entity_types=["issues"])
+        raw["change"]["graphql"] = "query Workspace"
+        cases.append(raw)
+        for raw in cases:
+            with self.subTest(change=raw["change"]), self.assertRaises(
+                lane.ContractError
+            ):
+                lane.validate_command(raw)
+
+    def test_accepts_exact_bounded_issue_relation_command(self):
+        validated = lane.validate_command(relation_command())
+
+        self.assertEqual(validated["operation"], "create_issue_relation")
+        self.assertEqual(
+            validated["change"],
+            {"related_identifier": "SIS-56", "relation_type": "blocked_by"},
+        )
+
+    def test_relation_removal_and_replacement_require_owner_policy_and_exact_changes(self):
+        for operation in ("remove_issue_relation", "replace_issue_relation"):
+            with self.subTest(operation=operation):
+                approved = relation_change_command(operation)
+                self.assertEqual(
+                    lane.validate_command(approved)["policy"]["mode"],
+                    "owner_approved",
+                )
+                standard = json.loads(json.dumps(approved))
+                standard["policy"] = {"mode": "standard"}
+                with self.assertRaisesRegex(lane.ContractError, "owner_approved"):
+                    lane.validate_command(standard)
+
+        forged = relation_change_command("replace_issue_relation")
+        forged["change"]["relation_id"] = "raw-id"
+        with self.assertRaises(lane.ContractError):
+            lane.validate_command(forged)
+
     def test_hierarchy_malformed_payloads_fail_before_any_preflight_or_write(self):
         malformed = hierarchy_command()
         malformed["change"]["issue"]["id"] = "caller-controlled-id"
@@ -496,8 +878,14 @@ class ContractTests(unittest.TestCase):
             )
         )
         lane.validate_command(command("add_comment", {"body": "Bounded note"}))
+        lane.validate_command(
+            command("update_issue", {"due_date": "2026-09-30", "estimate": 8})
+        )
+        lane.validate_command(
+            command("update_issue", {"due_date": None, "estimate": None})
+        )
         for state in ("Done", "Canceled", "Duplicate"):
-            with self.assertRaisesRegex(lane.ContractError, "owner-controlled"):
+            with self.assertRaisesRegex(lane.ContractError, "owner approval required"):
                 lane.validate_command(command("change_state", {"state": state}))
         with self.assertRaisesRegex(lane.ContractError, "read_issue change"):
             lane.validate_command(command("read_issue", {"state": "Todo"}))
@@ -509,7 +897,7 @@ class ContractTests(unittest.TestCase):
             )
         for change in (
             {},
-            {"title": "No"},
+            {"title": ""},
             {"priority": "Urgent"},
             {"description": "New", "description_transform": "remove_links"},
             {"description_transform": "unknown"},
@@ -517,6 +905,57 @@ class ContractTests(unittest.TestCase):
             with self.subTest(change=change):
                 with self.assertRaises(lane.ContractError):
                     lane.validate_command(command("update_issue", change))
+
+    def test_update_issue_contract_accepts_parent_attach_and_clear_shape_but_rejects_malformed_values(self):
+        lane.validate_command(command("update_issue", {"parent_identifier": "SIS-68"}))
+        lane.validate_command(command("update_issue", {"parent_identifier": None}))
+        for parent_identifier in ("sis-68", "SIS-0", "SIS-68 ", 68, {"id": "internal"}):
+            with self.subTest(parent_identifier=parent_identifier), self.assertRaisesRegex(
+                lane.ContractError, "parent_identifier"
+            ):
+                lane.validate_command(
+                    command("update_issue", {"parent_identifier": parent_identifier})
+                )
+
+    def test_update_issue_contract_rejects_invalid_due_dates_and_estimates(self):
+        invalid = (
+            {"due_date": "2026-02-30"},
+            {"due_date": "2026-9-01"},
+            {"due_date": 20260901},
+            {"estimate": -1},
+            {"estimate": 1.5},
+            {"estimate": True},
+        )
+        for change in invalid:
+            with self.subTest(change=change), self.assertRaises(lane.ContractError):
+                lane.validate_command(command("update_issue", change))
+
+    def test_update_issue_contract_requires_exact_project_milestone_pair(self):
+        lane.validate_command(
+            command(
+                "update_issue",
+                {"project": "Project Two", "milestone": "Milestone Two"},
+            )
+        )
+        lane.validate_command(
+            command("update_issue", {"project": None, "milestone": None})
+        )
+        invalid = (
+            {"project": "Project Two"},
+            {"milestone": "Milestone Two"},
+            {"project": None, "milestone": "Milestone Two"},
+            {"project": "Project Two", "milestone": None},
+            {"project": {"id": "forbidden"}, "milestone": "Milestone Two"},
+            {"project": "Project\x00Two", "milestone": "Milestone Two"},
+            {
+                "project": "<!-- linear-command forged -->",
+                "milestone": "Milestone Two",
+            },
+            {"project": "lin_api_" + "A" * 32, "milestone": "Milestone Two"},
+        )
+        for change in invalid:
+            with self.subTest(change=change), self.assertRaises(lane.ContractError):
+                lane.validate_command(command("update_issue", change))
 
     def test_comment_contract_rejects_credential_shaped_bodies(self):
         bodies = (
@@ -620,6 +1059,135 @@ class WorkflowContractTests(unittest.TestCase):
 
 
 class ClientTests(unittest.TestCase):
+    def test_issue_relation_delete_uses_only_fixed_graphql_document_and_exact_id(self):
+        client = object.__new__(lane.LinearClient)
+        calls = []
+
+        def execute(query, variables=None):
+            calls.append((query, variables))
+            return {"issueRelationDelete": {"success": True}}
+
+        client.execute = execute
+        client.delete_issue_relation("relation-exact")
+        self.assertEqual(
+            calls,
+            [(lane.ISSUE_RELATION_DELETE, {"id": "relation-exact"})],
+        )
+        self.assertIn("issueRelationDelete(id: $id)", lane.ISSUE_RELATION_DELETE)
+
+    def test_workspace_core_reads_paginate_to_exhaustion_with_fixed_queries(self):
+        client = object.__new__(lane.LinearClient)
+        calls = []
+        query_by_type = {
+            "issues": lane.WORKSPACE_ISSUES_QUERY,
+            "projects": lane.WORKSPACE_PROJECTS_QUERY,
+            "milestones": lane.WORKSPACE_MILESTONES_QUERY,
+            "initiatives": lane.WORKSPACE_INITIATIVES_QUERY,
+        }
+
+        def execute(query, variables=None):
+            variables = variables or {}
+            calls.append((query, dict(variables)))
+            entity_type = next(
+                kind for kind, fixed_query in query_by_type.items() if query == fixed_query
+            )
+            after = variables["after"]
+            nodes = (
+                [{"id": f"{entity_type}-1", "name": "first"}]
+                if after is None
+                else [{"id": f"{entity_type}-2", "name": "second"}]
+            )
+            return {
+                lane.WORKSPACE_CONNECTION_FIELDS[entity_type]: {
+                    "nodes": nodes,
+                    "pageInfo": {
+                        "hasNextPage": after is None,
+                        "endCursor": "cursor-1" if after is None else None,
+                    },
+                }
+            }
+
+        client.execute = execute
+        for entity_type in lane.LINEAR_ENTITY_TYPES:
+            with self.subTest(entity_type=entity_type):
+                result = client.list_linear_entities(entity_type, include_archived=True)
+                self.assertEqual(len(result), 2)
+                entity_calls = [item for item in calls if item[0] == query_by_type[entity_type]]
+                self.assertEqual(
+                    [item[1] for item in entity_calls],
+                    [
+                        {"after": None, "includeArchived": True},
+                        {"after": "cursor-1", "includeArchived": True},
+                    ],
+                )
+                self.assertIn("first: 100", query_by_type[entity_type])
+                self.assertIn("after: $after", query_by_type[entity_type])
+
+    def test_workspace_pagination_rejects_duplicate_nodes_and_repeated_cursors(self):
+        for duplicate in (True, False):
+            client = object.__new__(lane.LinearClient)
+
+            def execute(_query, variables=None, *, duplicate=duplicate):
+                after = (variables or {}).get("after")
+                return {
+                    "issues": {
+                        "nodes": [
+                            {
+                                "id": "same" if duplicate or after is None else "second",
+                                "identifier": "SIS-1" if after is None else "SIS-2",
+                            }
+                        ],
+                        "pageInfo": {
+                            "hasNextPage": True,
+                            "endCursor": "cursor-1",
+                        },
+                    }
+                }
+
+            client.execute = execute
+            expected = "duplicate" if duplicate else "cursor"
+            with self.subTest(expected=expected), self.assertRaisesRegex(
+                lane.ContractError, expected
+            ):
+                client.list_linear_entities("issues", include_archived=False)
+
+    def test_direct_child_reader_uses_complete_cursor_pagination(self):
+        client = object.__new__(lane.LinearClient)
+        calls = []
+
+        def execute(query, variables=None):
+            self.assertEqual(query, lane.PARENT_CHILDREN_QUERY)
+            calls.append(dict(variables or {}))
+            after = variables["after"]
+            start = 0 if after is None else 100
+            size = 100 if after is None else 1
+            return {
+                "issue": {
+                    "identifier": "SIS-1",
+                    "children": {
+                        "nodes": [
+                            {"id": f"child-{index}", "identifier": f"SIS-{index + 2}"}
+                            for index in range(start, start + size)
+                        ],
+                        "pageInfo": {
+                            "hasNextPage": after is None,
+                            "endCursor": "children-100" if after is None else None,
+                        },
+                    },
+                }
+            }
+
+        client.execute = execute
+        children = client.list_child_issues("SIS-1")
+        self.assertEqual(len(children), 101)
+        self.assertEqual(
+            calls,
+            [
+                {"id": "SIS-1", "after": None},
+                {"id": "SIS-1", "after": "children-100"},
+            ],
+        )
+
     class StubClient(lane.LinearClient):
         def __init__(self):
             self.authorization = "fixture"
@@ -637,7 +1205,15 @@ class ClientTests(unittest.TestCase):
             if query == lane.COMMENT_QUERY:
                 return {"comment": {"id": variables["id"], "issueId": "issue-uuid", "body": "body"}}
             if query == lane.PARENT_CHILDREN_QUERY:
-                return {"issue": {"children": {"nodes": [{**issue(), "description": "marker"}], "pageInfo": {"hasNextPage": False}}}}
+                return {
+                    "issue": {
+                        "identifier": variables["id"],
+                        "children": {
+                            "nodes": [{**issue(), "description": "marker"}],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        },
+                    }
+                }
             if query == lane.ISSUE_UPDATE:
                 return {"issueUpdate": {"success": True}}
             if query == lane.COMMENT_CREATE:
@@ -701,6 +1277,110 @@ class ClientTests(unittest.TestCase):
         hierarchy_input = calls[lane.PROJECT_ISSUE_CREATE]["input"]
         self.assertEqual(hierarchy_input["stateId"], "state-uuid")
         self.assertNotIn("state_id", hierarchy_input)
+
+    def test_client_issue_query_and_mutation_map_due_date_and_estimate(self):
+        client = self.StubClient()
+        client.get_issue("SIS-59")
+        client.update_issue_fields(
+            "issue-uuid",
+            due_date=None,
+            estimate=8,
+        )
+        self.assertIn("dueDate estimate", lane.ISSUE_QUERY)
+        self.assertIn("project { id name }", lane.ISSUE_QUERY)
+        self.assertIn("projectMilestone { id name }", lane.ISSUE_QUERY)
+        self.assertEqual(
+            client.calls[-1],
+            (
+                lane.ISSUE_UPDATE,
+                {
+                    "id": "issue-uuid",
+                    "input": {"dueDate": None, "estimate": 8},
+                },
+            ),
+        )
+
+    def test_client_issue_reparent_emits_only_parent_id_including_null_clear(self):
+        client = self.StubClient()
+        client.update_issue_fields("issue-uuid", parent_id="parent-uuid")
+        client.update_issue_fields("issue-uuid", parent_id=None)
+        self.assertEqual(
+            client.calls,
+            [
+                (
+                    lane.ISSUE_UPDATE,
+                    {"id": "issue-uuid", "input": {"parentId": "parent-uuid"}},
+                ),
+                (
+                    lane.ISSUE_UPDATE,
+                    {"id": "issue-uuid", "input": {"parentId": None}},
+                ),
+            ],
+        )
+
+    def test_initiative_inventory_avoids_nested_connection_complexity(self):
+        self.assertNotIn("projects(", lane.INITIATIVES_QUERY)
+        self.assertIn("initiative(id: $initiativeId)", lane.INITIATIVE_PROJECTS_QUERY)
+        client = object.__new__(lane.LinearClient)
+        calls = []
+
+        def execute(query, variables=None):
+            calls.append((query, variables))
+            if query == lane.INITIATIVES_QUERY:
+                return {
+                    "initiatives": {
+                        "nodes": [{"id": "initiative", "name": "Exact"}],
+                        "pageInfo": {"hasNextPage": False},
+                    }
+                }
+            return {
+                "initiative": {
+                    "projects": {
+                        "nodes": [{"id": "project", "name": "Exact"}],
+                        "pageInfo": {"hasNextPage": False},
+                    }
+                }
+            }
+
+        client.execute = execute
+        self.assertEqual(client.list_initiatives()[0]["id"], "initiative")
+        self.assertEqual(
+            client.list_initiative_projects("initiative")[0]["id"], "project"
+        )
+        self.assertEqual(calls[1][1], {"initiativeId": "initiative", "after": None})
+
+    def test_client_issue_move_emits_only_exact_structural_ids(self):
+        client = self.StubClient()
+        client.update_issue_fields(
+            "issue-uuid",
+            project_id="project-two",
+            milestone_id="milestone-two",
+        )
+        self.assertEqual(
+            client.calls,
+            [
+                (
+                    lane.ISSUE_UPDATE,
+                    {
+                        "id": "issue-uuid",
+                        "input": {
+                            "projectId": "project-two",
+                            "projectMilestoneId": "milestone-two",
+                        },
+                    },
+                )
+            ],
+        )
+        client.calls.clear()
+        client.update_issue_fields(
+            "issue-uuid",
+            project_id=None,
+            milestone_id=None,
+        )
+        self.assertEqual(
+            client.calls[0][1]["input"],
+            {"projectId": None, "projectMilestoneId": None},
+        )
 
     def test_client_project_issue_update_uses_fixed_managed_graphql_shape(self):
         client = self.StubClient()
@@ -781,6 +1461,712 @@ class ClientTests(unittest.TestCase):
 
 
 class ExecutionTests(unittest.TestCase):
+    class WorkspaceReadClient:
+        def __init__(self):
+            self.calls = []
+            self.data = {
+                "issues": [
+                    {
+                        "id": "issue-internal-1",
+                        "identifier": "SIS-9",
+                        "title": "Straße rollout",
+                        "description": "secret description",
+                        "url": "https://linear.app/secret",
+                        "archivedAt": None,
+                        "state": {"name": "In Progress"},
+                        "team": {"key": "SIS"},
+                        "parent": {"identifier": "SIS-1"},
+                        "project": {"name": "Hermes"},
+                        "projectMilestone": {"name": "Read lane"},
+                        "assignee": {"name": "Private", "email": "private@example.com"},
+                    },
+                    {
+                        "id": "issue-internal-2",
+                        "identifier": "SIS-10",
+                        "title": "Other",
+                        "archivedAt": "2026-01-01T00:00:00.000Z",
+                        "state": {"name": "Todo"},
+                        "team": {"key": "SIS"},
+                        "parent": None,
+                        "project": None,
+                        "projectMilestone": None,
+                    },
+                ],
+                "projects": [
+                    {
+                        "id": "project-internal",
+                        "name": "Straße Program",
+                        "archivedAt": None,
+                        "teams": {"nodes": [{"key": "SIS"}]},
+                        "description": "private",
+                    }
+                ],
+                "milestones": [
+                    {
+                        "id": "milestone-internal",
+                        "name": "Roadmap",
+                        "archivedAt": None,
+                        "project": {
+                            "name": "Straße Program",
+                            "teams": {"nodes": [{"key": "SIS"}]},
+                        },
+                    }
+                ],
+                "initiatives": [
+                    {
+                        "id": "initiative-internal",
+                        "name": "STRASSE Initiative",
+                        "archivedAt": None,
+                    }
+                ],
+            }
+
+        def list_linear_entities(self, entity_type, *, include_archived):
+            self.calls.append((entity_type, include_archived))
+            items = self.data[entity_type]
+            if not include_archived:
+                items = [item for item in items if item.get("archivedAt") is None]
+            return json.loads(json.dumps(items))
+
+    def test_inventory_read_returns_safe_hierarchy_counts_without_journal(self):
+        client = self.WorkspaceReadClient()
+        raw = workspace_read_command(
+            entity_types=["issues", "projects", "milestones", "initiatives"],
+            include_archived=True,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Path(tmp) / "journal.json"
+            result = lane.execute_command(client, raw, mode="apply", journal_path=journal)
+            self.assertFalse(journal.exists())
+        self.assertEqual(result["result"], "read")
+        self.assertTrue(result["verified"])
+        self.assertTrue(result["no_op"])
+        self.assertEqual(result["after"]["counts"], {kind: len(client.data[kind]) for kind in lane.LINEAR_ENTITY_TYPES})
+        issue_item = result["after"]["entities"]["issues"][0]
+        self.assertEqual(
+            issue_item,
+            {
+                "type": "issue",
+                "identifier": "SIS-9",
+                "title": "Straße rollout",
+                "state": "In Progress",
+                "team": "SIS",
+                "parent_identifier": "SIS-1",
+                "project": "Hermes",
+                "milestone": "Read lane",
+                "archived": False,
+            },
+        )
+        serialized = json.dumps(result, ensure_ascii=False).lower()
+        for forbidden in (
+            "internal",
+            "description",
+            "https://",
+            "private@example.com",
+            "assignee",
+            "user",
+            "email",
+        ):
+            self.assertNotIn(forbidden, serialized)
+
+    def test_search_uses_unicode_casefold_substring_over_only_allowed_names(self):
+        client = self.WorkspaceReadClient()
+        result = lane.execute_command(
+            client,
+            workspace_read_command("search_linear", query="STRASSE"),
+            mode="apply",
+            journal_path=Path("/must/not/be/written.json"),
+        )
+        after = result["after"]
+        self.assertEqual(after["query"], "STRASSE")
+        self.assertEqual(
+            after["counts"],
+            {"issues": 1, "projects": 1, "milestones": 0, "initiatives": 1},
+        )
+        self.assertEqual(
+            after["scanned_counts"],
+            {"issues": 1, "projects": 1, "milestones": 1, "initiatives": 1},
+        )
+        self.assertEqual(after["entities"]["issues"][0]["identifier"], "SIS-9")
+        self.assertEqual(after["entities"]["projects"][0]["name"], "Straße Program")
+        self.assertEqual(after["entities"]["initiatives"][0]["name"], "STRASSE Initiative")
+        self.assertEqual(after["entities"]["milestones"], [])
+
+    def test_blocks_and_equivalent_blocked_by_share_canonical_relation_identity(self):
+        blocks = relation_command("blocks", "linear:SIS:relation:blocks")
+        blocked_by = relation_command(
+            "blocked_by", "linear:SIS:relation:blocked-by"
+        )
+        blocked_by["target"]["identifier"] = "SIS-56"
+        blocked_by["change"]["related_identifier"] = "SIS-59"
+        relation_ids = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for index, raw in enumerate((blocks, blocked_by)):
+                client = FakeClient()
+                lane.execute_command(
+                    client,
+                    raw,
+                    mode="apply",
+                    journal_path=Path(tmp) / f"{index}.json",
+                )
+                relation_ids.append(
+                    next(
+                        item[1]
+                        for item in client.writes
+                        if item[0] == "create_issue_relation"
+                    )
+                )
+
+        self.assertEqual(relation_ids[0], relation_ids[1])
+
+    def test_blocked_by_relation_maps_canonically_and_crash_replay_is_no_op(self):
+        client = FakeClient()
+        raw = relation_command()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            applied = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "first.json",
+            )
+            replay = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "crash-replay.json",
+            )
+
+        writes = [item for item in client.writes if item[0] == "create_issue_relation"]
+        self.assertEqual(len(writes), 1)
+        self.assertEqual(writes[0][2:], ("parent-uuid", "issue-uuid", "blocks"))
+        self.assertEqual(applied["result"], "applied")
+        self.assertEqual(replay["result"], "no_op")
+        self.assertEqual(
+            replay["after"],
+            {
+                "identifier": "SIS-59",
+                "related_identifier": "SIS-56",
+                "relation_type": "blocked_by",
+            },
+        )
+        self.assertNotIn("id", replay["after"])
+
+    def test_related_relation_is_canonical_and_reverse_inventory_replays_noop(self):
+        client = FakeClient()
+        raw = relation_command("related", "linear:SIS:relation:related")
+        with tempfile.TemporaryDirectory() as tmp:
+            applied = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "first.json",
+            )
+            relation = client.issue_relations[0]
+            relation["issue"], relation["relatedIssue"] = (
+                relation["relatedIssue"],
+                relation["issue"],
+            )
+            replay = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "replay.json",
+            )
+        self.assertEqual(applied["result"], "applied")
+        self.assertEqual(replay["result"], "no_op")
+        self.assertEqual(
+            [write[0] for write in client.writes].count("create_issue_relation"),
+            1,
+        )
+        self.assertEqual(client.writes[0][-1], "related")
+
+    def test_relation_change_plan_canonicalizes_blocked_by_and_related_symmetry(self):
+        blocked = FakeClient()
+        blocked.issue_relations = [
+            {
+                "id": "relation-old",
+                "type": "blocks",
+                "issue": {"id": "parent-uuid", "identifier": "SIS-56"},
+                "relatedIssue": {"id": "issue-uuid", "identifier": "SIS-59"},
+            }
+        ]
+        removal = lane.execute_command(
+            blocked,
+            relation_change_command("remove_issue_relation"),
+            mode="plan",
+        )
+        self.assertEqual(
+            removal["plan"],
+            [
+                {
+                    "action": "remove_issue_relation",
+                    "identifier": "SIS-59",
+                    "related_identifier": "SIS-56",
+                    "relation_type": "blocked_by",
+                }
+            ],
+        )
+        self.assertEqual(removal["before"]["inventory"][0]["id"], "relation-old")
+
+        symmetric = FakeClient()
+        symmetric.related["related-57"] = {
+            **issue("Todo"),
+            "id": "related-57",
+            "identifier": "SIS-57",
+            "team": {"id": "team-uuid", "key": "SIS"},
+        }
+        symmetric.issue_relations = [
+            {
+                "id": "relation-related",
+                "type": "related",
+                "issue": {"id": "related-57", "identifier": "SIS-57"},
+                "relatedIssue": {"id": "issue-uuid", "identifier": "SIS-59"},
+            }
+        ]
+        replace = relation_change_command("replace_issue_relation")
+        replace["change"] = {
+            "old_related_identifier": "SIS-57",
+            "old_relation_type": "related",
+            "new_related_identifier": "SIS-56",
+            "new_relation_type": "blocks",
+        }
+        planned = lane.execute_command(symmetric, replace, mode="plan")
+        self.assertEqual(
+            planned["plan"],
+            [
+                {
+                    "action": "create_issue_relation",
+                    "identifier": "SIS-59",
+                    "related_identifier": "SIS-56",
+                    "relation_type": "blocks",
+                },
+                {
+                    "action": "remove_issue_relation",
+                    "identifier": "SIS-59",
+                    "related_identifier": "SIS-57",
+                    "relation_type": "related",
+                },
+            ],
+        )
+
+    def test_relation_change_fails_on_zero_or_ambiguous_exact_old_and_ambiguous_new(self):
+        missing = FakeClient()
+        duplicate = FakeClient()
+        duplicate.issue_relations = [
+            {
+                "id": relation_id,
+                "type": "blocks",
+                "issue": {"id": "parent-uuid", "identifier": "SIS-56"},
+                "relatedIssue": {"id": "issue-uuid", "identifier": "SIS-59"},
+            }
+            for relation_id in ("relation-a", "relation-b")
+        ]
+        for client, message in (
+            (missing, "not found"),
+            (duplicate, "ambiguous"),
+        ):
+            with self.subTest(message=message), self.assertRaisesRegex(
+                lane.ContractError, message
+            ):
+                lane.execute_command(
+                    client,
+                    relation_change_command("remove_issue_relation"),
+                    mode="plan",
+                )
+
+        new_duplicate = FakeClient()
+        new_duplicate.issue_relations = [
+            {
+                "id": "relation-old",
+                "type": "blocks",
+                "issue": {"id": "parent-uuid", "identifier": "SIS-56"},
+                "relatedIssue": {"id": "issue-uuid", "identifier": "SIS-59"},
+            },
+            *[
+                {
+                    "id": relation_id,
+                    "type": "related",
+                    "issue": {"id": "issue-uuid", "identifier": "SIS-59"},
+                    "relatedIssue": {
+                        "id": "parent-uuid",
+                        "identifier": "SIS-56",
+                    },
+                }
+                for relation_id in ("new-a", "new-b")
+            ],
+        ]
+        raw = relation_change_command("replace_issue_relation")
+        raw["change"] = {
+            "old_related_identifier": "SIS-56",
+            "old_relation_type": "blocked_by",
+            "new_related_identifier": "SIS-56",
+            "new_relation_type": "related",
+        }
+        with self.assertRaisesRegex(lane.ContractError, "new issue relation is ambiguous"):
+            lane.execute_command(new_duplicate, raw, mode="plan")
+
+    def test_exact_relation_removal_deletes_once_reads_back_and_replays_without_duplicate(self):
+        client = FakeClient()
+        client.issue_relations = [
+            {
+                "id": "relation-old",
+                "type": "blocks",
+                "issue": {"id": "parent-uuid", "identifier": "SIS-56"},
+                "relatedIssue": {"id": "issue-uuid", "identifier": "SIS-59"},
+            }
+        ]
+        raw = relation_change_command("remove_issue_relation")
+        authorization = consumed_owner_authorization(raw)
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Path(tmp) / "journal.json"
+            applied = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=journal,
+                owner_approval_authorization=authorization,
+            )
+            replay = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=journal,
+                owner_approval_authorization=authorization,
+            )
+        self.assertEqual(applied["result"], "applied")
+        self.assertTrue(applied["verified"])
+        self.assertEqual(replay["result"], "no_op")
+        self.assertEqual(
+            [write for write in client.writes if write[0] == "delete_issue_relation"],
+            [("delete_issue_relation", "relation-old")],
+        )
+        self.assertNotIn('"id":', json.dumps(applied["after"]))
+
+    def test_relation_removal_readback_drift_restores_deleted_relation_and_fails_closed(self):
+        class DriftAfterRemoval(FakeClient):
+            def delete_issue_relation(self, relation_id):
+                super().delete_issue_relation(relation_id)
+                if relation_id == "relation-old":
+                    self.issue_relations.append(
+                        {
+                            "id": "external-drift",
+                            "type": "blocks",
+                            "issue": {"id": "issue-uuid", "identifier": "SIS-59"},
+                            "relatedIssue": {
+                                "id": "external-uuid",
+                                "identifier": "SIS-88",
+                            },
+                        }
+                    )
+
+        client = DriftAfterRemoval()
+        client.issue_relations = [
+            {
+                "id": "relation-old",
+                "type": "blocks",
+                "issue": {"id": "parent-uuid", "identifier": "SIS-56"},
+                "relatedIssue": {"id": "issue-uuid", "identifier": "SIS-59"},
+            }
+        ]
+        raw = relation_change_command("remove_issue_relation")
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(
+            lane.ContractError, "compensation failed closed"
+        ):
+            lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "journal.json",
+                owner_approval_authorization=consumed_owner_authorization(raw),
+            )
+        self.assertIn("relation-old", {item["id"] for item in client.issue_relations})
+
+    def test_relation_removal_recovers_after_crash_between_delete_and_completion_journal(self):
+        class CrashAfterDelete(FakeClient):
+            crashed = False
+
+            def delete_issue_relation(self, relation_id):
+                super().delete_issue_relation(relation_id)
+                if not self.crashed:
+                    self.crashed = True
+                    raise KeyboardInterrupt("simulated process death")
+
+        client = CrashAfterDelete()
+        client.issue_relations = [
+            {
+                "id": "relation-old",
+                "type": "blocks",
+                "issue": {"id": "parent-uuid", "identifier": "SIS-56"},
+                "relatedIssue": {"id": "issue-uuid", "identifier": "SIS-59"},
+            }
+        ]
+        raw = relation_change_command("remove_issue_relation")
+        authorization = consumed_owner_authorization(raw)
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Path(tmp) / "journal.json"
+            with self.assertRaises(KeyboardInterrupt):
+                lane.execute_command(
+                    client,
+                    raw,
+                    mode="apply",
+                    journal_path=journal,
+                    owner_approval_authorization=authorization,
+                )
+            replay = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=journal,
+                owner_approval_authorization=authorization,
+            )
+        self.assertEqual(replay["result"], "no_op")
+        self.assertTrue(replay["verified"])
+        self.assertEqual(
+            [item[0] for item in client.writes], ["delete_issue_relation"]
+        )
+
+    def test_exact_relation_replacement_creates_then_deletes_and_literal_replay_is_noop(self):
+        client = FakeClient()
+        client.issue_relations = [
+            {
+                "id": "relation-old",
+                "type": "blocks",
+                "issue": {"id": "parent-uuid", "identifier": "SIS-56"},
+                "relatedIssue": {"id": "issue-uuid", "identifier": "SIS-59"},
+            }
+        ]
+        raw = relation_change_command("replace_issue_relation")
+        raw["change"] = {
+            "old_related_identifier": "SIS-56",
+            "old_relation_type": "blocked_by",
+            "new_related_identifier": "SIS-56",
+            "new_relation_type": "related",
+        }
+        authorization = consumed_owner_authorization(raw)
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Path(tmp) / "journal.json"
+            applied = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=journal,
+                owner_approval_authorization=authorization,
+            )
+            replay = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=journal,
+                owner_approval_authorization=authorization,
+            )
+        writes = [item[0] for item in client.writes]
+        self.assertEqual(
+            writes,
+            ["create_issue_relation", "delete_issue_relation"],
+        )
+        self.assertEqual(applied["result"], "applied")
+        self.assertEqual(replay["result"], "no_op")
+        self.assertEqual(len(client.issue_relations), 1)
+        self.assertEqual(client.issue_relations[0]["type"], "related")
+        self.assertNotIn('"id":', json.dumps(applied["after"]))
+
+    def test_relation_replacement_recovers_after_crash_without_duplicate(self):
+        class CrashAfterOldDelete(FakeClient):
+            crashed = False
+
+            def delete_issue_relation(self, relation_id):
+                super().delete_issue_relation(relation_id)
+                if relation_id == "relation-old" and not self.crashed:
+                    self.crashed = True
+                    raise KeyboardInterrupt("simulated process death")
+
+        client = CrashAfterOldDelete()
+        client.issue_relations = [
+            {
+                "id": "relation-old",
+                "type": "blocks",
+                "issue": {"id": "parent-uuid", "identifier": "SIS-56"},
+                "relatedIssue": {"id": "issue-uuid", "identifier": "SIS-59"},
+            }
+        ]
+        raw = relation_change_command("replace_issue_relation")
+        raw["change"] = {
+            "old_related_identifier": "SIS-56",
+            "old_relation_type": "blocked_by",
+            "new_related_identifier": "SIS-56",
+            "new_relation_type": "related",
+        }
+        authorization = consumed_owner_authorization(raw)
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Path(tmp) / "journal.json"
+            with self.assertRaises(KeyboardInterrupt):
+                lane.execute_command(
+                    client,
+                    raw,
+                    mode="apply",
+                    journal_path=journal,
+                    owner_approval_authorization=authorization,
+                )
+            replay = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=journal,
+                owner_approval_authorization=authorization,
+            )
+        self.assertEqual(replay["result"], "no_op")
+        self.assertEqual(
+            [item[0] for item in client.writes],
+            ["create_issue_relation", "delete_issue_relation"],
+        )
+        self.assertEqual(len(client.issue_relations), 1)
+
+    def test_relation_replacement_delete_failure_removes_created_relation_and_restores_before_state(self):
+        class RejectOldDelete(FakeClient):
+            def delete_issue_relation(self, relation_id):
+                if relation_id == "relation-old":
+                    self.writes.append(("delete_issue_relation", relation_id))
+                    raise RuntimeError("delete rejected")
+                super().delete_issue_relation(relation_id)
+
+        client = RejectOldDelete()
+        original = {
+            "id": "relation-old",
+            "type": "blocks",
+            "issue": {"id": "parent-uuid", "identifier": "SIS-56"},
+            "relatedIssue": {"id": "issue-uuid", "identifier": "SIS-59"},
+        }
+        client.issue_relations = [copy.deepcopy(original)]
+        raw = relation_change_command("replace_issue_relation")
+        raw["change"] = {
+            "old_related_identifier": "SIS-56",
+            "old_relation_type": "blocked_by",
+            "new_related_identifier": "SIS-56",
+            "new_relation_type": "related",
+        }
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(
+            lane.ContractError, "was compensated"
+        ):
+            lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "journal.json",
+                owner_approval_authorization=consumed_owner_authorization(raw),
+            )
+        self.assertEqual(client.issue_relations, [original])
+        self.assertEqual(
+            [item[0] for item in client.writes],
+            [
+                "create_issue_relation",
+                "delete_issue_relation",
+                "delete_issue_relation",
+            ],
+        )
+
+    def test_relation_replacement_readback_drift_compensates_owned_mutations_and_fails_closed(self):
+        class DriftAfterDelete(FakeClient):
+            def delete_issue_relation(self, relation_id):
+                super().delete_issue_relation(relation_id)
+                if relation_id == "relation-old":
+                    self.issue_relations.append(
+                        {
+                            "id": "external-drift",
+                            "type": "blocks",
+                            "issue": {"id": "issue-uuid", "identifier": "SIS-59"},
+                            "relatedIssue": {
+                                "id": "external-uuid",
+                                "identifier": "SIS-88",
+                            },
+                        }
+                    )
+
+        client = DriftAfterDelete()
+        client.issue_relations = [
+            {
+                "id": "relation-old",
+                "type": "blocks",
+                "issue": {"id": "parent-uuid", "identifier": "SIS-56"},
+                "relatedIssue": {"id": "issue-uuid", "identifier": "SIS-59"},
+            }
+        ]
+        raw = relation_change_command("replace_issue_relation")
+        raw["change"] = {
+            "old_related_identifier": "SIS-56",
+            "old_relation_type": "blocked_by",
+            "new_related_identifier": "SIS-56",
+            "new_relation_type": "related",
+        }
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(
+            lane.ContractError, "compensation failed closed"
+        ):
+            lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "journal.json",
+                owner_approval_authorization=consumed_owner_authorization(raw),
+            )
+        by_id = {item["id"]: item for item in client.issue_relations}
+        self.assertIn("relation-old", by_id)
+        self.assertNotIn(
+            next(
+                write[1]
+                for write in client.writes
+                if write[0] == "create_issue_relation"
+            ),
+            by_id,
+        )
+
+    def test_issue_relation_rejects_missing_or_wrong_team_related_issue(self):
+        missing = FakeClient()
+        missing_raw = relation_command("blocks", "linear:SIS:relation:missing")
+        missing_raw["change"]["related_identifier"] = "SIS-999"
+
+        wrong_team = FakeClient()
+        wrong = issue("Todo")
+        wrong.update(
+            {
+                "id": "wrong-team-uuid",
+                "identifier": "SIS-99",
+                "team": {"id": "other-team", "key": "OTHER"},
+            }
+        )
+        wrong_team.related[wrong["id"]] = wrong
+        wrong_raw = relation_command("blocks", "linear:SIS:relation:wrong-team")
+        wrong_raw["change"]["related_identifier"] = "SIS-99"
+
+        for client, raw, message in (
+            (missing, missing_raw, "exact related Linear issue not found"),
+            (wrong_team, wrong_raw, "related target is not in the SIS team"),
+        ):
+            with self.subTest(message=message), self.assertRaisesRegex(
+                lane.ContractError, message
+            ):
+                lane.execute_command(client, raw, mode="plan")
+            self.assertEqual(client.writes, [])
+
+    def test_issue_relation_fails_closed_on_readback_drift(self):
+        class DriftingRelationClient(FakeClient):
+            def get_issue_relation(self, relation_id):
+                relation = super().get_issue_relation(relation_id)
+                if relation is not None:
+                    relation["type"] = "related"
+                return relation
+
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(
+            lane.ContractError,
+            "read-back verification failed",
+        ):
+            lane.execute_command(
+                DriftingRelationClient(),
+                relation_command("blocks", "linear:SIS:relation:drift"),
+                mode="apply",
+                journal_path=Path(tmp) / "journal.json",
+            )
+
     def test_standalone_issue_reuses_exact_scope_and_replays_without_parent(self):
         class CanonicalizingClient(FakeIssueTreeClient):
             def create_project_issue(self, **kwargs):
@@ -1824,6 +3210,347 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(replay["result"], "no_op")
             self.assertEqual(len(client.writes), 1)
 
+    def test_update_issue_attaches_top_level_issue_with_minimal_write_and_safe_projection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = FakeClient()
+            client.current["parent"] = None
+            parent = issue("Todo")
+            parent.update(
+                {
+                    "id": "parent-68-uuid",
+                    "identifier": "SIS-68",
+                    "title": "Exact parent",
+                    "url": "https://linear.app/example/issue/SIS-68",
+                    "parent": None,
+                }
+            )
+            client.related[parent["id"]] = parent
+            unmanaged = json.loads(json.dumps(client.current))
+            raw = command(
+                "update_issue",
+                {"parent_identifier": "SIS-68"},
+                key="linear:SIS-59:parent-attach:fixture",
+            )
+
+            planned = lane.execute_command(client, raw, mode="plan")
+            self.assertEqual(
+                planned["plan"],
+                [{"action": "update_issue", "fields": ["parent_identifier"]}],
+            )
+            self.assertEqual(planned["after"]["parent_identifier"], "SIS-68")
+            self.assertNotIn("parent-68-uuid", json.dumps(planned))
+            self.assertEqual(client.writes, [])
+
+            applied = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "journal.json",
+            )
+            self.assertEqual(applied["result"], "applied")
+            self.assertEqual(applied["after"]["parent_identifier"], "SIS-68")
+            self.assertNotIn("parent-68-uuid", json.dumps(applied))
+            self.assertEqual(
+                client.writes,
+                [("fields", "issue-uuid", {"parent_id": "parent-68-uuid"})],
+            )
+            self.assertEqual(
+                {key: client.current[key] for key in unmanaged if key != "parent"},
+                {key: unmanaged[key] for key in unmanaged if key != "parent"},
+            )
+
+            replay = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "replay.json",
+            )
+            self.assertEqual(replay["result"], "no_op")
+            self.assertEqual(replay["before"], replay["after"])
+            self.assertEqual(len(client.writes), 1)
+
+    def test_update_issue_parent_clear_and_replacement_require_owner_approval(self):
+        blocker = "owner approval required: clearing or replacing an issue parent"
+        parent = issue("Todo")
+        parent.update(
+            {
+                "id": "parent-68-uuid",
+                "identifier": "SIS-68",
+                "url": "https://linear.app/example/issue/SIS-68",
+                "parent": None,
+            }
+        )
+        for requested, current_parent in (
+            (None, None),
+            (
+                "SIS-68",
+                {"id": "different-parent-uuid", "identifier": "SIS-1"},
+            ),
+        ):
+            client = FakeClient()
+            client.current["parent"] = current_parent
+            client.related[parent["id"]] = parent
+            with self.subTest(requested=requested), self.assertRaisesRegex(
+                lane.ContractError, rf"^{blocker}$"
+            ):
+                lane.execute_command(
+                    client,
+                    command(
+                        "update_issue",
+                        {"parent_identifier": requested},
+                        key=f"linear:SIS-59:parent-blocker:{requested}",
+                    ),
+                    mode="plan",
+                )
+            self.assertEqual(client.writes, [])
+
+    def test_owner_approved_parent_clear_and_replace_use_consumed_gate_and_minimal_payload(self):
+        class Gate:
+            class ApprovalError(RuntimeError):
+                pass
+
+            @staticmethod
+            def validate_policy(policy):
+                return policy
+
+            @staticmethod
+            def require_consumed_owner_approval(
+                authorization, *, expected_intent, expected_command
+            ):
+                del expected_command
+                if authorization is not consumed:
+                    raise Gate.ApprovalError("apply requires consumed owner approval")
+                if expected_intent["operation"] != "update_issue" or set(expected_intent["change"]) != {"parent_identifier"}:
+                    raise Gate.ApprovalError("wrong intent")
+
+        consumed = object()
+        parent = issue("Todo")
+        parent.update(
+            {
+                "id": "parent-68-uuid",
+                "identifier": "SIS-68",
+                "url": "https://linear.app/example/issue/SIS-68",
+                "parent": None,
+            }
+        )
+        for requested, current_parent, expected_payload in (
+            (None, {"id": "old-parent-uuid", "identifier": "SIS-1"}, {"parent_id": None}),
+            (
+                "SIS-68",
+                {"id": "old-parent-uuid", "identifier": "SIS-1"},
+                {"parent_id": "parent-68-uuid"},
+            ),
+        ):
+            with self.subTest(requested=requested), tempfile.TemporaryDirectory() as tmp:
+                client = FakeClient()
+                client.current["parent"] = current_parent
+                client.related[parent["id"]] = parent
+                unmanaged_before = json.loads(
+                    json.dumps(
+                        {
+                            key: value
+                            for key, value in client.current.items()
+                            if key != "parent"
+                        }
+                    )
+                )
+                raw = command(
+                    "update_issue",
+                    {"parent_identifier": requested},
+                    key=f"linear:SIS-59:owner-parent:{requested}",
+                )
+                raw["policy"] = owner_policy()
+                with mock.patch.object(lane, "_load_approval", return_value=Gate):
+                    planned = lane.execute_command(client, raw, mode="plan")
+                    applied = lane.execute_command(
+                        client,
+                        raw,
+                        mode="apply",
+                        journal_path=Path(tmp) / "journal.json",
+                        owner_approval_authorization=consumed,
+                    )
+                    replay = lane.execute_command(
+                        client,
+                        raw,
+                        mode="apply",
+                        journal_path=Path(tmp) / "replay.json",
+                        owner_approval_authorization=consumed,
+                    )
+                self.assertEqual(planned["plan"], [{"action": "update_issue", "fields": ["parent_identifier"]}])
+                self.assertEqual(applied["after"]["parent_identifier"], requested)
+                self.assertEqual(client.writes, [("fields", "issue-uuid", expected_payload)])
+                self.assertEqual(
+                    {key: value for key, value in client.current.items() if key != "parent"},
+                    unmanaged_before,
+                )
+                self.assertEqual(replay["result"], "no_op")
+
+    def test_owner_approved_parent_apply_rejects_direct_lane_bypass_and_cycle(self):
+        raw = command(
+            "update_issue",
+            {"parent_identifier": None},
+            key="linear:SIS-59:owner-parent:bypass",
+        )
+        raw["policy"] = owner_policy()
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(
+            lane.ContractError, "consumed owner approval"
+        ):
+            lane.execute_command(
+                FakeClient(), raw, mode="apply", journal_path=Path(tmp) / "journal.json"
+            )
+
+        cyclic = FakeClient()
+        cyclic_parent = issue("Todo")
+        cyclic_parent.update(
+            {
+                "id": "parent-68-uuid",
+                "identifier": "SIS-68",
+                "url": "https://linear.app/example/issue/SIS-68",
+                "parent": {"id": "issue-uuid", "identifier": "SIS-59"},
+            }
+        )
+        cyclic.related[cyclic_parent["id"]] = cyclic_parent
+        cycle = command(
+            "update_issue",
+            {"parent_identifier": "SIS-68"},
+            key="linear:SIS-59:owner-parent:cycle",
+        )
+        cycle["policy"] = owner_policy()
+        with self.assertRaisesRegex(lane.ContractError, "would create a cycle"):
+            lane.execute_command(cyclic, cycle, mode="plan")
+        self.assertEqual(cyclic.writes, [])
+
+    def test_owner_approved_clear_fails_exact_read_back_on_parent_drift(self):
+        class Gate:
+            class ApprovalError(RuntimeError):
+                pass
+
+            @staticmethod
+            def validate_policy(policy):
+                return policy
+
+            @staticmethod
+            def require_consumed_owner_approval(
+                _authorization, *, expected_intent, expected_command
+            ):
+                del expected_intent, expected_command
+                return None
+
+        class DriftingClearClient(FakeClient):
+            def update_issue_fields(self, issue_id, **fields):
+                old_parent = self.current["parent"]
+                super().update_issue_fields(issue_id, **fields)
+                self.current["parent"] = old_parent
+
+        client = DriftingClearClient()
+        client.current["parent"] = {"id": "old-parent-uuid", "identifier": "SIS-1"}
+        raw = command(
+            "update_issue",
+            {"parent_identifier": None},
+            key="linear:SIS-59:owner-parent:readback-drift",
+        )
+        raw["policy"] = owner_policy()
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            lane, "_load_approval", return_value=Gate
+        ), self.assertRaisesRegex(
+            lane.ContractError, r"^update_issue read-back mismatched fields: parent$"
+        ):
+            lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "journal.json",
+                owner_approval_authorization=object(),
+            )
+
+    def test_update_issue_rejects_missing_wrong_team_self_and_cycle_parent(self):
+        cases = []
+
+        missing = FakeClient()
+        missing.current["parent"] = None
+        cases.append((missing, "SIS-68", "exact Linear parent not found"))
+
+        wrong_team = FakeClient()
+        wrong_team.current["parent"] = None
+        wrong_team_parent = issue("Todo")
+        wrong_team_parent.update(
+            {
+                "id": "parent-68-uuid",
+                "identifier": "SIS-68",
+                "url": "https://linear.app/example/issue/SIS-68",
+                "team": {"id": "other-team", "key": "OTHER"},
+                "parent": None,
+            }
+        )
+        wrong_team.related[wrong_team_parent["id"]] = wrong_team_parent
+        cases.append((wrong_team, "SIS-68", "parent is not in the SIS team"))
+
+        self_parent = FakeClient()
+        self_parent.current["parent"] = None
+        cases.append((self_parent, "SIS-59", "cannot be its own parent"))
+
+        cyclic = FakeClient()
+        cyclic.current["parent"] = None
+        cyclic_parent = issue("Todo")
+        cyclic_parent.update(
+            {
+                "id": "parent-68-uuid",
+                "identifier": "SIS-68",
+                "url": "https://linear.app/example/issue/SIS-68",
+                "parent": {"id": "issue-uuid", "identifier": "SIS-59"},
+            }
+        )
+        cyclic.related[cyclic_parent["id"]] = cyclic_parent
+        cases.append((cyclic, "SIS-68", "would create a cycle"))
+
+        for client, parent_identifier, message in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(
+                lane.ContractError, message
+            ):
+                lane.execute_command(
+                    client,
+                    command(
+                        "update_issue",
+                        {"parent_identifier": parent_identifier},
+                        key=f"linear:SIS-59:parent-negative:{message.replace(' ', '-')}",
+                    ),
+                    mode="plan",
+                )
+            self.assertEqual(client.writes, [])
+
+    def test_update_issue_parent_attach_fails_exact_read_back_on_parent_drift(self):
+        class DriftingParentClient(FakeClient):
+            def update_issue_fields(self, issue_id, **fields):
+                super().update_issue_fields(issue_id, **fields)
+                self.current["parent"] = None
+
+        client = DriftingParentClient()
+        client.current["parent"] = None
+        parent = issue("Todo")
+        parent.update(
+            {
+                "id": "parent-68-uuid",
+                "identifier": "SIS-68",
+                "url": "https://linear.app/example/issue/SIS-68",
+                "parent": None,
+            }
+        )
+        client.related[parent["id"]] = parent
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(
+            lane.ContractError,
+            r"^update_issue read-back mismatched fields: parent$",
+        ):
+            lane.execute_command(
+                client,
+                command(
+                    "update_issue",
+                    {"parent_identifier": "SIS-68"},
+                    key="linear:SIS-59:parent-readback-drift:fixture",
+                ),
+                mode="apply",
+                journal_path=Path(tmp) / "journal.json",
+            )
+
     def test_update_issue_applies_exact_fields_and_literal_replay_is_noop(self):
         with tempfile.TemporaryDirectory() as tmp:
             journal = Path(tmp) / "journal.json"
@@ -1864,6 +3591,76 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(replay["result"], "no_op")
             self.assertEqual(len(client.writes), 1)
 
+    def test_update_issue_moves_to_exact_project_and_milestone_with_safe_projection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = FakeClient()
+            unmanaged = {
+                key: json.loads(json.dumps(client.current[key]))
+                for key in (
+                    "title",
+                    "description",
+                    "state",
+                    "priority",
+                    "assignee",
+                    "labels",
+                    "parent",
+                    "dueDate",
+                    "estimate",
+                    "team",
+                )
+            }
+            raw = command(
+                "update_issue",
+                {"project": "Project Two", "milestone": "Milestone Two"},
+                key="linear:SIS-59:move:fixture",
+            )
+            planned = lane.execute_command(client, raw, mode="plan")
+            self.assertEqual(
+                planned["before"] | {"project": "Project Two", "milestone": "Milestone Two"},
+                planned["after"],
+            )
+            self.assertEqual(
+                planned["plan"],
+                [{"action": "update_issue", "fields": ["project", "milestone"]}],
+            )
+            self.assertNotIn("project-two", json.dumps(planned))
+            self.assertEqual(client.writes, [])
+
+            applied = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "journal.json",
+            )
+            self.assertEqual(applied["result"], "applied")
+            self.assertEqual(applied["before"]["project"], "Current Project")
+            self.assertEqual(applied["before"]["milestone"], "Current Milestone")
+            self.assertEqual(applied["after"]["project"], "Project Two")
+            self.assertEqual(applied["after"]["milestone"], "Milestone Two")
+            self.assertEqual(
+                client.writes,
+                [
+                    (
+                        "fields",
+                        "issue-uuid",
+                        {"project_id": "project-two", "milestone_id": "milestone-two"},
+                    )
+                ],
+            )
+            self.assertEqual(
+                {key: client.current[key] for key in unmanaged},
+                unmanaged,
+            )
+            replay = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "replay.json",
+            )
+            self.assertEqual(replay["result"], "no_op")
+            self.assertEqual(replay["before"], replay["after"])
+            self.assertEqual(len(client.writes), 1)
+
     def test_update_issue_removes_links_preserves_text_and_changes_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             journal = Path(tmp) / "journal.json"
@@ -1902,6 +3699,634 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(replay["result"], "no_op")
             self.assertEqual(len(client.writes), 1)
 
+    def test_remove_links_literal_replay_preserves_url_valued_markdown_label(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Path(tmp) / "journal.json"
+            client = FakeClient()
+            client.current["description"] = (
+                "[https://label.example](https://destination.example)"
+            )
+            raw = command(
+                "update_issue",
+                {"description_transform": "remove_links"},
+                key="linear:SIS-59:update:url-label-replay",
+            )
+
+            applied = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+            replay = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+
+            self.assertEqual(
+                applied["after"]["description"], "https://label.example"
+            )
+            self.assertEqual(
+                replay["after"]["description"], "https://label.example"
+            )
+            self.assertEqual(replay["result"], "no_op")
+            self.assertEqual(len(client.writes), 1)
+
+    def test_remove_links_recovers_post_write_crash_without_recomputing_after_state(self):
+        class CrashAfterWrite(FakeClient):
+            crashed = False
+
+            def update_issue_fields(self, issue_id, **fields):
+                super().update_issue_fields(issue_id, **fields)
+                if not self.crashed:
+                    self.crashed = True
+                    raise KeyboardInterrupt("simulated process death after update")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Path(tmp) / "journal.json"
+            client = CrashAfterWrite()
+            client.current["description"] = (
+                "[https://label.example](https://destination.example)"
+            )
+            raw = command(
+                "update_issue",
+                {"description_transform": "remove_links"},
+                key="linear:SIS-59:update:url-label-crash",
+            )
+
+            with self.assertRaisesRegex(KeyboardInterrupt, "process death"):
+                lane.execute_command(client, raw, mode="apply", journal_path=journal)
+            recovered = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+            replay = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+
+            self.assertEqual(client.current["description"], "https://label.example")
+            self.assertEqual(recovered["result"], "no_op")
+            self.assertTrue(recovered["recovered"])
+            self.assertEqual(replay["result"], "no_op")
+            self.assertEqual(len(client.writes), 1)
+
+    def test_remove_links_rejects_concurrent_description_edit_before_update(self):
+        class ConcurrentEdit(FakeClient):
+            reads = 0
+
+            def get_issue(self, identifier):
+                self.reads += 1
+                if identifier == "SIS-59" and self.reads == 2:
+                    self.current["description"] = "concurrent user edit"
+                return super().get_issue(identifier)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = ConcurrentEdit()
+            client.current["description"] = "[kept](https://example.com)"
+            with self.assertRaisesRegex(lane.ContractError, "description.*drift"):
+                lane.execute_command(
+                    client,
+                    command(
+                        "update_issue",
+                        {"description_transform": "remove_links"},
+                        key="linear:SIS-59:update:remove-links-toctou",
+                    ),
+                    mode="apply",
+                    journal_path=Path(tmp) / "journal.json",
+                )
+            self.assertEqual(client.writes, [])
+            self.assertEqual(client.current["description"], "concurrent user edit")
+
+    def test_update_issue_clears_project_and_milestone_together(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = FakeClient()
+            raw = command(
+                "update_issue",
+                {"project": None, "milestone": None},
+                key="linear:SIS-59:clear-scope:fixture",
+            )
+            applied = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "journal.json",
+            )
+            self.assertEqual(applied["before"]["project"], "Current Project")
+            self.assertEqual(applied["before"]["milestone"], "Current Milestone")
+            self.assertIsNone(applied["after"]["project"])
+            self.assertIsNone(applied["after"]["milestone"])
+            self.assertEqual(
+                client.writes,
+                [
+                    (
+                        "fields",
+                        "issue-uuid",
+                        {"project_id": None, "milestone_id": None},
+                    )
+                ],
+            )
+            replay = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "replay.json",
+            )
+            self.assertEqual(replay["result"], "no_op")
+            self.assertEqual(len(client.writes), 1)
+
+    def test_update_issue_can_clear_project_without_a_current_milestone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = FakeClient()
+            client.current["projectMilestone"] = None
+            applied = lane.execute_command(
+                client,
+                command(
+                    "update_issue",
+                    {"project": None, "milestone": None},
+                    key="linear:SIS-59:clear-project-only:fixture",
+                ),
+                mode="apply",
+                journal_path=Path(tmp) / "journal.json",
+            )
+            self.assertEqual(applied["before"]["project"], "Current Project")
+            self.assertIsNone(applied["before"]["milestone"])
+            self.assertIsNone(applied["after"]["project"])
+            self.assertIsNone(applied["after"]["milestone"])
+
+    def test_update_issue_move_rejects_missing_ambiguous_and_wrong_scope_names(self):
+        cases = []
+
+        missing_project = FakeClient()
+        cases.append((missing_project, "Unknown Project", "Milestone Two", "project"))
+
+        ambiguous_project = FakeClient()
+        ambiguous_project.projects.append(
+            json.loads(json.dumps(ambiguous_project.projects[1]))
+        )
+        ambiguous_project.projects[-1]["id"] = "project-two-duplicate"
+        cases.append((ambiguous_project, "Project Two", "Milestone Two", "project"))
+
+        missing_milestone = FakeClient()
+        cases.append((missing_milestone, "Project Two", "Unknown Milestone", "milestone"))
+
+        ambiguous_milestone = FakeClient()
+        ambiguous_milestone.milestones["project-two"].append(
+            {
+                "id": "milestone-two-duplicate",
+                "name": "Milestone Two",
+                "project": {"id": "project-two"},
+            }
+        )
+        cases.append((ambiguous_milestone, "Project Two", "Milestone Two", "milestone"))
+
+        wrong_team = FakeClient()
+        wrong_team.projects[1]["teams"] = {"nodes": [{"id": "other-team"}]}
+        cases.append((wrong_team, "Project Two", "Milestone Two", "SIS team"))
+
+        wrong_project = FakeClient()
+        wrong_project.milestones["project-two"][0]["project"] = {
+            "id": "project-uuid"
+        }
+        cases.append((wrong_project, "Project Two", "Milestone Two", "selected project"))
+
+        for client, project, milestone, message in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(
+                lane.ContractError, message
+            ):
+                lane.execute_command(
+                    client,
+                    command(
+                        "update_issue",
+                        {"project": project, "milestone": milestone},
+                        key=f"linear:SIS-59:negative:{message.replace(' ', '-')}",
+                    ),
+                    mode="plan",
+                )
+            self.assertEqual(client.writes, [])
+
+    def test_update_issue_move_fails_exact_read_back_on_structural_drift(self):
+        class DriftingClient(FakeClient):
+            def update_issue_fields(self, issue_id, **fields):
+                super().update_issue_fields(issue_id, **fields)
+                self.current["projectMilestone"] = {"id": "milestone-uuid"}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(
+                lane.ContractError,
+                r"^update_issue read-back mismatched fields: milestone$",
+            ):
+                lane.execute_command(
+                    DriftingClient(),
+                    command(
+                        "update_issue",
+                        {"project": "Project Two", "milestone": "Milestone Two"},
+                        key="linear:SIS-59:move-readback-drift:fixture",
+                    ),
+                    mode="apply",
+                    journal_path=Path(tmp) / "journal.json",
+                )
+
+    def test_update_issue_title_applies_and_literal_replay_is_noop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Path(tmp) / "journal.json"
+            client = FakeClient()
+            raw = command(
+                "update_issue",
+                {"title": "Ship the full Linear manager"},
+                key="linear:SIS-59:title:fixture",
+            )
+            applied = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+            self.assertEqual(applied["result"], "applied")
+            self.assertEqual(applied["before"]["title"], "Implement lane")
+            self.assertEqual(applied["after"]["title"], "Ship the full Linear manager")
+            self.assertEqual(
+                client.writes,
+                [("fields", "issue-uuid", {"title": "Ship the full Linear manager"})],
+            )
+            replay = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+            self.assertEqual(replay["result"], "no_op")
+            self.assertEqual(len(client.writes), 1)
+
+    def test_update_issue_assigns_exact_user_and_replays_noop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Path(tmp) / "journal.json"
+            client = FakeClient()
+            client.current["assignee"] = None
+            raw = command(
+                "update_issue",
+                {"assignee": "Alexey Petrov"},
+                key="linear:SIS-59:assignee:fixture",
+            )
+            applied = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+            self.assertEqual(applied["result"], "applied")
+            self.assertEqual(applied["after"]["assignee"], "Alexey Petrov")
+            self.assertEqual(
+                client.writes,
+                [("fields", "issue-uuid", {"assignee_id": "user-alexey"})],
+            )
+            replay = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+            self.assertEqual(replay["result"], "no_op")
+            self.assertEqual(len(client.writes), 1)
+
+    def test_update_issue_unassigns_and_preserves_other_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = FakeClient()
+            client.current["assignee"] = client.list_users()[0]
+            before = json.loads(json.dumps(client.current))
+            raw = command(
+                "update_issue",
+                {"assignee": None},
+                key="linear:SIS-59:unassign:fixture",
+            )
+            applied = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "journal.json",
+            )
+            self.assertIsNone(applied["after"]["assignee"])
+            self.assertEqual(
+                {key: client.current[key] for key in ("title", "description", "priority", "state")},
+                {key: before[key] for key in ("title", "description", "priority", "state")},
+            )
+            self.assertEqual(
+                client.writes,
+                [("fields", "issue-uuid", {"assignee_id": None})],
+            )
+
+    def test_update_issue_sets_exact_label_set_and_replays_noop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = FakeClient()
+            client.current["labels"] = {"nodes": []}
+            raw = command(
+                "update_issue",
+                {"labels": ["area:linear", "priority:owner"]},
+                key="linear:SIS-59:labels:fixture",
+            )
+            journal = Path(tmp) / "journal.json"
+            applied = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+            self.assertEqual(
+                applied["after"]["labels"],
+                ["area:linear", "priority:owner"],
+            )
+            self.assertEqual(
+                client.writes,
+                [
+                    (
+                        "fields",
+                        "issue-uuid",
+                        {"label_ids": ["label-linear", "label-owner"]},
+                    )
+                ],
+            )
+            replay = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+            self.assertEqual(replay["result"], "no_op")
+            self.assertEqual(len(client.writes), 1)
+
+    def test_update_issue_plans_and_applies_due_date_and_estimate_then_replays_noop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = FakeClient()
+            raw = command(
+                "update_issue",
+                {"due_date": "2026-09-30", "estimate": 8},
+                key="linear:SIS-59:due-estimate:fixture",
+            )
+            planned = lane.execute_command(client, raw, mode="plan")
+            self.assertEqual(planned["after"]["due_date"], "2026-09-30")
+            self.assertEqual(planned["after"]["estimate"], 8)
+            self.assertEqual(
+                planned["plan"],
+                [
+                    {
+                        "action": "update_issue",
+                        "fields": ["due_date", "estimate"],
+                    }
+                ],
+            )
+            self.assertEqual(client.writes, [])
+
+            journal = Path(tmp) / "journal.json"
+            applied = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+            self.assertEqual(applied["result"], "applied")
+            self.assertEqual(applied["after"]["due_date"], "2026-09-30")
+            self.assertEqual(applied["after"]["estimate"], 8)
+            self.assertEqual(
+                client.writes,
+                [
+                    (
+                        "fields",
+                        "issue-uuid",
+                        {"due_date": "2026-09-30", "estimate": 8},
+                    )
+                ],
+            )
+            replay = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+            self.assertEqual(replay["result"], "no_op")
+            self.assertEqual(replay["before"], replay["after"])
+            self.assertEqual(len(client.writes), 1)
+
+    def test_update_issue_clears_due_date_and_estimate_without_changing_unmanaged_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = FakeClient()
+            client.current["dueDate"] = "2026-09-30"
+            client.current["estimate"] = 8
+            unmanaged_before = {
+                key: json.loads(json.dumps(client.current[key]))
+                for key in (
+                    "title",
+                    "description",
+                    "state",
+                    "priority",
+                    "assignee",
+                    "labels",
+                    "parent",
+                    "project",
+                    "projectMilestone",
+                    "team",
+                )
+            }
+            raw = command(
+                "update_issue",
+                {"due_date": None, "estimate": None},
+                key="linear:SIS-59:clear-due-estimate:fixture",
+            )
+            applied = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "journal.json",
+            )
+            self.assertIsNone(applied["after"]["due_date"])
+            self.assertIsNone(applied["after"]["estimate"])
+            self.assertEqual(
+                {key: client.current[key] for key in unmanaged_before},
+                unmanaged_before,
+            )
+
+    def test_update_issue_fails_read_back_when_due_estimate_write_changes_project(self):
+        class DriftingClient(FakeClient):
+            def update_issue_fields(self, issue_id, **fields):
+                super().update_issue_fields(issue_id, **fields)
+                self.current["project"] = {"id": "different-project"}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(
+                lane.ContractError,
+                r"update_issue read-back mismatched fields: project",
+            ):
+                lane.execute_command(
+                    DriftingClient(),
+                    command(
+                        "update_issue",
+                        {"estimate": 8},
+                        key="linear:SIS-59:estimate-project-drift:fixture",
+                    ),
+                    mode="apply",
+                    journal_path=Path(tmp) / "journal.json",
+                )
+
+    def test_update_issue_rejects_boolean_estimate_read_back_as_mismatch(self):
+        class BooleanEstimateClient(FakeClient):
+            def update_issue_fields(self, issue_id, **fields):
+                super().update_issue_fields(issue_id, **fields)
+                self.current["estimate"] = True
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(
+                lane.ContractError,
+                r"update_issue read-back mismatched fields: estimate",
+            ):
+                lane.execute_command(
+                    BooleanEstimateClient(),
+                    command(
+                        "update_issue",
+                        {"estimate": 1},
+                        key="linear:SIS-59:boolean-estimate-readback:fixture",
+                    ),
+                    mode="apply",
+                    journal_path=Path(tmp) / "journal.json",
+                )
+
+    def test_inventory_sub_issues_returns_complete_recursive_tree_without_writes(self):
+        class RecursiveClient(FakeClient):
+            def __init__(self):
+                super().__init__()
+                self.current["identifier"] = "SIS-86"
+                self.current["url"] = "https://linear.app/example/issue/SIS-86"
+                child = issue("Todo")
+                child.update(
+                    {
+                        "id": "child-87",
+                        "identifier": "SIS-87",
+                        "title": "Child",
+                        "url": "https://linear.app/example/issue/SIS-87",
+                        "parent": {"id": "issue-uuid", "identifier": "SIS-86"},
+                    }
+                )
+                grandchild = issue("In Review")
+                grandchild.update(
+                    {
+                        "id": "child-88",
+                        "identifier": "SIS-88",
+                        "title": "Grandchild",
+                        "url": "https://linear.app/example/issue/SIS-88",
+                        "parent": {"id": "child-87", "identifier": "SIS-87"},
+                    }
+                )
+                self.by_parent = {"SIS-86": [child], "SIS-87": [grandchild], "SIS-88": []}
+
+            def get_issue(self, identifier):
+                if identifier == "SIS-86":
+                    return json.loads(json.dumps(self.current))
+                return None
+
+            def list_child_issues(self, parent_id):
+                return json.loads(json.dumps(self.by_parent[parent_id]))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = RecursiveClient()
+            raw = command(
+                "inventory_sub_issues",
+                {},
+                key="linear:SIS-86:inventory:fixture",
+            )
+            raw["target"] = {"type": "issue", "identifier": "SIS-86"}
+            result = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "journal.json",
+            )
+            self.assertEqual(result["result"], "read")
+            self.assertEqual(
+                [(item["identifier"], item["parent_identifier"]) for item in result["after"]],
+                [("SIS-87", "SIS-86"), ("SIS-88", "SIS-87")],
+            )
+            self.assertEqual(client.writes, [])
+
+    def test_recursive_inventory_has_no_python_recursion_depth_cap(self):
+        depth = 1100
+        root = issue("Todo")
+        root.update({"identifier": "SIS-1", "id": "root"})
+
+        class DeepClient:
+            def list_child_issues(self, parent_identifier):
+                number = int(parent_identifier.removeprefix("SIS-"))
+                if number > depth:
+                    return []
+                child_number = number + 1
+                child = issue("Todo")
+                child.update(
+                    {
+                        "id": f"child-{child_number}",
+                        "identifier": f"SIS-{child_number}",
+                        "title": f"Child {child_number}",
+                        "url": f"https://linear.app/example/issue/SIS-{child_number}",
+                        "parent": {
+                            "id": "ignored",
+                            "identifier": parent_identifier,
+                        },
+                    }
+                )
+                return [child]
+
+        inventory = lane.recursive_sub_issue_inventory(
+            DeepClient(),
+            parent=root,
+            team_id="team-uuid",
+        )
+        self.assertEqual(len(inventory), depth)
+        self.assertEqual(inventory[-1]["identifier"], f"SIS-{depth + 1}")
+
+    def test_update_sub_issues_clears_descriptions_preserves_states_and_replays_noop(self):
+        class RecursiveClient(FakeClient):
+            def __init__(self):
+                super().__init__()
+                self.current["identifier"] = "SIS-86"
+                self.current["url"] = "https://linear.app/example/issue/SIS-86"
+                child = issue("Todo")
+                child.update(
+                    {
+                        "id": "child-87",
+                        "identifier": "SIS-87",
+                        "title": "Child",
+                        "url": "https://linear.app/example/issue/SIS-87",
+                        "description": "Remove me",
+                        "parent": {"id": "issue-uuid", "identifier": "SIS-86"},
+                    }
+                )
+                grandchild = issue("In Review")
+                grandchild.update(
+                    {
+                        "id": "child-88",
+                        "identifier": "SIS-88",
+                        "title": "Grandchild",
+                        "url": "https://linear.app/example/issue/SIS-88",
+                        "description": "Remove me too",
+                        "parent": {"id": "child-87", "identifier": "SIS-87"},
+                    }
+                )
+                self.items = {"SIS-87": child, "SIS-88": grandchild}
+                self.by_parent = {"SIS-86": ["SIS-87"], "SIS-87": ["SIS-88"], "SIS-88": []}
+
+            def get_issue(self, identifier):
+                if identifier == "SIS-86":
+                    return json.loads(json.dumps(self.current))
+                item = self.items.get(identifier)
+                return json.loads(json.dumps(item)) if item else None
+
+            def list_child_issues(self, parent_id):
+                return [
+                    json.loads(json.dumps(self.items[identifier]))
+                    for identifier in self.by_parent[parent_id]
+                ]
+
+            def update_issue_fields(self, issue_id, **fields):
+                self.writes.append(("fields", issue_id, fields))
+                item = next(item for item in self.items.values() if item["id"] == issue_id)
+                if "description" in fields:
+                    item["description"] = fields["description"]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = RecursiveClient()
+            raw = command(
+                "update_sub_issues",
+                {"description": ""},
+                key="linear:SIS-86:children-description:fixture",
+            )
+            raw["target"] = {"type": "issue", "identifier": "SIS-86"}
+            journal = Path(tmp) / "journal.json"
+            applied = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+            self.assertEqual(applied["result"], "applied")
+            self.assertEqual(
+                client.writes,
+                [
+                    ("fields", "child-87", {"description": ""}),
+                    ("fields", "child-88", {"description": ""}),
+                ],
+            )
+            self.assertEqual(
+                [(item["description"], item["state"]) for item in applied["after"]],
+                [("", "Todo"), ("", "In Review")],
+            )
+            replay = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+            self.assertEqual(replay["result"], "no_op")
+            self.assertEqual(len(client.writes), 2)
     def test_remove_links_transform_handles_empty_and_missing_descriptions(self):
         self.assertEqual(lane.remove_description_links(None), "")
         self.assertEqual(lane.remove_description_links("https://example.com"), "")
@@ -2369,6 +4794,544 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(len(stored), 1)
             self.assertNotIn("In Review", journal.read_text())
             self.assertNotIn("stable-key", journal.read_text())
+
+    def test_initiative_management_fails_closed_on_ambiguity_scope_and_conflict(self):
+        class InitiativeClient:
+            def __init__(self):
+                self.initiatives = [
+                    {
+                        "id": "initiative-one",
+                        "name": "Personal operating system",
+                        "description": "conflict",
+                        "targetDate": "2026-12-31",
+                        "projects": {"nodes": [], "pageInfo": {"hasNextPage": False}},
+                    }
+                ]
+
+            def list_initiatives(self):
+                return json.loads(json.dumps(self.initiatives))
+
+        with self.assertRaisesRegex(
+            lane.ContractError, "conflicts with managed fields"
+        ):
+            lane.execute_command(InitiativeClient(), initiative_command(), mode="plan")
+
+        ambiguous = InitiativeClient()
+        ambiguous.initiatives.append(
+            {**ambiguous.initiatives[0], "id": "initiative-two"}
+        )
+        with self.assertRaisesRegex(lane.ContractError, "ambiguous.*initiative name"):
+            lane.execute_command(ambiguous, initiative_command(), mode="plan")
+
+        class LinkClient(InitiativeClient):
+            def list_teams(self):
+                return [{"id": "team-sis", "key": "SIS"}]
+
+            def list_team_projects(self, team_id):
+                return [
+                    {
+                        "id": "project-existing",
+                        "name": "Hermes Experience",
+                        "teams": {"nodes": [{"id": "other-team"}]},
+                    }
+                ]
+
+        with self.assertRaisesRegex(lane.ContractError, "SIS team scope"):
+            lane.execute_command(LinkClient(), initiative_link_command(), mode="plan")
+
+    def test_linear_client_initiative_writes_use_minimal_fixed_graphql_payloads(self):
+        client = object.__new__(lane.LinearClient)
+        calls = []
+
+        def execute(query, variables=None):
+            calls.append((query, variables))
+            if "initiativeToProjectCreate" in query:
+                return {"initiativeToProjectCreate": {"success": True}}
+            if "initiativeUpdate" in query:
+                return {"initiativeUpdate": {"success": True}}
+            return {"initiativeCreate": {"success": True}}
+
+        client.execute = execute
+        client.create_initiative(
+            initiative_id="11111111-1111-4111-8111-111111111111",
+            name="Personal operating system",
+            description="Connected systems",
+            target_date="2026-12-31",
+        )
+        client.update_initiative(
+            "initiative-existing", new_name="Personal systems", target_date=None
+        )
+        client.create_initiative_project_link(
+            link_id="22222222-2222-4222-8222-222222222222",
+            initiative_id="initiative-existing",
+            project_id="project-existing",
+        )
+        self.assertEqual(
+            calls[0][1],
+            {
+                "input": {
+                    "id": "11111111-1111-4111-8111-111111111111",
+                    "name": "Personal operating system",
+                    "description": "Connected systems",
+                    "targetDate": "2026-12-31",
+                }
+            },
+        )
+        self.assertEqual(
+            calls[1][1],
+            {
+                "id": "initiative-existing",
+                "input": {"name": "Personal systems", "targetDate": None},
+            },
+        )
+        self.assertEqual(
+            calls[2][1],
+            {
+                "input": {
+                    "id": "22222222-2222-4222-8222-222222222222",
+                    "initiativeId": "initiative-existing",
+                    "projectId": "project-existing",
+                }
+            },
+        )
+        for query, _variables in calls:
+            self.assertNotIn("Delete", query)
+            self.assertNotIn("Archive", query)
+
+    def test_initiative_project_link_rejects_initiative_identity_drift_on_readback(self):
+        class DriftingLinkClient:
+            def __init__(self):
+                self.initiative_reads = 0
+                self.projects = []
+
+            def list_teams(self):
+                return [{"id": "team-sis", "key": "SIS"}]
+
+            def list_team_projects(self, team_id):
+                return [
+                    {
+                        "id": "project-existing",
+                        "name": "Hermes Experience",
+                        "teams": {"nodes": [{"id": "team-sis"}]},
+                    }
+                ]
+
+            def list_initiatives(self):
+                self.initiative_reads += 1
+                return [
+                    {
+                        "id": (
+                            "initiative-existing"
+                            if self.initiative_reads == 1
+                            else "initiative-replaced"
+                        ),
+                        "name": "Personal operating system",
+                        "description": None,
+                        "targetDate": None,
+                    }
+                ]
+
+            def list_initiative_projects(self, initiative_id):
+                return json.loads(json.dumps(self.projects))
+
+            def create_initiative_project_link(
+                self, *, link_id, initiative_id, project_id
+            ):
+                self.projects = [{"id": project_id, "name": "Hermes Experience"}]
+
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(
+            lane.ContractError, "exact read-back"
+        ):
+            lane.execute_command(
+                DriftingLinkClient(),
+                initiative_link_command(),
+                mode="apply",
+                journal_path=Path(tmp) / "initiative-link-drift.json",
+            )
+
+    def test_exact_sis_project_link_to_initiative_applies_and_replays(self):
+        class LinkClient:
+            def __init__(self):
+                self.projects = [
+                    {
+                        "id": "project-existing",
+                        "name": "Hermes Experience",
+                        "teams": {"nodes": [{"id": "team-sis"}]},
+                    }
+                ]
+                self.initiatives = [
+                    {
+                        "id": "initiative-existing",
+                        "name": "Personal operating system",
+                        "description": None,
+                        "targetDate": None,
+                        "projects": {"nodes": [], "pageInfo": {"hasNextPage": False}},
+                    }
+                ]
+                self.writes = []
+
+            def list_teams(self):
+                return [{"id": "team-sis", "key": "SIS", "name": "Sisyphus"}]
+
+            def list_team_projects(self, team_id):
+                return json.loads(json.dumps(self.projects))
+
+            def list_initiatives(self):
+                return json.loads(json.dumps(self.initiatives))
+
+            def list_initiative_projects(self, initiative_id):
+                return json.loads(
+                    json.dumps(self.initiatives[0]["projects"]["nodes"])
+                )
+
+            def create_initiative_project_link(
+                self, *, link_id, initiative_id, project_id
+            ):
+                self.writes.append(
+                    {
+                        "link_id": link_id,
+                        "initiative_id": initiative_id,
+                        "project_id": project_id,
+                    }
+                )
+                self.initiatives[0]["projects"]["nodes"].append(
+                    json.loads(json.dumps(self.projects[0]))
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = LinkClient()
+            raw = initiative_link_command()
+            planned = lane.execute_command(client, raw, mode="plan")
+            self.assertEqual(
+                planned["plan"],
+                [
+                    {
+                        "action": "link_project_to_initiative",
+                        "project": "Hermes Experience",
+                        "initiative": "Personal operating system",
+                    }
+                ],
+            )
+            self.assertEqual(client.writes, [])
+
+            applied = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "initiative-link.json",
+            )
+            self.assertEqual(applied["result"], "applied")
+            self.assertEqual(
+                applied["after"],
+                {
+                    "initiative": "Personal operating system",
+                    "project": "Hermes Experience",
+                },
+            )
+            self.assertEqual(uuid.UUID(client.writes[0]["link_id"]).version, 4)
+
+            replay = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "initiative-link-replay.json",
+            )
+            self.assertEqual(replay["result"], "no_op")
+            self.assertEqual(len(client.writes), 1)
+
+    def test_initiative_update_exact_selector_applies_minimal_fields_and_replays(self):
+        class InitiativeClient:
+            def __init__(self):
+                self.initiatives = [
+                    {
+                        "id": "initiative-existing",
+                        "name": "Personal operating system",
+                        "description": "Old",
+                        "targetDate": "2026-01-01",
+                    }
+                ]
+                self.writes = []
+
+            def list_initiatives(self):
+                return json.loads(json.dumps(self.initiatives))
+
+            def update_initiative(self, initiative_id, **fields):
+                self.writes.append((initiative_id, fields))
+                current = self.initiatives[0]
+                current["name"] = fields.get("new_name", current["name"])
+                if "description" in fields:
+                    current["description"] = fields["description"]
+                if "target_date" in fields:
+                    current["targetDate"] = fields["target_date"]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = InitiativeClient()
+            raw = initiative_command("update_initiative")
+            planned = lane.execute_command(client, raw, mode="plan")
+            self.assertEqual(
+                planned["plan"],
+                [
+                    {
+                        "action": "update_initiative",
+                        "name": "Personal systems",
+                        "fields": ["new_name", "description", "target_date"],
+                        "target_date": None,
+                    }
+                ],
+            )
+            self.assertEqual(client.writes, [])
+
+            journal = Path(tmp) / "initiative-update.json"
+            applied = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+            self.assertEqual(
+                client.writes,
+                [
+                    (
+                        "initiative-existing",
+                        {
+                            "new_name": "Personal systems",
+                            "description": "Unified personal systems",
+                            "target_date": None,
+                        },
+                    )
+                ],
+            )
+            self.assertEqual(
+                applied["after"], {"name": "Personal systems", "target_date": None}
+            )
+            replay = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+            self.assertEqual(replay["result"], "no_op")
+            self.assertEqual(len(client.writes), 1)
+
+    def test_initiative_create_plans_applies_exact_readback_and_replays(self):
+        class InitiativeClient:
+            def __init__(self):
+                self.initiatives = []
+                self.writes = []
+
+            def list_initiatives(self):
+                return json.loads(json.dumps(self.initiatives))
+
+            def create_initiative(self, **values):
+                self.writes.append(("create_initiative", values))
+                self.initiatives.append(
+                    {
+                        "id": values["initiative_id"],
+                        "name": values["name"],
+                        "description": values.get("description"),
+                        "targetDate": values.get("target_date"),
+                    }
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = InitiativeClient()
+            raw = initiative_command()
+            planned = lane.execute_command(client, raw, mode="plan")
+            self.assertEqual(
+                planned["plan"],
+                [
+                    {
+                        "action": "create_initiative",
+                        "name": "Personal operating system",
+                        "target_date": "2026-12-31",
+                    }
+                ],
+            )
+            self.assertEqual(client.writes, [])
+
+            applied = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "initiative.json",
+            )
+            self.assertEqual(applied["result"], "applied")
+            self.assertEqual(
+                applied["after"],
+                {
+                    "name": "Personal operating system",
+                    "target_date": "2026-12-31",
+                },
+            )
+            self.assertEqual(uuid.UUID(client.writes[0][1]["initiative_id"]).version, 4)
+
+            replay = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "initiative-replay.json",
+            )
+            self.assertEqual(replay["result"], "no_op")
+            self.assertEqual(len(client.writes), 1)
+            self.assertEqual(len(client.initiatives), 1)
+
+    def test_project_management_validates_exact_bounded_shapes_and_dates(self):
+        for raw in (
+            project_command(), milestone_command(),
+            project_command("update_project"), milestone_command("update_milestone"),
+        ):
+            with self.subTest(operation=raw["operation"]):
+                self.assertIs(lane.validate_command(raw), raw)
+        invalid = project_command()
+        invalid["change"]["team_id"] = "arbitrary-team"
+        with self.assertRaises(lane.ContractError):
+            lane.validate_command(invalid)
+        for unsafe in ("<!-- linear-command:v2 reserved -->", "lin_api_" + "A" * 32):
+            invalid = project_command()
+            invalid["change"]["description"] = unsafe
+            with self.assertRaises(lane.ContractError):
+                lane.validate_command(invalid)
+        invalid = milestone_command("update_milestone")
+        invalid["change"]["target_date"] = "2026-02-30"
+        with self.assertRaisesRegex(lane.ContractError, "valid calendar date"):
+            lane.validate_command(invalid)
+
+    def test_project_and_milestone_create_apply_exact_readback_and_replay(self):
+        class ManagementClient:
+            def __init__(self):
+                self.projects, self.milestones, self.writes = [], [], []
+            def list_teams(self):
+                return [{"id": "team-sis", "key": "SIS", "name": "Sisyphus"}]
+            def list_team_projects(self, team_id):
+                return json.loads(json.dumps(self.projects))
+            def list_project_milestones(self, project_id):
+                return json.loads(json.dumps(self.milestones))
+            def create_project(self, **values):
+                self.writes.append(("create_project", values))
+                self.projects.append({"id": values["project_id"], "name": values["name"],
+                    "description": values.get("description"), "targetDate": values.get("target_date"),
+                    "teams": {"nodes": [{"id": values["team_id"]}]}})
+            def create_project_milestone(self, **values):
+                self.writes.append(("create_milestone", values))
+                self.milestones.append({"id": values["milestone_id"], "name": values["name"],
+                    "description": values.get("description"), "targetDate": values.get("target_date"),
+                    "project": {"id": values["project_id"]}})
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = ManagementClient()
+            raw = project_command()
+            planned = lane.execute_command(client, raw, mode="plan")
+            self.assertEqual(planned["plan"], [{"action": "create_project", "name": "Hermes Experience", "target_date": "2026-12-31"}])
+            self.assertEqual(planned["after"], {"name": "Hermes Experience", "target_date": "2026-12-31"})
+            applied = lane.execute_command(client, raw, mode="apply", journal_path=Path(tmp) / "p.json")
+            self.assertEqual(applied["after"], {"name": "Hermes Experience", "target_date": "2026-12-31"})
+            candidate = client.writes[0][1]["project_id"]
+            self.assertEqual(uuid.UUID(candidate).version, 4)
+            second_client = ManagementClient()
+            lane.execute_command(second_client, raw, mode="apply", journal_path=Path(tmp) / "p2.json")
+            self.assertEqual(second_client.writes[0][1]["project_id"], candidate)
+            self.assertEqual(lane.execute_command(client, raw, mode="apply", journal_path=Path(tmp) / "pr.json")["result"], "no_op")
+
+            raw = milestone_command()
+            applied = lane.execute_command(client, raw, mode="apply", journal_path=Path(tmp) / "m.json")
+            self.assertEqual(applied["after"], {"project": "Hermes Experience", "name": "Calendar integration", "target_date": "2026-10-01"})
+            self.assertEqual(uuid.UUID(client.writes[-1][1]["milestone_id"]).version, 4)
+            self.assertEqual(lane.execute_command(client, raw, mode="apply", journal_path=Path(tmp) / "mr.json")["result"], "no_op")
+            self.assertEqual(len(client.writes), 2)
+
+    def test_project_management_accepts_sis_project_shared_with_another_team(self):
+        class SharedProjectClient:
+            def list_teams(self):
+                return [{"id": "team-sis", "key": "SIS", "name": "Sisyphus"}]
+
+            def list_team_projects(self, team_id):
+                return [
+                    {
+                        "id": "shared-project",
+                        "name": "Hermes Experience",
+                        "description": "User-facing integrations",
+                        "targetDate": "2026-12-31",
+                        "teams": {
+                            "nodes": [{"id": "team-sis"}, {"id": "other-team"}]
+                        },
+                    }
+                ]
+
+        result = lane.execute_command(
+            SharedProjectClient(),
+            project_command(),
+            mode="plan",
+        )
+        self.assertEqual(result["result"], "no_op")
+        self.assertEqual(result["plan"], [])
+
+    def test_exact_project_and_milestone_edits_replay_without_duplicate_writes(self):
+        class EditClient:
+            def __init__(self):
+                self.projects = [{"id": "project-existing", "name": "Hermes Experience", "description": "old", "targetDate": "2026-01-01", "teams": {"nodes": [{"id": "team-sis"}]}}]
+                self.milestones = [{"id": "milestone-existing", "name": "Calendar integration", "description": "old", "targetDate": "2026-02-01", "project": {"id": "project-existing"}}]
+                self.writes = []
+            def list_teams(self):
+                return [{"id": "team-sis", "key": "SIS", "name": "Sisyphus"}]
+            def list_team_projects(self, team_id):
+                return json.loads(json.dumps(self.projects))
+            def list_project_milestones(self, project_id):
+                return json.loads(json.dumps(self.milestones))
+            def update_project(self, project_id, **fields):
+                self.writes.append(("update_project", project_id, fields))
+                item = self.projects[0]
+                item["name"] = fields.get("new_name", item["name"])
+                if "description" in fields:
+                    item["description"] = fields["description"]
+                if "target_date" in fields:
+                    item["targetDate"] = fields["target_date"]
+            def update_project_milestone(self, milestone_id, **fields):
+                self.writes.append(("update_milestone", milestone_id, fields))
+                item = self.milestones[0]
+                item["name"] = fields.get("new_name", item["name"])
+                if "description" in fields:
+                    item["description"] = fields["description"]
+                if "target_date" in fields:
+                    item["targetDate"] = fields["target_date"]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = EditClient()
+            raw = project_command("update_project")
+            journal = Path(tmp) / "up.json"
+            applied = lane.execute_command(client, raw, mode="apply", journal_path=journal)
+            self.assertEqual(applied["after"], {"name": "Hermes Personal Experience", "target_date": None})
+            self.assertEqual(lane.execute_command(client, raw, mode="apply", journal_path=journal)["result"], "no_op")
+            self.assertEqual(len(client.writes), 1)
+            client = EditClient()
+            raw = milestone_command("update_milestone")
+            journal = Path(tmp) / "um.json"
+            applied = lane.execute_command(client, raw, mode="apply", journal_path=journal)
+            self.assertEqual(applied["after"], {"project": "Hermes Experience", "name": "Calendar and reminders", "target_date": None})
+            self.assertEqual(lane.execute_command(client, raw, mode="apply", journal_path=journal)["result"], "no_op")
+            self.assertEqual(len(client.writes), 1)
+
+    def test_project_management_fails_closed_on_exact_name_ambiguity(self):
+        class AmbiguousClient:
+            def list_teams(self): return [{"id": "team-sis", "key": "SIS", "name": "Sisyphus"}]
+            def list_team_projects(self, team_id):
+                item = {"id": "one", "name": "Hermes Experience", "teams": {"nodes": [{"id": "team-sis"}]}}
+                return [item, {**item, "id": "two"}]
+        with self.assertRaisesRegex(lane.ContractError, "ambiguous.*project name"):
+            lane.execute_command(AmbiguousClient(), project_command(), mode="plan")
+
+        class MissingClient(AmbiguousClient):
+            def list_team_projects(self, team_id):
+                return []
+        with self.assertRaisesRegex(lane.ContractError, "exact Linear project not found"):
+            lane.execute_command(MissingClient(), project_command("update_project"), mode="plan")
+
+    def test_linear_client_project_updates_use_minimal_fixed_graphql_payloads(self):
+        client = object.__new__(lane.LinearClient)
+        calls = []
+        def execute(query, variables=None):
+            calls.append((query, variables))
+            return {"projectUpdate": {"success": True}} if "projectUpdate" in query else {"projectMilestoneUpdate": {"success": True}}
+        client.execute = execute
+        client.update_project("project-id", new_name="Renamed", description="", target_date=None)
+        client.update_project_milestone("milestone-id", new_name="M", target_date="2026-09-30")
+        self.assertEqual(calls[0][1], {"id": "project-id", "input": {"name": "Renamed", "description": "", "targetDate": None}})
+        self.assertEqual(calls[1][1], {"id": "milestone-id", "input": {"name": "M", "targetDate": "2026-09-30"}})
+        with self.assertRaises(lane.ContractError):
+            client.create_project(project_id="id", team_id="team", name="name", leadId="forbidden")
 
 
 if __name__ == "__main__":

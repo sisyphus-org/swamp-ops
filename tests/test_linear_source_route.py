@@ -23,6 +23,21 @@ UUID_VALUES = [
 ]
 
 
+def approval_reference(**overrides):
+    value = {
+        "workflow": "linear-destructive-owner-approval-attest",
+        "model": "linear-destructive-owner-approval-attest",
+        "run_id": "55555555-5555-4555-8555-555555555555",
+        "artifact_version": 7,
+        "checksum": "a" * 64,
+        "intent_hash": "b" * 64,
+        "before_state_hash": "c" * 64,
+        "expires_at": "2026-08-31T23:00:00Z",
+    }
+    value.update(overrides)
+    return value
+
+
 def uuid_factory():
     values = iter(UUID_VALUES)
     return lambda: next(values)
@@ -80,6 +95,193 @@ class FakeBoard:
 
 
 class ParseTests(unittest.TestCase):
+    def test_search_and_inventory_requests_become_workspace_read_commands(self):
+        requests = (
+            (
+                {
+                    "operation": "search_linear",
+                    "query": "Straße",
+                    "entity_types": ["issues", "projects"],
+                    "include_archived": False,
+                },
+                {
+                    "query": "Straße",
+                    "entity_types": ["issues", "projects"],
+                    "include_archived": False,
+                },
+            ),
+            (
+                {
+                    "operation": "inventory_linear",
+                    "entity_types": ["milestones", "initiatives"],
+                    "include_archived": True,
+                },
+                {
+                    "entity_types": ["milestones", "initiatives"],
+                    "include_archived": True,
+                },
+            ),
+        )
+        for request, expected_change in requests:
+            with self.subTest(operation=request["operation"]):
+                parsed = route.parse_linear_request(
+                    request,
+                    source_profile="default",
+                    uuid_factory=uuid_factory(),
+                )
+                self.assertEqual(parsed.command["operation"], request["operation"])
+                self.assertEqual(
+                    parsed.command["target"],
+                    {"type": "workspace", "identifier": "current"},
+                )
+                self.assertEqual(parsed.command["change"], expected_change)
+
+    def test_workspace_reads_require_exact_nonempty_bounded_inputs(self):
+        invalid = (
+            {"operation": "inventory_linear", "entity_types": [], "include_archived": False},
+            {"operation": "inventory_linear", "entity_types": ["issues", "issues"], "include_archived": False},
+            {"operation": "inventory_linear", "entity_types": [["issues"]], "include_archived": False},
+            {"operation": "inventory_linear", "entity_types": [None], "include_archived": False},
+            {"operation": "inventory_linear", "entity_types": ["users"], "include_archived": False},
+            {"operation": "inventory_linear", "entity_types": ["issues"], "include_archived": 1},
+            {"operation": "search_linear", "query": "", "entity_types": ["issues"], "include_archived": False},
+            {"operation": "search_linear", "query": "   ", "entity_types": ["issues"], "include_archived": False},
+            {"operation": "search_linear", "query": "x", "entity_types": ["issues"], "include_archived": False, "graphql": "query"},
+        )
+        for request in invalid:
+            with self.subTest(request=request), self.assertRaises(route.RouteError):
+                route.parse_linear_request(
+                    request,
+                    source_profile="default",
+                    uuid_factory=uuid_factory(),
+                )
+
+    def test_structured_issue_relation_request_becomes_bounded_command(self):
+        parsed = route.parse_linear_request(
+            {
+                "operation": "create_issue_relation",
+                "identifier": "SIS-77",
+                "related_identifier": "SIS-94",
+                "relation_type": "blocked_by",
+            },
+            source_profile="default",
+            uuid_factory=uuid_factory(),
+        )
+
+        self.assertEqual(parsed.command["operation"], "create_issue_relation")
+        self.assertEqual(
+            parsed.command["target"], {"type": "issue", "identifier": "SIS-77"}
+        )
+        self.assertEqual(
+            parsed.command["change"],
+            {"related_identifier": "SIS-94", "relation_type": "blocked_by"},
+        )
+
+    def test_owner_approved_relation_removal_and_replacement_become_exact_commands(self):
+        reference = approval_reference()
+        cases = (
+            (
+                {
+                    "operation": "remove_issue_relation",
+                    "identifier": "SIS-77",
+                    "related_identifier": "SIS-94",
+                    "relation_type": "blocked_by",
+                    "approval": reference,
+                },
+                {
+                    "related_identifier": "SIS-94",
+                    "relation_type": "blocked_by",
+                },
+            ),
+            (
+                {
+                    "operation": "replace_issue_relation",
+                    "identifier": "SIS-77",
+                    "old_related_identifier": "SIS-94",
+                    "old_relation_type": "blocked_by",
+                    "new_related_identifier": "SIS-95",
+                    "new_relation_type": "related",
+                    "approval": reference,
+                },
+                {
+                    "old_related_identifier": "SIS-94",
+                    "old_relation_type": "blocked_by",
+                    "new_related_identifier": "SIS-95",
+                    "new_relation_type": "related",
+                },
+            ),
+        )
+        for request, expected_change in cases:
+            with self.subTest(operation=request["operation"]):
+                parsed = route.parse_linear_request(
+                    request,
+                    source_profile="default",
+                    uuid_factory=uuid_factory(),
+                )
+                self.assertEqual(parsed.command["operation"], request["operation"])
+                self.assertEqual(
+                    parsed.command["target"],
+                    {"type": "issue", "identifier": "SIS-77"},
+                )
+                self.assertEqual(parsed.command["change"], expected_change)
+                self.assertEqual(
+                    parsed.command["policy"],
+                    {"mode": "owner_approved", "approval": reference},
+                )
+
+    def test_relation_removal_and_replacement_fail_closed_without_exact_approval(self):
+        cases = (
+            {
+                "operation": "remove_issue_relation",
+                "identifier": "SIS-77",
+                "related_identifier": "SIS-94",
+                "relation_type": "blocks",
+            },
+            {
+                "operation": "replace_issue_relation",
+                "identifier": "SIS-77",
+                "old_related_identifier": "SIS-94",
+                "old_relation_type": "blocks",
+                "new_related_identifier": "SIS-95",
+                "new_relation_type": "related",
+            },
+        )
+        for request in cases:
+            with self.subTest(operation=request["operation"]), self.assertRaisesRegex(
+                route.RouteError, "owner approval"
+            ):
+                route.parse_linear_request(
+                    request,
+                    source_profile="default",
+                    uuid_factory=uuid_factory(),
+                )
+
+    def test_issue_relation_source_shape_rejects_self_internal_ids_and_unbounded_types(self):
+        invalid = (
+            {
+                "identifier": "SIS-77",
+                "related_identifier": "SIS-77",
+                "relation_type": "blocks",
+            },
+            {
+                "identifier": "SIS-77",
+                "related_identifier": {"id": "internal"},
+                "relation_type": "blocks",
+            },
+            {
+                "identifier": "SIS-77",
+                "related_identifier": "SIS-94",
+                "relation_type": "duplicate",
+            },
+        )
+        for values in invalid:
+            with self.subTest(values=values), self.assertRaises(route.RouteError):
+                route.parse_linear_request(
+                    {"operation": "create_issue_relation", **values},
+                    source_profile="default",
+                    uuid_factory=uuid_factory(),
+                )
+
     def test_structured_standalone_and_issue_tree_requests_become_bounded_commands(self):
         standalone = {
             "operation": "create_standalone_issue",
@@ -324,6 +526,287 @@ class ParseTests(unittest.TestCase):
             {"description": "Школа на Яр валу.", "priority": "Medium"},
         )
 
+    def test_structured_issue_update_preserves_exact_title(self):
+        parsed = route.parse_linear_request(
+            {
+                "operation": "update_issue",
+                "identifier": "SIS-94",
+                "title": "Записаться на урок фортепиано",
+            },
+            source_profile="default",
+            uuid_factory=uuid_factory(),
+        )
+        self.assertEqual(
+            parsed.command["change"],
+            {"title": "Записаться на урок фортепиано"},
+        )
+
+    def test_structured_issue_update_preserves_assignee_name_and_null_unassign(self):
+        assigned = route.parse_linear_request(
+            {
+                "operation": "update_issue",
+                "identifier": "SIS-94",
+                "assignee": "Alexey Petrov",
+            },
+            source_profile="default",
+            uuid_factory=uuid_factory(),
+        )
+        unassigned = route.parse_linear_request(
+            {
+                "operation": "update_issue",
+                "identifier": "SIS-94",
+                "assignee": None,
+            },
+            source_profile="default",
+            uuid_factory=uuid_factory(),
+        )
+        self.assertEqual(assigned.command["change"], {"assignee": "Alexey Petrov"})
+        self.assertEqual(unassigned.command["change"], {"assignee": None})
+
+    def test_structured_issue_update_preserves_exact_label_set(self):
+        parsed = route.parse_linear_request(
+            {
+                "operation": "update_issue",
+                "identifier": "SIS-94",
+                "labels": ["area:linear", "priority:owner"],
+            },
+            source_profile="default",
+            uuid_factory=uuid_factory(),
+        )
+        self.assertEqual(
+            parsed.command["change"],
+            {"labels": ["area:linear", "priority:owner"]},
+        )
+
+    def test_structured_issue_update_preserves_due_date_and_estimate_values(self):
+        parsed = route.parse_linear_request(
+            {
+                "operation": "update_issue",
+                "identifier": "SIS-94",
+                "due_date": "2026-09-30",
+                "estimate": 8,
+            },
+            source_profile="default",
+            uuid_factory=uuid_factory(),
+        )
+        self.assertEqual(
+            parsed.command["change"],
+            {"due_date": "2026-09-30", "estimate": 8},
+        )
+
+    def test_structured_issue_update_preserves_null_due_date_and_estimate_clears(self):
+        parsed = route.parse_linear_request(
+            {
+                "operation": "update_issue",
+                "identifier": "SIS-94",
+                "due_date": None,
+                "estimate": None,
+            },
+            source_profile="default",
+            uuid_factory=uuid_factory(),
+        )
+        self.assertEqual(
+            parsed.command["change"],
+            {"due_date": None, "estimate": None},
+        )
+
+    def test_structured_issue_update_preserves_exact_parent_identifier_and_clear_request(self):
+        attached = route.parse_linear_request(
+            {
+                "operation": "update_issue",
+                "identifier": "SIS-94",
+                "parent_identifier": "SIS-68",
+            },
+            source_profile="default",
+            uuid_factory=uuid_factory(),
+        )
+        clear = route.parse_linear_request(
+            {
+                "operation": "update_issue",
+                "identifier": "SIS-94",
+                "parent_identifier": None,
+            },
+            source_profile="default",
+            uuid_factory=uuid_factory(),
+        )
+        self.assertEqual(attached.command["change"], {"parent_identifier": "SIS-68"})
+        self.assertEqual(clear.command["change"], {"parent_identifier": None})
+
+    def test_parent_only_owner_approval_emits_exact_policy_and_changes_replay_identity(self):
+        standard = route.parse_linear_request(
+            {"operation": "update_issue", "identifier": "SIS-94", "parent_identifier": None},
+            source_profile="default",
+            uuid_factory=uuid_factory(),
+        ).command
+        reference = approval_reference()
+        request = {
+            "operation": "update_issue",
+            "identifier": "SIS-94",
+            "parent_identifier": None,
+            "approval": reference,
+        }
+        approved = route.parse_linear_request(
+            request, source_profile="default", uuid_factory=uuid_factory()
+        ).command
+        replay = route.parse_linear_request(
+            request, source_profile="default", uuid_factory=uuid_factory()
+        ).command
+        self.assertEqual(
+            approved["policy"],
+            {"mode": "owner_approved", "approval": reference},
+        )
+        self.assertEqual(approved["change"], {"parent_identifier": None})
+        self.assertNotEqual(standard["idempotency_key"], approved["idempotency_key"])
+        self.assertEqual(approved["idempotency_key"], replay["idempotency_key"])
+
+    def test_source_rejects_forged_or_unbounded_approval_surfaces(self):
+        base = {
+            "operation": "update_issue",
+            "identifier": "SIS-94",
+            "parent_identifier": "SIS-68",
+        }
+        cases = (
+            {**base, "approval": True},
+            {**base, "approved": True},
+            {**base, "policy": {"mode": "owner_approved"}},
+            {**base, "approval": {**approval_reference(), "path": "/tmp/a"}},
+            {**base, "approval": {**approval_reference(), "manifest": "raw"}},
+            {**base, "approval": {**approval_reference(), "shell": "env"}},
+            {**base, "approval": approval_reference(workflow="attacker")},
+            {**base, "description": "mixed", "approval": approval_reference()},
+        )
+        for value in cases:
+            with self.subTest(value=value), self.assertRaises(route.RouteError):
+                route.parse_linear_request(
+                    value, source_profile="default", uuid_factory=uuid_factory()
+                )
+
+    def test_structured_issue_update_rejects_malformed_parent_identifier(self):
+        for parent_identifier in ("sis-68", "SIS-0", "SIS-68 ", 68, {"id": "internal"}):
+            with self.subTest(parent_identifier=parent_identifier), self.assertRaisesRegex(
+                route.RouteError, "parent_identifier"
+            ):
+                route.parse_linear_request(
+                    {
+                        "operation": "update_issue",
+                        "identifier": "SIS-94",
+                        "parent_identifier": parent_identifier,
+                    },
+                    source_profile="default",
+                    uuid_factory=uuid_factory(),
+                )
+
+    def test_structured_issue_update_preserves_exact_project_and_milestone_names(self):
+        parsed = route.parse_linear_request(
+            {
+                "operation": "update_issue",
+                "identifier": "SIS-94",
+                "project": "Hermes Experience",
+                "milestone": "Personal productivity integrations",
+            },
+            source_profile="default",
+            uuid_factory=uuid_factory(),
+        )
+        self.assertEqual(
+            parsed.command["change"],
+            {
+                "project": "Hermes Experience",
+                "milestone": "Personal productivity integrations",
+            },
+        )
+
+    def test_structured_issue_update_preserves_null_project_and_milestone_clear(self):
+        parsed = route.parse_linear_request(
+            {
+                "operation": "update_issue",
+                "identifier": "SIS-94",
+                "project": None,
+                "milestone": None,
+            },
+            source_profile="default",
+            uuid_factory=uuid_factory(),
+        )
+        self.assertEqual(
+            parsed.command["change"],
+            {"project": None, "milestone": None},
+        )
+
+    def test_structured_issue_update_requires_a_complete_project_milestone_pair(self):
+        invalid = (
+            {"project": "Hermes Experience"},
+            {"milestone": "Personal productivity integrations"},
+            {"project": None, "milestone": "Personal productivity integrations"},
+            {"project": "Hermes Experience", "milestone": None},
+            {"project": "", "milestone": "Personal productivity integrations"},
+            {"project": "Hermes Experience", "milestone": ""},
+            {"project": {"id": "forbidden"}, "milestone": "Exact Name"},
+        )
+        for change in invalid:
+            with self.subTest(change=change), self.assertRaises(route.RouteError):
+                route.parse_linear_request(
+                    {
+                        "operation": "update_issue",
+                        "identifier": "SIS-94",
+                        **change,
+                    },
+                    source_profile="default",
+                    uuid_factory=uuid_factory(),
+                )
+
+    def test_structured_issue_update_rejects_invalid_due_dates_and_estimates(self):
+        invalid = (
+            {"due_date": "2026-02-30"},
+            {"due_date": "2026-9-01"},
+            {"due_date": 20260901},
+            {"estimate": -1},
+            {"estimate": 1.5},
+            {"estimate": True},
+        )
+        for change in invalid:
+            with self.subTest(change=change):
+                with self.assertRaises(route.RouteError):
+                    route.parse_linear_request(
+                        {
+                            "operation": "update_issue",
+                            "identifier": "SIS-94",
+                            **change,
+                        },
+                        source_profile="default",
+                        uuid_factory=uuid_factory(),
+                    )
+
+    def test_sub_issue_inventory_request_targets_exact_parent(self):
+        parsed = route.parse_linear_request(
+            {
+                "operation": "inventory_sub_issues",
+                "identifier": "SIS-86",
+            },
+            source_profile="default",
+            uuid_factory=uuid_factory(),
+        )
+        self.assertEqual(parsed.command["operation"], "inventory_sub_issues")
+        self.assertEqual(
+            parsed.command["target"],
+            {"type": "issue", "identifier": "SIS-86"},
+        )
+        self.assertEqual(parsed.command["change"], {})
+
+    def test_sub_issue_update_request_preserves_exact_description(self):
+        parsed = route.parse_linear_request(
+            {
+                "operation": "update_sub_issues",
+                "identifier": "SIS-86",
+                "description": "",
+            },
+            source_profile="default",
+            uuid_factory=uuid_factory(),
+        )
+        self.assertEqual(parsed.command["operation"], "update_sub_issues")
+        self.assertEqual(
+            parsed.command["target"],
+            {"type": "issue", "identifier": "SIS-86"},
+        )
+        self.assertEqual(parsed.command["change"], {"description": ""})
     def test_issue_number_targets_the_single_sis_team_without_model_normalization(self):
         parsed = route.parse_linear_request(
             {
@@ -345,6 +828,30 @@ class ParseTests(unittest.TestCase):
         )
 
     def test_issue_number_and_exact_identifier_are_mutually_exclusive(self):
+        parsed = route.parse_linear_request(
+            {
+                "operation": "update_issue",
+                "identifier": "SIS-86",
+                "parent_identifier": None,
+                "approval": approval_reference(),
+            },
+            source_profile="default",
+            uuid_factory=uuid_factory(),
+        )
+        self.assertIn("parent_identifier", parsed.command["change"])
+        self.assertIsNone(parsed.command["change"]["parent_identifier"])
+
+        with self.assertRaisesRegex(route.RouteError, "description_transform"):
+            route.parse_linear_request(
+                {
+                    "operation": "update_issue",
+                    "identifier": "SIS-86",
+                    "description_transform": ["remove_links"],
+                },
+                source_profile="default",
+                uuid_factory=uuid_factory(),
+            )
+
         with self.assertRaisesRegex(route.RouteError, "exactly one issue target"):
             route.parse_linear_request(
                 {
@@ -393,6 +900,120 @@ class ParseTests(unittest.TestCase):
             with self.subTest(text=text):
                 with self.assertRaises(route.RouteError):
                     route.parse_linear_request(text, uuid_factory=uuid_factory())
+
+    def test_initiative_update_preserves_exact_managed_fields_and_null_date(self):
+        parsed = route.parse_linear_request(
+            {
+                "operation": "update_initiative",
+                "name": "Personal operating system",
+                "new_name": "Personal systems",
+                "description": "Unified personal systems",
+                "target_date": None,
+            },
+            source_profile="default",
+            uuid_factory=uuid_factory(),
+        )
+        self.assertEqual(
+            parsed.command["target"],
+            {"type": "workspace", "identifier": "current"},
+        )
+        self.assertEqual(
+            parsed.command["change"],
+            {
+                "name": "Personal operating system",
+                "new_name": "Personal systems",
+                "description": "Unified personal systems",
+                "target_date": None,
+            },
+        )
+
+    def test_destructive_or_broad_initiative_operations_remain_unexposed(self):
+        for operation in (
+            "unlink_project_from_initiative",
+            "archive_initiative",
+            "delete_initiative",
+            "reparent_initiative",
+            "search_initiatives",
+            "bulk_update_initiatives",
+        ):
+            with self.subTest(operation=operation), self.assertRaisesRegex(
+                route.RouteError, "not allowed"
+            ):
+                route.parse_linear_request(
+                    {
+                        "operation": operation,
+                        "name": "Personal operating system",
+                    },
+                    source_profile="default",
+                    uuid_factory=uuid_factory(),
+                )
+
+    def test_initiative_link_request_uses_exact_project_and_initiative_names(self):
+        parsed = route.parse_linear_request(
+            {
+                "operation": "link_project_to_initiative",
+                "project": "Hermes Experience",
+                "initiative": "Personal operating system",
+            },
+            source_profile="default",
+            uuid_factory=uuid_factory(),
+        )
+
+        self.assertEqual(parsed.command["operation"], "link_project_to_initiative")
+        self.assertEqual(
+            parsed.command["target"], {"type": "team", "identifier": "SIS"}
+        )
+        self.assertEqual(
+            parsed.command["change"],
+            {
+                "project": "Hermes Experience",
+                "initiative": "Personal operating system",
+            },
+        )
+
+    def test_initiative_create_request_preserves_only_exact_bounded_fields(self):
+        request = {
+            "operation": "create_initiative",
+            "name": "Personal operating system",
+            "description": "Connected personal systems",
+            "target_date": "2026-12-31",
+        }
+
+        parsed = route.parse_linear_request(
+            request, source_profile="default", uuid_factory=uuid_factory()
+        )
+
+        self.assertEqual(parsed.command["operation"], "create_initiative")
+        self.assertEqual(
+            parsed.command["target"], {"type": "workspace", "identifier": "current"}
+        )
+        self.assertEqual(
+            parsed.command["change"],
+            {key: value for key, value in request.items() if key != "operation"},
+        )
+        self.assertFalse(
+            set(parsed.command["change"])
+            & {"id", "owner", "status", "labels", "parent", "team"}
+        )
+
+    def test_project_management_requests_preserve_only_exact_bounded_fields(self):
+        requests = (
+            {"operation": "create_project", "name": "Hermes Experience", "description": "Integrations", "target_date": "2026-12-31"},
+            {"operation": "create_milestone", "project": "Hermes Experience", "name": "Calendar", "target_date": "2026-10-01"},
+            {"operation": "update_project", "name": "Hermes Experience", "new_name": "Hermes Personal Experience", "target_date": None},
+            {"operation": "update_milestone", "project": "Hermes Experience", "name": "Calendar", "description": "Calendar milestone"},
+        )
+        for request in requests:
+            with self.subTest(operation=request["operation"]):
+                parsed = route.parse_linear_request(request, source_profile="default", uuid_factory=uuid_factory())
+                self.assertEqual(parsed.command["operation"], request["operation"])
+                self.assertEqual(parsed.command["target"], {"type": "team", "identifier": "SIS"})
+                self.assertEqual(parsed.command["change"], {key: value for key, value in request.items() if key != "operation"})
+                self.assertFalse(set(parsed.command["change"]) & {"id", "team", "team_id"})
+
+        invalid = dict(requests[0], target_date="2026-02-30")
+        with self.assertRaisesRegex(route.RouteError, "valid calendar date"):
+            route.parse_linear_request(invalid, uuid_factory=uuid_factory())
 
 
 class SourceContextTests(unittest.TestCase):
@@ -498,6 +1119,183 @@ class DispatchTests(unittest.TestCase):
                 uuid_factory=uuid_factory(),
             )
         self.assertEqual([call[0] for call in board.calls], ["get_or_create", "route", "audit"])
+
+    def test_completed_initiative_replay_binds_exact_names(self):
+        cases = (
+            (
+                {
+                    "operation": "create_initiative",
+                    "name": "Personal operating system",
+                    "target_date": "2026-12-31",
+                },
+                {"type": "initiative", "identifier": "Personal operating system"},
+                {"name": "Personal operating system", "target_date": "2026-12-31"},
+            ),
+            (
+                {
+                    "operation": "link_project_to_initiative",
+                    "project": "Hermes Experience",
+                    "initiative": "Personal operating system",
+                },
+                {
+                    "type": "initiative_project",
+                    "initiative": "Personal operating system",
+                    "project": "Hermes Experience",
+                },
+                {
+                    "initiative": "Personal operating system",
+                    "project": "Hermes Experience",
+                },
+            ),
+        )
+        for request, target, after in cases:
+            with self.subTest(operation=request["operation"]):
+                persisted = route.parse_linear_request(
+                    request,
+                    source_profile=source_context().profile,
+                    uuid_factory=uuid_factory(),
+                ).command
+                result = {
+                    "schema_version": "linear-result.v2",
+                    "command_id": persisted["command_id"],
+                    "correlation_id": persisted["correlation_id"],
+                    "idempotency_key": persisted["idempotency_key"],
+                    "source_profile": persisted["source_profile"],
+                    "operation": persisted["operation"],
+                    "mode": "apply",
+                    "target": target,
+                    "result": "applied",
+                    "before": None,
+                    "after": after,
+                    "plan": [{"action": persisted["operation"]}],
+                    "no_op": False,
+                    "verified": True,
+                }
+                board = FakeBoard(
+                    existing={
+                        "id": "t_1234abcd",
+                        "status": "done",
+                        "session_id": source_context().session_id,
+                        "body": route.build_task_body(persisted),
+                        "result": json.dumps(result),
+                    }
+                )
+
+                replay = route.route_request(
+                    request,
+                    source=source_context(),
+                    board=board,
+                    uuid_factory=uuid_factory(),
+                )
+                self.assertEqual(replay["status"], "verified_no_op")
+                self.assertEqual([call[0] for call in board.calls], ["get_or_create"])
+
+    def test_completed_workspace_read_literal_replay_uses_same_task_and_result(self):
+        requests_and_targets = (
+            (
+                {"operation": "create_issue_relation", "identifier": "SIS-77", "related_identifier": "SIS-94", "relation_type": "related"},
+                {"type": "issue_relation", "identifier": "SIS-77", "related_identifier": "SIS-94", "relation_type": "related"},
+            ),
+            (
+                {"operation": "remove_issue_relation", "identifier": "SIS-77", "related_identifier": "SIS-94", "relation_type": "related", "approval": approval_reference()},
+                {"type": "issue_relation", "identifier": "SIS-77", "related_identifier": "SIS-94", "relation_type": "related"},
+            ),
+            (
+                {"operation": "replace_issue_relation", "identifier": "SIS-77", "old_related_identifier": "SIS-94", "old_relation_type": "related", "new_related_identifier": "SIS-95", "new_relation_type": "blocks", "approval": approval_reference()},
+                {"type": "issue_relation_replacement", "old": {"identifier": "SIS-77", "related_identifier": "SIS-94", "relation_type": "related"}, "new": {"identifier": "SIS-77", "related_identifier": "SIS-95", "relation_type": "blocks"}},
+            ),
+        )
+        for relation_request, relation_target in requests_and_targets:
+            with self.subTest(operation=relation_request["operation"]):
+                persisted = route.parse_linear_request(
+                    relation_request,
+                    source_profile=source_context().profile,
+                    uuid_factory=uuid_factory(),
+                ).command
+                linear_result = {
+                    "schema_version": "linear-result.v2",
+                    "command_id": persisted["command_id"],
+                    "correlation_id": persisted["correlation_id"],
+                    "idempotency_key": persisted["idempotency_key"],
+                    "source_profile": persisted["source_profile"],
+                    "operation": persisted["operation"],
+                    "mode": "apply",
+                    "target": relation_target,
+                    "result": "applied",
+                    "before": {},
+                    "after": relation_target,
+                    "plan": [{"action": persisted["operation"]}],
+                    "no_op": False,
+                    "verified": True,
+                }
+                board = FakeBoard(existing={"id": "t_1234abcd", "status": "done", "session_id": source_context().session_id, "body": route.build_task_body(persisted), "result": json.dumps(linear_result)})
+                replay = route.route_request(
+                    relation_request,
+                    source=source_context(),
+                    board=board,
+                    uuid_factory=uuid_factory(),
+                )
+                self.assertEqual(replay["status"], "verified_no_op")
+
+        request = {
+            "operation": "inventory_linear",
+            "entity_types": ["issues"],
+            "include_archived": False,
+        }
+        persisted = route.parse_linear_request(
+            request,
+            source_profile=source_context().profile,
+            uuid_factory=uuid_factory(),
+        ).command
+        facts = {
+            "entity_types": ["issues"],
+            "include_archived": False,
+            "counts": {"issues": 0},
+            "entities": {"issues": []},
+        }
+        linear_result = {
+            "schema_version": "linear-result.v2",
+            "command_id": persisted["command_id"],
+            "correlation_id": persisted["correlation_id"],
+            "idempotency_key": persisted["idempotency_key"],
+            "source_profile": persisted["source_profile"],
+            "operation": persisted["operation"],
+            "mode": "apply",
+            "target": {"type": "workspace", "identifier": "current"},
+            "result": "read",
+            "before": facts,
+            "after": facts,
+            "plan": [],
+            "no_op": True,
+            "verified": True,
+        }
+        board = FakeBoard(
+            existing={
+                "id": "t_1234abcd",
+                "status": "done",
+                "session_id": source_context().session_id,
+                "body": route.build_task_body(persisted),
+                "result": json.dumps(linear_result),
+            }
+        )
+        first = route.route_request(
+            request,
+            source=source_context(),
+            board=board,
+            uuid_factory=uuid_factory(),
+        )
+        second = route.route_request(
+            request,
+            source=source_context(),
+            board=board,
+            uuid_factory=uuid_factory(),
+        )
+        self.assertEqual(first["task_id"], second["task_id"])
+        self.assertEqual(first["linear_result"], second["linear_result"])
+        self.assertEqual(first["status"], "verified_no_op")
+        self.assertEqual(
+            [call[0] for call in board.calls], ["get_or_create", "get_or_create"]
+        )
 
     def test_completed_v2_replay_is_verified_noop_without_new_task_or_route_write(self):
         request = "Добавь к SIS-61 комментарий: SIS-61 E2E proof A."

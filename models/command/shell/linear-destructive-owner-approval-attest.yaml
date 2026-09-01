@@ -1,0 +1,11 @@
+type: command/shell
+typeVersion: 2026.02.09.1
+id: e32160cc-78e5-4b39-a9e4-932e94989f78
+name: linear-destructive-owner-approval-attest
+version: 1
+tags:
+  domain: linear
+  safety: owner-approved-attestation-only
+  owner: default-broker
+globalArguments: {}
+methods: {}

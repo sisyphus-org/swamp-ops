@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from pathlib import Path
+from datetime import date
 from typing import Any, Callable
 
 from .audit import audit_route as bundled_audit_route
@@ -27,18 +27,57 @@ PUBLIC_INTERNAL_MARKER = re.compile(
     r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-"
     r"[0-9a-f]{12}\b)"
 )
-PUBLIC_STATES = {"Backlog", "Todo", "Research", "In Progress", "In Review"}
+PUBLIC_STATES = {
+    "Backlog",
+    "Todo",
+    "Research",
+    "In Progress",
+    "In Review",
+    "Done",
+    "Canceled",
+    "Duplicate",
+}
 PUBLIC_MISMATCH_FIELDS = (
-    r"(?:id/title|description|state|priority|parent|project|milestone|team)"
+    r"(?:id/title|description|state|priority|assignee|labels|due_date|estimate|parent|project|milestone|team)"
 )
 PUBLIC_MISMATCH_LIST = rf"{PUBLIC_MISMATCH_FIELDS}(?:, {PUBLIC_MISMATCH_FIELDS})*"
 PUBLIC_BLOCK_REASON_PATTERNS = {
+    "bulk_linear_operations": (
+        re.compile(
+            r"^bulk_linear_operations partial failure after (?:0|[1-9][0-9]?) of (?:[1-9]|[1-4][0-9]|50) verified items$"
+        ),
+        re.compile(r"^bulk recovery aggregate preflight binding drifted$"),
+        re.compile(r"^bulk recovery binding conflicts with the exact parent intent/order$"),
+    ),
+    "change_state": (
+        re.compile(r"^exact Linear issue not found: SIS-[1-9][0-9]*$"),
+        re.compile(r"^exact target is not in the SIS team: SIS-[1-9][0-9]*$"),
+        re.compile(
+            r"^exact workflow state not found: (?:Backlog|Todo|Research|In Progress|In Review|Done|Canceled|Duplicate)$"
+        ),
+        re.compile(
+            r"^exact workflow state has incompatible semantic type: (?:Done|Canceled|Duplicate)$"
+        ),
+        re.compile(r"^state read-back verification failed$"),
+        re.compile(r"^state read-back changed unmanaged fields$"),
+        re.compile(r"^owner-approved state recovery state drifted$"),
+    ),
     "update_issue": (
         re.compile(r"^exact Linear issue not found: SIS-[1-9][0-9]*$"),
         re.compile(r"^exact target is not in the SIS team: SIS-[1-9][0-9]*$"),
         re.compile(
             r"^exact workflow state not found: (?:Backlog|Todo|Research|In Progress|In Review)$"
         ),
+        re.compile(r"^exact Linear (?:project|milestone) not found or ambiguous$"),
+        re.compile(r"^project is not in the SIS team$"),
+        re.compile(r"^milestone does not belong to the selected project$"),
+        re.compile(r"^exact Linear parent not found: SIS-[1-9][0-9]*$"),
+        re.compile(r"^update_issue parent is not in the SIS team$"),
+        re.compile(r"^update_issue target cannot be its own parent$"),
+        re.compile(r"^update_issue parent would create a cycle$"),
+        re.compile(r"^update_issue parent ancestry is malformed or (?:cyclic|missing)$"),
+        re.compile(r"^current issue parent is malformed$"),
+        re.compile(r"^owner approval required: clearing or replacing an issue parent$"),
         re.compile(rf"^update_issue read-back mismatched fields: {PUBLIC_MISMATCH_LIST}$"),
     ),
     "create_issue": (
@@ -93,18 +132,61 @@ PUBLIC_BLOCK_REASON_PATTERNS = {
         ),
     ),
 }
+_PROJECT_MANAGEMENT_BLOCK_REASONS = (
+    re.compile(r"^exact SIS team was not found$"),
+    re.compile(r"^exact Linear (?:project|milestone) not found: [^\x00-\x1f]{1,200}$"),
+    re.compile(r"^ambiguous scoped Linear match for (?:team SIS|project name|project id|milestone name|milestone id)$"),
+    re.compile(r"^exact (?:project|milestone) match conflicts with (?:SIS team|project) scope$"),
+    re.compile(r"^exact existing (?:project|milestone) conflicts with managed fields$"),
+    re.compile(r"^(?:create|update)_(?:project|milestone) exact read-back verification failed$"),
+)
+for _operation in ("create_project", "create_milestone", "update_project", "update_milestone"):
+    PUBLIC_BLOCK_REASON_PATTERNS[_operation] = _PROJECT_MANAGEMENT_BLOCK_REASONS
+
+_INITIATIVE_MANAGEMENT_BLOCK_REASONS = (
+    re.compile(r"^exact Linear initiative not found: [^\x00-\x1f]{1,200}$"),
+    re.compile(r"^ambiguous scoped Linear match for initiative (?:name|id)$"),
+    re.compile(r"^exact existing initiative conflicts with managed fields$"),
+    re.compile(r"^(?:create|update)_initiative exact read-back verification failed$"),
+)
+for _operation in ("create_initiative", "update_initiative"):
+    PUBLIC_BLOCK_REASON_PATTERNS[_operation] = _INITIATIVE_MANAGEMENT_BLOCK_REASONS
+PUBLIC_BLOCK_REASON_PATTERNS["link_project_to_initiative"] = (
+    re.compile(r"^exact SIS team was not found$"),
+    re.compile(r"^exact Linear (?:project|initiative) not found: [^\x00-\x1f]{1,200}$"),
+    re.compile(r"^ambiguous scoped Linear match for (?:team SIS|project name|initiative name)$"),
+    re.compile(r"^exact project match conflicts with SIS team scope$"),
+    re.compile(r"^exact initiative project link exists more than once$"),
+    re.compile(r"^initiative project link exact read-back verification failed$"),
+)
+_ENTITY_DESTRUCTION_BLOCK_REASONS = (
+    re.compile(r"^exact active Linear (?:issue|project|milestone|initiative) not found$"),
+    re.compile(r"^exact Linear (?:issue|project|milestone|initiative) selector is ambiguous$"),
+    re.compile(r"^(?:archive|delete)_linear_entity exact read-back verification failed(?:: archived is not absent)?$"),
+    re.compile(r"^archive_linear_entity read-back changed unmanaged fields$"),
+    re.compile(r"^(?:archive|delete)_linear_entity [^\x00-\x1f]{1,160} (?:read-back drifted|disappeared|remained linked|did not cascade)$"),
+    re.compile(r"^delete_linear_entity direct lookup still returned the target$"),
+)
+for _operation in ("archive_linear_entity", "delete_linear_entity"):
+    PUBLIC_BLOCK_REASON_PATTERNS[_operation] = _ENTITY_DESTRUCTION_BLOCK_REASONS
+
 
 LINEAR_SOURCE_REQUEST_SCHEMA = {
     "name": "linear_source_request",
     "description": (
         "Route one bounded Linear request from an allowed user-facing profile "
         "through the project-manager Kanban lane. Accepts an exact comment text, "
-        "a structured state/field request targeting either exact SIS-N or a positive "
-        "issue_number in the single SIS team, deterministic description link removal, "
-        "one bounded hierarchy request, one standalone issue in an exact existing "
-        "scope, or one top-level issue plus 1-10 explicit sub-issues. The calling "
-        "profile never mutates Linear directly; the tool creates or replays one "
-        "audited wake-only task and returns its state."
+        "a structured state/field/child request targeting either exact SIS-N or a "
+        "positive issue_number in the single SIS team, deterministic description "
+        "link removal, one bounded hierarchy request, one "
+        "standalone issue in an exact existing scope, one exact project or milestone "
+        "create/edit request, one initiative create/edit/project-link request, one "
+        "owner-approved exact core-entity archive or Linear delete/trash request, "
+        "one ordered 1-50 item mutating batch, or one top-level issue plus "
+        "1-10 explicit sub-issues. "
+        "The calling profile never mutates Linear "
+        "directly; the tool creates or replays one audited wake-only task and "
+        "returns its state."
     ),
     "parameters": {
         "type": "object",
@@ -119,12 +201,74 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
             "operation": {
                 "type": "string",
                 "enum": [
+                    "bulk_linear_operations",
                     "change_state",
                     "update_issue",
+                    "inventory_sub_issues",
+                    "update_sub_issues",
                     "create_issue",
                     "converge_hierarchy",
                     "create_standalone_issue",
                     "converge_issue_tree",
+                    "create_issue_relation",
+                    "remove_issue_relation",
+                    "replace_issue_relation",
+                    "create_project",
+                    "create_milestone",
+                    "update_project",
+                    "update_milestone",
+                    "create_initiative",
+                    "update_initiative",
+                    "link_project_to_initiative",
+                    "search_linear",
+                    "inventory_linear",
+                    "archive_linear_entity",
+                    "delete_linear_entity",
+                ],
+            },
+            "query": {"type": "string", "minLength": 1, "maxLength": 500},
+            "entity_types": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 4,
+                "uniqueItems": True,
+                "items": {
+                    "type": "string",
+                    "enum": ["issues", "projects", "milestones", "initiatives"],
+                },
+            },
+            "include_archived": {"type": "boolean"},
+            "items": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 50,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "operation": {"type": "string"},
+                        "target": {"type": "object"},
+                        "change": {"type": "object"},
+                    },
+                    "required": ["operation", "target", "change"],
+                },
+            },
+            "entity_type": {
+                "type": "string",
+                "enum": ["issue", "project", "milestone", "initiative"],
+            },
+            "selector": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "identifier": {"type": "string", "pattern": "^SIS-[1-9][0-9]*$"},
+                    "project": {"type": "string", "minLength": 1, "maxLength": 200},
+                    "name": {"type": "string", "minLength": 1, "maxLength": 200},
+                },
+                "oneOf": [
+                    {"required": ["identifier"], "minProperties": 1, "maxProperties": 1},
+                    {"required": ["name"], "minProperties": 1, "maxProperties": 1},
+                    {"required": ["project", "name"], "minProperties": 2, "maxProperties": 2},
                 ],
             },
             "identifier": {
@@ -138,38 +282,162 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                     "Positive issue number for shorthand references in the single SIS team."
                 ),
             },
+            "related_identifier": {
+                "type": "string",
+                "pattern": "^SIS-[1-9][0-9]*$",
+            },
+            "old_related_identifier": {
+                "type": "string",
+                "pattern": "^SIS-[1-9][0-9]*$",
+            },
+            "new_related_identifier": {
+                "type": "string",
+                "pattern": "^SIS-[1-9][0-9]*$",
+            },
+            "relation_type": {
+                "type": "string",
+                "enum": ["blocks", "blocked_by", "related"],
+            },
+            "old_relation_type": {
+                "type": "string",
+                "enum": ["blocks", "blocked_by", "related"],
+            },
+            "new_relation_type": {
+                "type": "string",
+                "enum": ["blocks", "blocked_by", "related"],
+            },
             "state": {
                 "type": "string",
-                "enum": ["Backlog", "Todo", "Research", "In Progress", "In Review"],
+                "enum": [
+                    "Backlog",
+                    "Todo",
+                    "Research",
+                    "In Progress",
+                    "In Review",
+                    "Done",
+                    "Canceled",
+                    "Duplicate",
+                ],
             },
             "title": {"type": "string", "minLength": 1, "maxLength": 200},
+            "name": {"type": "string", "minLength": 1, "maxLength": 200},
+            "new_name": {"type": "string", "minLength": 1, "maxLength": 200},
+            "initiative": {"type": "string", "minLength": 1, "maxLength": 200},
             "description": {"type": "string", "maxLength": 10000},
             "description_transform": {
                 "type": "string",
                 "enum": ["remove_links"],
             },
+            "target_date": {
+                "oneOf": [
+                    {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+                    {"type": "null"},
+                ]
+            },
             "parent_identifier": {
-                "type": "string",
-                "pattern": "^SIS-[1-9][0-9]*$",
+                "oneOf": [
+                    {"type": "string", "pattern": "^SIS-[1-9][0-9]*$"},
+                    {"type": "null"},
+                ],
             },
             "priority": {"type": "string", "enum": ["High", "Medium", "Low"]},
-            "project": {
+            "assignee": {
+                "oneOf": [
+                    {"type": "string", "minLength": 1, "maxLength": 200},
+                    {"type": "null"},
+                ]
+            },
+            "labels": {
+                "type": "array",
+                "maxItems": 100,
+                "uniqueItems": True,
+                "items": {"type": "string", "minLength": 1, "maxLength": 200},
+            },
+            "due_date": {
+                "oneOf": [
+                    {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+                    {"type": "null"},
+                ]
+            },
+            "estimate": {
+                "oneOf": [
+                    {"type": "integer", "minimum": 0},
+                    {"type": "null"},
+                ]
+            },
+            "approval": {
                 "type": "object",
                 "additionalProperties": False,
                 "properties": {
-                    "name": {"type": "string", "minLength": 1, "maxLength": 200},
-                    "description": {"type": "string", "maxLength": 10000},
+                    "workflow": {
+                        "type": "string",
+                        "const": "linear-destructive-owner-approval-attest",
+                    },
+                    "model": {
+                        "type": "string",
+                        "const": "linear-destructive-owner-approval-attest",
+                    },
+                    "run_id": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                    },
+                    "artifact_version": {"type": "integer", "minimum": 1},
+                    "checksum": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                    "intent_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                    "before_state_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                    "expires_at": {
+                        "type": "string",
+                        "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+                    },
                 },
-                "required": ["name"],
+                "required": [
+                    "workflow",
+                    "model",
+                    "run_id",
+                    "artifact_version",
+                    "checksum",
+                    "intent_hash",
+                    "before_state_hash",
+                    "expires_at",
+                ],
+            },
+            "project": {
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "name": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 200,
+                            },
+                            "description": {"type": "string", "maxLength": 10000},
+                        },
+                        "required": ["name"],
+                    },
+                    {"type": "string", "minLength": 1, "maxLength": 200},
+                    {"type": "null"},
+                ]
             },
             "milestone": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "name": {"type": "string", "minLength": 1, "maxLength": 200},
-                    "description": {"type": "string", "maxLength": 10000},
-                },
-                "required": ["name"],
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "name": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 200,
+                            },
+                            "description": {"type": "string", "maxLength": 10000},
+                        },
+                        "required": ["name"],
+                    },
+                    {"type": "string", "minLength": 1, "maxLength": 200},
+                    {"type": "null"},
+                ]
             },
             "issue": {
                 "type": "object",
@@ -214,15 +482,35 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
         "oneOf": [
             {"required": ["request"]},
             {
-                "required": ["operation", "state"],
-                "oneOf": [
-                    {"required": ["identifier"]},
-                    {"required": ["issue_number"]},
-                ],
-                "properties": {"operation": {"const": "change_state"}},
+                "required": ["operation", "items"],
+                "properties": {
+                    "operation": {"const": "bulk_linear_operations"}
+                },
             },
             {
-                "required": ["operation"],
+                "required": [
+                    "operation",
+                    "query",
+                    "entity_types",
+                    "include_archived",
+                ],
+                "properties": {"operation": {"const": "search_linear"}},
+            },
+            {
+                "required": ["operation", "entity_types", "include_archived"],
+                "properties": {"operation": {"const": "inventory_linear"}},
+            },
+            {
+                "required": ["operation", "entity_type", "selector", "approval"],
+                "properties": {
+                    "operation": {
+                        "enum": ["archive_linear_entity", "delete_linear_entity"]
+                    }
+                },
+            },
+            {
+                "required": ["operation", "state"],
+                "properties": {"operation": {"const": "change_state"}},
                 "allOf": [
                     {
                         "oneOf": [
@@ -231,20 +519,119 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                         ]
                     },
                     {
-                        "not": {
-                            "required": ["description", "description_transform"]
-                        }
-                    },
-                    {
-                        "anyOf": [
-                            {"required": ["description"]},
-                            {"required": ["description_transform"]},
-                            {"required": ["state"]},
-                            {"required": ["priority"]},
+                        "oneOf": [
+                            {
+                                "properties": {
+                                    "state": {
+                                        "enum": [
+                                            "Backlog", "Todo", "Research",
+                                            "In Progress", "In Review",
+                                        ]
+                                    }
+                                },
+                                "not": {"required": ["approval"]},
+                            },
+                            {
+                                "required": ["approval"],
+                                "properties": {
+                                    "state": {"enum": ["Done", "Canceled", "Duplicate"]}
+                                },
+                            },
                         ]
                     },
                 ],
-                "properties": {"operation": {"const": "update_issue"}},
+            },
+            {
+                "required": ["operation"],
+                "oneOf": [
+                    {"required": ["identifier"]},
+                    {"required": ["issue_number"]},
+                ],
+                "not": {
+                    "required": ["description", "description_transform"]
+                },
+                "anyOf": [
+                    {"required": ["title"]},
+                    {"required": ["description"]},
+                    {"required": ["description_transform"]},
+                    {"required": ["state"]},
+                    {"required": ["priority"]},
+                    {"required": ["assignee"]},
+                    {"required": ["labels"]},
+                    {"required": ["due_date"]},
+                    {"required": ["estimate"]},
+                    {"required": ["parent_identifier"]},
+                    {"required": ["project", "milestone"]},
+                ],
+                "properties": {
+                    "operation": {"const": "update_issue"},
+                    "parent_identifier": {
+                        "oneOf": [
+                            {
+                                "type": "string",
+                                "pattern": "^SIS-[1-9][0-9]*$",
+                            },
+                            {"type": "null"},
+                        ]
+                    },
+                    "project": {
+                        "oneOf": [
+                            {"type": "string", "minLength": 1, "maxLength": 200},
+                            {"type": "null"},
+                        ]
+                    },
+                    "milestone": {
+                        "oneOf": [
+                            {"type": "string", "minLength": 1, "maxLength": 200},
+                            {"type": "null"},
+                        ]
+                    },
+                },
+            },
+            {
+                "required": ["operation", "identifier"],
+                "properties": {"operation": {"const": "inventory_sub_issues"}},
+            },
+            {
+                "required": [
+                    "operation",
+                    "identifier",
+                    "related_identifier",
+                    "relation_type",
+                ],
+                "properties": {
+                    "operation": {"const": "create_issue_relation"}
+                },
+            },
+            {
+                "required": [
+                    "operation",
+                    "identifier",
+                    "related_identifier",
+                    "relation_type",
+                    "approval",
+                ],
+                "properties": {
+                    "operation": {"const": "remove_issue_relation"}
+                },
+            },
+            {
+                "required": [
+                    "operation",
+                    "identifier",
+                    "old_related_identifier",
+                    "old_relation_type",
+                    "new_related_identifier",
+                    "new_relation_type",
+                    "approval",
+                ],
+                "properties": {
+                    "operation": {"const": "replace_issue_relation"}
+                },
+            },
+            {
+                "required": ["operation", "identifier", "description"],
+                "properties": {"operation": {"const": "update_sub_issues"}},
             },
             {
                 "required": [
@@ -255,7 +642,13 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                     "state",
                     "priority",
                 ],
-                "properties": {"operation": {"const": "create_issue"}},
+                "properties": {
+                    "operation": {"const": "create_issue"},
+                    "parent_identifier": {
+                        "type": "string",
+                        "pattern": "^SIS-[1-9][0-9]*$",
+                    },
+                },
             },
             {
                 "required": ["operation", "project", "milestone", "issue"],
@@ -282,6 +675,62 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                     "operation": {"const": "converge_issue_tree"},
                     "issue": {
                         "required": ["title", "description", "state", "priority"]
+                    },
+                },
+            },
+            {
+                "required": ["operation", "name"],
+                "properties": {"operation": {"const": "create_project"}},
+            },
+            {
+                "required": ["operation", "project", "name"],
+                "properties": {
+                    "operation": {"const": "create_milestone"},
+                    "project": {"type": "string", "minLength": 1, "maxLength": 200},
+                },
+            },
+            {
+                "required": ["operation", "name"],
+                "anyOf": [
+                    {"required": ["new_name"]},
+                    {"required": ["description"]},
+                    {"required": ["target_date"]},
+                ],
+                "properties": {"operation": {"const": "update_project"}},
+            },
+            {
+                "required": ["operation", "project", "name"],
+                "anyOf": [
+                    {"required": ["new_name"]},
+                    {"required": ["description"]},
+                    {"required": ["target_date"]},
+                ],
+                "properties": {
+                    "operation": {"const": "update_milestone"},
+                    "project": {"type": "string", "minLength": 1, "maxLength": 200},
+                },
+            },
+            {
+                "required": ["operation", "name"],
+                "properties": {"operation": {"const": "create_initiative"}},
+            },
+            {
+                "required": ["operation", "name"],
+                "anyOf": [
+                    {"required": ["new_name"]},
+                    {"required": ["description"]},
+                    {"required": ["target_date"]},
+                ],
+                "properties": {"operation": {"const": "update_initiative"}},
+            },
+            {
+                "required": ["operation", "project", "initiative"],
+                "properties": {
+                    "operation": {"const": "link_project_to_initiative"},
+                    "project": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200,
                     },
                 },
             },
@@ -508,10 +957,430 @@ def _public_issue_target(target: Any) -> dict[str, Any]:
     return {"type": "issue", "identifier": identifier, "url": url}
 
 
+def _public_workspace_read(
+    result: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    operation = result.get("operation")
+    after = result.get("after")
+    target = result.get("target")
+    if (
+        operation not in {"search_linear", "inventory_linear"}
+        or target != {"type": "workspace", "identifier": "current"}
+        or not isinstance(after, dict)
+    ):
+        raise RouteError("verified workspace read lacks public completion facts")
+    expected_after = {
+        "entity_types",
+        "include_archived",
+        "counts",
+        "entities",
+    }
+    if operation == "search_linear":
+        expected_after |= {"query", "scanned_counts"}
+    if set(after) != expected_after:
+        raise RouteError("verified workspace read has invalid public fields")
+    entity_types = after.get("entity_types")
+    allowed = ("issues", "projects", "milestones", "initiatives")
+    if (
+        not isinstance(entity_types, list)
+        or not entity_types
+        or any(not isinstance(item, str) or item not in allowed for item in entity_types)
+        or len(set(entity_types)) != len(entity_types)
+        or entity_types != [item for item in allowed if item in entity_types]
+    ):
+        raise RouteError("verified workspace read has invalid entity types")
+    if not isinstance(after.get("include_archived"), bool):
+        raise RouteError("verified workspace read has invalid archive scope")
+    entities = after.get("entities")
+    counts = after.get("counts")
+    if (
+        not isinstance(entities, dict)
+        or not isinstance(counts, dict)
+        or set(entities) != set(entity_types)
+        or set(counts) != set(entity_types)
+    ):
+        raise RouteError("verified workspace read has invalid counts")
+
+    public_entities: dict[str, list[dict[str, Any]]] = {}
+    for entity_type in entity_types:
+        items = entities[entity_type]
+        if not isinstance(items, list):
+            raise RouteError("verified workspace read has invalid entity inventory")
+        projected: list[dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                raise RouteError("verified workspace read has malformed entity facts")
+            if entity_type == "issues":
+                expected = {
+                    "type",
+                    "identifier",
+                    "title",
+                    "state",
+                    "team",
+                    "parent_identifier",
+                    "project",
+                    "milestone",
+                    "archived",
+                }
+                identifier = item.get("identifier")
+                parent = item.get("parent_identifier")
+                if (
+                    set(item) != expected
+                    or item.get("type") != "issue"
+                    or not isinstance(identifier, str)
+                    or not PUBLIC_ISSUE_IDENTIFIER.fullmatch(identifier)
+                    or (
+                        parent is not None
+                        and (
+                            not isinstance(parent, str)
+                            or not PUBLIC_ISSUE_IDENTIFIER.fullmatch(parent)
+                        )
+                    )
+                ):
+                    raise RouteError("verified workspace read has invalid issue facts")
+                public_item = {
+                    "type": "issue",
+                    "identifier": identifier,
+                    "title": _public_text(item.get("title"), "issue title"),
+                    "state": _public_text(item.get("state"), "issue state", maximum=100),
+                    "team": _public_text(item.get("team"), "issue team", maximum=50),
+                    "parent_identifier": parent,
+                    "project": (
+                        None
+                        if item.get("project") is None
+                        else _public_text(item.get("project"), "project name")
+                    ),
+                    "milestone": (
+                        None
+                        if item.get("milestone") is None
+                        else _public_text(item.get("milestone"), "milestone name")
+                    ),
+                    "archived": item.get("archived"),
+                }
+            elif entity_type == "initiatives":
+                if set(item) != {"type", "name", "archived"} or item.get("type") != "initiative":
+                    raise RouteError("verified workspace read has invalid initiative facts")
+                public_item = {
+                    "type": "initiative",
+                    "name": _public_text(item.get("name"), "initiative name"),
+                    "archived": item.get("archived"),
+                }
+            else:
+                expected = {"type", "name", "team_keys", "archived"}
+                expected_type = "project"
+                if entity_type == "milestones":
+                    expected.add("project")
+                    expected_type = "milestone"
+                team_keys = item.get("team_keys")
+                if (
+                    set(item) != expected
+                    or item.get("type") != expected_type
+                    or not isinstance(team_keys, list)
+                    or any(not isinstance(value, str) for value in team_keys)
+                    or len(set(team_keys)) != len(team_keys)
+                ):
+                    raise RouteError("verified workspace read has invalid scope facts")
+                public_item = {
+                    "type": expected_type,
+                    "name": _public_text(item.get("name"), f"{expected_type} name"),
+                    "team_keys": [
+                        _public_text(value, "team key", maximum=50)
+                        for value in team_keys
+                    ],
+                    "archived": item.get("archived"),
+                }
+                if entity_type == "milestones":
+                    public_item["project"] = _public_text(
+                        item.get("project"), "milestone project"
+                    )
+            if not isinstance(public_item.get("archived"), bool):
+                raise RouteError("verified workspace read has invalid archive fact")
+            projected.append(public_item)
+        count = counts[entity_type]
+        if isinstance(count, bool) or not isinstance(count, int) or count != len(projected):
+            raise RouteError("verified workspace read count does not match entities")
+        public_entities[entity_type] = projected
+
+    context: dict[str, Any] = {
+        "entity_types": list(entity_types),
+        "include_archived": after["include_archived"],
+        "counts": dict(counts),
+        "entities": public_entities,
+    }
+    if operation == "search_linear":
+        query = after.get("query")
+        scanned = after.get("scanned_counts")
+        if (
+            not isinstance(query, str)
+            or not query.strip()
+            or not isinstance(scanned, dict)
+            or set(scanned) != set(entity_types)
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < counts[kind]
+                for kind, value in scanned.items()
+            )
+        ):
+            raise RouteError("verified workspace search has invalid scope counts")
+        context["scanned_counts"] = dict(scanned)
+    return {"type": "workspace", "identifier": "current"}, context
+
+
 def _public_target(result: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
     """Return only validated user-relevant target facts from one PM result."""
     operation = result.get("operation")
     after = result.get("after")
+    if operation == "bulk_linear_operations":
+        target = result.get("target")
+        items = result.get("items")
+        counts = result.get("counts")
+        allowed_operations = {
+            "change_state", "update_issue", "update_sub_issues", "add_comment",
+            "create_issue", "converge_hierarchy", "create_standalone_issue",
+            "converge_issue_tree", "create_issue_relation", "remove_issue_relation",
+            "replace_issue_relation", "create_project", "create_milestone",
+            "update_project", "update_milestone", "create_initiative",
+            "update_initiative", "link_project_to_initiative",
+            "archive_linear_entity", "delete_linear_entity",
+        }
+        if (
+            target != {"type": "workspace", "identifier": "current"}
+            or not isinstance(items, list)
+            or not 1 <= len(items) <= 50
+            or not isinstance(counts, dict)
+            or set(counts) != {"total", "applied", "no_op"}
+        ):
+            raise RouteError("verified bulk result lacks safe aggregate facts")
+        public_items: list[dict[str, Any]] = []
+        for index, item in enumerate(items):
+            if (
+                not isinstance(item, dict)
+                or set(item) != {"index", "operation", "outcome", "verified"}
+                or item.get("index") != index
+                or item.get("operation") not in allowed_operations
+                or item.get("outcome") not in {"applied", "no_op"}
+                or item.get("verified") is not True
+            ):
+                raise RouteError("verified bulk result contains an unsafe item outcome")
+            public_items.append(dict(item))
+        applied = sum(item["outcome"] == "applied" for item in public_items)
+        no_op = len(public_items) - applied
+        if counts != {"total": len(public_items), "applied": applied, "no_op": no_op}:
+            raise RouteError("verified bulk result counts do not match ordered outcomes")
+        return {"type": "workspace", "identifier": "current"}, {
+            "items": public_items,
+            "counts": dict(counts),
+        }
+    if operation in {"search_linear", "inventory_linear"}:
+        return _public_workspace_read(result)
+    if operation in {"archive_linear_entity", "delete_linear_entity"}:
+        target = result.get("target")
+        if (
+            not isinstance(target, dict)
+            or set(target) != {"type", "selector"}
+            or not isinstance(target.get("selector"), dict)
+            or not isinstance(after, dict)
+        ):
+            raise RouteError("verified archive/delete result lacks exact public facts")
+        entity_type = target.get("type")
+        selector = target["selector"]
+        if entity_type == "issue":
+            valid_selector = (
+                set(selector) == {"identifier"}
+                and isinstance(selector.get("identifier"), str)
+                and PUBLIC_ISSUE_IDENTIFIER.fullmatch(selector["identifier"]) is not None
+            )
+            public_selector = dict(selector) if valid_selector else None
+        elif entity_type in {"project", "initiative"}:
+            valid_selector = set(selector) == {"name"}
+            public_selector = (
+                {"name": _public_text(selector.get("name"), f"{entity_type} selector")}
+                if valid_selector
+                else None
+            )
+        elif entity_type == "milestone":
+            valid_selector = set(selector) == {"project", "name"}
+            public_selector = (
+                {
+                    "project": _public_text(selector.get("project"), "milestone project selector"),
+                    "name": _public_text(selector.get("name"), "milestone selector"),
+                }
+                if valid_selector
+                else None
+            )
+        else:
+            public_selector = None
+        if public_selector is None:
+            raise RouteError("verified archive/delete result has an invalid public selector")
+        if operation == "archive_linear_entity" and after.get("archived") is not True:
+            raise RouteError("verified archive result is not archived")
+        if operation == "delete_linear_entity" and after != {"present": False}:
+            raise RouteError("verified delete result is not absent")
+        return {"type": entity_type, "selector": public_selector}, None
+    if operation in {"create_issue_relation", "remove_issue_relation"}:
+        target = result.get("target")
+        expected_fields = {
+            "type",
+            "identifier",
+            "related_identifier",
+            "relation_type",
+        }
+        if (
+            not isinstance(target, dict)
+            or set(target) != expected_fields
+            or target.get("type") != "issue_relation"
+            or not isinstance(after, dict)
+        ):
+            raise RouteError("verified issue relation lacks public completion facts")
+        identifier = target.get("identifier")
+        related_identifier = target.get("related_identifier")
+        relation_type = target.get("relation_type")
+        if (
+            not isinstance(identifier, str)
+            or not PUBLIC_ISSUE_IDENTIFIER.fullmatch(identifier)
+            or not isinstance(related_identifier, str)
+            or not PUBLIC_ISSUE_IDENTIFIER.fullmatch(related_identifier)
+            or related_identifier == identifier
+            or relation_type not in {"blocks", "blocked_by", "related"}
+            or after.get("identifier") != identifier
+            or after.get("related_identifier") != related_identifier
+            or after.get("relation_type") != relation_type
+            or (
+                operation == "remove_issue_relation"
+                and after.get("present") is not False
+            )
+        ):
+            raise RouteError("verified issue relation has invalid public facts")
+        return dict(target), None
+    if operation == "replace_issue_relation":
+        target = result.get("target")
+        if (
+            not isinstance(target, dict)
+            or set(target) != {"type", "old", "new"}
+            or target.get("type") != "issue_relation_replacement"
+            or not isinstance(target.get("old"), dict)
+            or not isinstance(target.get("new"), dict)
+            or not isinstance(after, dict)
+        ):
+            raise RouteError("verified issue relation replacement lacks public facts")
+        for label in ("old", "new"):
+            facts = target[label]
+            if (
+                set(facts)
+                != {"identifier", "related_identifier", "relation_type"}
+                or not isinstance(facts.get("identifier"), str)
+                or PUBLIC_ISSUE_IDENTIFIER.fullmatch(facts["identifier"]) is None
+                or not isinstance(facts.get("related_identifier"), str)
+                or PUBLIC_ISSUE_IDENTIFIER.fullmatch(facts["related_identifier"])
+                is None
+                or facts["identifier"] == facts["related_identifier"]
+                or facts.get("relation_type")
+                not in {"blocks", "blocked_by", "related"}
+            ):
+                raise RouteError(
+                    "verified issue relation replacement has invalid public facts"
+                )
+        if (
+            target["old"]["identifier"] != target["new"]["identifier"]
+            or any(after.get(field) != target["new"][field] for field in target["new"])
+        ):
+            raise RouteError(
+                "verified issue relation replacement conflicts with completion facts"
+            )
+        return {
+            "type": "issue_relation_replacement",
+            "old": dict(target["old"]),
+            "new": dict(target["new"]),
+        }, None
+    if operation in {"create_initiative", "update_initiative"}:
+        target = result.get("target")
+        if (
+            not isinstance(after, dict)
+            or not isinstance(target, dict)
+            or set(target) != {"type", "identifier"}
+            or target.get("type") != "initiative"
+        ):
+            raise RouteError(
+                "verified initiative management result lacks public completion facts"
+            )
+        name = _public_text(after.get("name"), "initiative name")
+        if target.get("identifier") != name:
+            raise RouteError(
+                "verified initiative management result conflicts with its target"
+            )
+        public: dict[str, Any] = {"type": "initiative", "name": name}
+        if "target_date" in after:
+            target_date = after.get("target_date")
+            if target_date is not None:
+                if not isinstance(target_date, str) or not re.fullmatch(
+                    r"[0-9]{4}-[0-9]{2}-[0-9]{2}", target_date
+                ):
+                    raise RouteError(
+                        "verified initiative management result has an invalid target date"
+                    )
+                try:
+                    date.fromisoformat(target_date)
+                except ValueError as exc:
+                    raise RouteError(
+                        "verified initiative management result has an invalid target date"
+                    ) from exc
+            public["target_date"] = target_date
+        return public, None
+    if operation == "link_project_to_initiative":
+        target = result.get("target")
+        if (
+            not isinstance(after, dict)
+            or not isinstance(target, dict)
+            or set(target) != {"type", "initiative", "project"}
+            or target.get("type") != "initiative_project"
+        ):
+            raise RouteError(
+                "verified initiative project link lacks public completion facts"
+            )
+        initiative = _public_text(after.get("initiative"), "initiative name")
+        project = _public_text(after.get("project"), "project name")
+        if (
+            target.get("initiative") != initiative
+            or target.get("project") != project
+        ):
+            raise RouteError(
+                "verified initiative project link conflicts with its target"
+            )
+        return {
+            "type": "initiative_project",
+            "initiative": initiative,
+            "project": project,
+        }, None
+    if operation in {
+        "create_project",
+        "create_milestone",
+        "update_project",
+        "update_milestone",
+    }:
+        if not isinstance(after, dict):
+            raise RouteError("verified project management result lacks public completion facts")
+        milestone = operation.endswith("milestone")
+        name = _public_text(after.get("name"), "milestone name" if milestone else "project name")
+        public: dict[str, Any] = {"type": "milestone" if milestone else "project"}
+        if milestone:
+            public["project"] = _public_text(after.get("project"), "project name")
+        public["name"] = name
+        if "target_date" in after:
+            target_date = after.get("target_date")
+            if target_date is not None:
+                if not isinstance(target_date, str) or not re.fullmatch(
+                    r"[0-9]{4}-[0-9]{2}-[0-9]{2}", target_date
+                ):
+                    raise RouteError("verified project management result has an invalid target date")
+                try:
+                    date.fromisoformat(target_date)
+                except ValueError as exc:
+                    raise RouteError(
+                        "verified project management result has an invalid target date"
+                    ) from exc
+            public["target_date"] = target_date
+        return public, None
     if operation == "converge_hierarchy":
         if not isinstance(after, dict):
             raise RouteError("verified hierarchy result lacks public completion facts")
@@ -578,6 +1447,32 @@ def _public_target(result: dict[str, Any]) -> tuple[dict[str, Any], dict[str, An
             context["sub_issues"] = public_children
         return public_target, context
 
+    if operation in {"inventory_sub_issues", "update_sub_issues"}:
+        public_target = _public_issue_target(result.get("target"))
+        if not isinstance(after, list):
+            raise RouteError("verified sub-issue inventory lacks public completion facts")
+        seen = {public_target["identifier"]}
+        public_children: list[dict[str, Any]] = []
+        for child in after:
+            if not isinstance(child, dict):
+                raise RouteError("verified sub-issue inventory has invalid facts")
+            target = _public_issue_target({"type": "issue", **child})
+            if target["identifier"] in seen:
+                raise RouteError("verified sub-issue inventory contains duplicates")
+            parent_identifier = child.get("parent_identifier")
+            if (
+                not isinstance(parent_identifier, str)
+                or not PUBLIC_ISSUE_IDENTIFIER.fullmatch(parent_identifier)
+                or parent_identifier not in seen
+            ):
+                raise RouteError("verified sub-issue inventory has an invalid parent")
+            target["title"] = _public_text(child.get("title"), "sub-issue title")
+            target["state"] = _public_text(child.get("state"), "sub-issue state", maximum=100)
+            target["parent_identifier"] = parent_identifier
+            public_children.append(target)
+            seen.add(target["identifier"])
+        return public_target, {"sub_issues": public_children}
+
     public_target = _public_issue_target(result.get("target"))
     if not isinstance(after, dict):
         raise RouteError("verified result lacks public completion facts")
@@ -589,6 +1484,76 @@ def _public_target(result: dict[str, Any]) -> tuple[dict[str, Any], dict[str, An
             if state not in PUBLIC_STATES:
                 raise RouteError("verified issue update has an invalid public state")
             public_target["state"] = state
+        if operation == "update_issue" and "assignee" in after:
+            assignee = after.get("assignee")
+            public_target["assignee"] = (
+                None
+                if assignee is None
+                else _public_text(assignee, "assignee name")
+            )
+        if operation == "update_issue" and "labels" in after:
+            labels = after.get("labels")
+            if (
+                not isinstance(labels, list)
+                or len(labels) > 100
+                or len(set(labels)) != len(labels)
+            ):
+                raise RouteError("verified issue update has invalid public labels")
+            public_target["labels"] = [
+                _public_text(label, "label name") for label in labels
+            ]
+        if operation == "update_issue" and "due_date" in after:
+            due_date = after.get("due_date")
+            if due_date is not None:
+                if not isinstance(due_date, str) or not re.fullmatch(
+                    r"[0-9]{4}-[0-9]{2}-[0-9]{2}", due_date
+                ):
+                    raise RouteError("verified issue update has an invalid public due date")
+                try:
+                    date.fromisoformat(due_date)
+                except ValueError as exc:
+                    raise RouteError(
+                        "verified issue update has an invalid public due date"
+                    ) from exc
+            public_target["due_date"] = due_date
+        if operation == "update_issue" and "estimate" in after:
+            estimate = after.get("estimate")
+            if estimate is not None and (
+                isinstance(estimate, bool)
+                or not isinstance(estimate, int)
+                or estimate < 0
+            ):
+                raise RouteError("verified issue update has an invalid public estimate")
+            public_target["estimate"] = estimate
+        if operation == "update_issue" and "parent_identifier" in after:
+            parent_identifier = after.get("parent_identifier")
+            if parent_identifier is not None and (
+                not isinstance(parent_identifier, str)
+                or not PUBLIC_ISSUE_IDENTIFIER.fullmatch(parent_identifier)
+            ):
+                raise RouteError(
+                    "verified issue update has an invalid public parent identifier"
+                )
+            public_target["parent_identifier"] = parent_identifier
+        if operation == "update_issue" and (
+            ("project" in after) != ("milestone" in after)
+        ):
+            raise RouteError(
+                "verified issue update lacks a complete public project/milestone pair"
+            )
+        if operation == "update_issue" and "project" in after:
+            project = after.get("project")
+            milestone = after.get("milestone")
+            if (project is None) != (milestone is None):
+                raise RouteError(
+                    "verified issue update has an invalid public project/milestone pair"
+                )
+            public_target["project"] = (
+                None if project is None else _public_text(project, "project name")
+            )
+            public_target["milestone"] = (
+                None if milestone is None else _public_text(milestone, "milestone name")
+            )
     elif operation == "create_issue":
         if (
             after.get("identifier") != public_target["identifier"]
@@ -666,12 +1631,82 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
             if not isinstance(request, str):
                 raise RouteError("request must be text")
         elif (
+            args.get("operation") == "bulk_linear_operations"
+            and set(args) in (
+                {"operation", "items"},
+                {"operation", "items", "approval"},
+            )
+        ):
+            request = dict(args)
+        elif (
+            args.get("operation") in {"search_linear", "inventory_linear"}
+            and "entity_types" in args
+            and "include_archived" in args
+            and set(args).issubset(
+                {"operation", "query", "entity_types", "include_archived"}
+            )
+            and ((args.get("operation") == "search_linear") == ("query" in args))
+        ):
+            request = dict(args)
+        elif (
+            args.get("operation") in {"archive_linear_entity", "delete_linear_entity"}
+            and set(args) == {"operation", "entity_type", "selector", "approval"}
+        ):
+            request = dict(args)
+        elif (
             args.get("operation") == "change_state"
             and "state" in args
             and bool(set(args) & {"identifier", "issue_number"})
             and set(args).issubset(
-                {"operation", "identifier", "issue_number", "state"}
+                {"operation", "identifier", "issue_number", "state", "approval"}
             )
+        ):
+            request = dict(args)
+        elif (
+            set(args) == {"operation", "identifier"}
+            and args.get("operation") == "inventory_sub_issues"
+        ):
+            request = dict(args)
+        elif (
+            set(args)
+            == {
+                "operation",
+                "identifier",
+                "related_identifier",
+                "relation_type",
+            }
+            and args.get("operation") == "create_issue_relation"
+        ):
+            request = dict(args)
+        elif (
+            args.get("operation") == "remove_issue_relation"
+            and set(args)
+            == {
+                "operation",
+                "identifier",
+                "related_identifier",
+                "relation_type",
+                "approval",
+            }
+        ):
+            request = dict(args)
+        elif (
+            args.get("operation") == "replace_issue_relation"
+            and set(args)
+            == {
+                "operation",
+                "identifier",
+                "old_related_identifier",
+                "old_relation_type",
+                "new_related_identifier",
+                "new_relation_type",
+                "approval",
+            }
+        ):
+            request = dict(args)
+        elif (
+            set(args) == {"operation", "identifier", "description"}
+            and args.get("operation") == "update_sub_issues"
         ):
             request = dict(args)
         elif (
@@ -679,17 +1714,39 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
             and bool(set(args) & {"identifier", "issue_number"})
             and bool(
                 set(args)
-                & {"description", "description_transform", "state", "priority"}
+                & {
+                    "title",
+                    "description",
+                    "description_transform",
+                    "state",
+                    "priority",
+                    "assignee",
+                    "labels",
+                    "due_date",
+                    "estimate",
+                    "parent_identifier",
+                    "project",
+                    "milestone",
+                }
             )
             and set(args).issubset(
                 {
                     "operation",
                     "identifier",
                     "issue_number",
+                    "title",
                     "description",
                     "description_transform",
                     "state",
                     "priority",
+                    "assignee",
+                    "labels",
+                    "due_date",
+                    "estimate",
+                    "parent_identifier",
+                    "project",
+                    "milestone",
+                    "approval",
                 }
             )
         ):
@@ -712,6 +1769,28 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
             "issue",
             "sub_issues",
         }:
+            request = dict(args)
+        elif (
+            args.get("operation") in {"create_initiative", "update_initiative"}
+            and "name" in args
+            and set(args).issubset(
+                {"operation", "name", "new_name", "description", "target_date"}
+            )
+        ):
+            request = dict(args)
+        elif (
+            args.get("operation") == "link_project_to_initiative"
+            and set(args) == {"operation", "project", "initiative"}
+        ):
+            request = dict(args)
+        elif (
+            args.get("operation")
+            in {"create_project", "create_milestone", "update_project", "update_milestone"}
+            and "name" in args
+            and set(args).issubset(
+                {"operation", "project", "name", "new_name", "description", "target_date"}
+            )
+        ):
             request = dict(args)
         else:
             raise RouteError("tool input does not match a bounded request shape")

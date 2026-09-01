@@ -22,6 +22,9 @@
         "swamp.plan_github_cloudflare_repository",
         "swamp.start_github_cloudflare_repository_apply",
         "swamp.approve_github_cloudflare_repository_apply",
+        "swamp.plan_linear_destructive_owner_approval",
+        "swamp.start_linear_destructive_owner_approval_attest",
+        "swamp.approve_linear_destructive_owner_approval_attest",
         "swamp.get_result"
       ]
     },
@@ -72,6 +75,8 @@
         "swamp.run_readonly_workflow",
         "swamp.plan_github_cloudflare_repository",
         "swamp.start_github_cloudflare_repository_apply",
+        "swamp.plan_linear_destructive_owner_approval",
+        "swamp.start_linear_destructive_owner_approval_attest",
         "swamp.get_result"
       ]
     }
@@ -84,6 +89,8 @@
   "swamp": {
     "repositoryBootstrapWorkflow": "github-cloudflare-repo-bootstrap",
     "repositoryBootstrapApplyWorkflow": "github-cloudflare-repo-bootstrap-apply",
+    "linearDestructiveApprovalPlanWorkflow": "linear-destructive-owner-approval-plan",
+    "linearDestructiveApprovalAttestWorkflow": "linear-destructive-owner-approval-attest",
     "models": [
       "ops-broker-readonly-smoke"
     ],

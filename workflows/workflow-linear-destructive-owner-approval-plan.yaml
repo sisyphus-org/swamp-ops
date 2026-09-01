@@ -1,0 +1,46 @@
+id: b0f98532-abaf-47f7-a7b8-6ee9ad6df79d
+name: linear-destructive-owner-approval-plan
+description: >-
+  Produce a deterministic, checksum-bound, read-only plan for one exact issue
+  parent replacement/clear intent and before-state hash. Never calls Linear.
+tags:
+  domain: linear
+  safety: read-only-plan
+  owner: default-broker
+inputs:
+  type: object
+  properties:
+    intent:
+      type: string
+      pattern: "^[A-Za-z0-9_-]{16,34000}$"
+    beforeStateHash:
+      type: string
+      pattern: "^[0-9a-f]{64}$"
+    expiresAt:
+      type: string
+      pattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+  required: [intent, beforeStateHash, expiresAt]
+  additionalProperties: false
+jobs:
+  - name: plan
+    steps:
+      - name: build-exact-plan
+        task:
+          type: model_method
+          modelIdOrName: linear-destructive-owner-approval-plan
+          methodName: execute
+          inputs:
+            run: >-
+              python3 scripts/linear_owner_approval.py
+              --mode plan
+              --intent '${{ inputs.intent }}'
+              --before-state-hash '${{ inputs.beforeStateHash }}'
+              --expires-at '${{ inputs.expiresAt }}'
+            timeout: 60000
+            ignoreExitCode: false
+        dependsOn: []
+        weight: 1
+        allowFailure: false
+    dependsOn: []
+    weight: 1
+version: 1

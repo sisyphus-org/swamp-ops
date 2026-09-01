@@ -54,7 +54,11 @@ def main() -> int:
             chat_type="dm",
             thread_id="448864",
         )
-        request = "Добавь к SIS-61 комментарий: SIS-61 E2E proof A."
+        request = {
+            "operation": "inventory_linear",
+            "entity_types": ["issues", "projects", "milestones", "initiatives"],
+            "include_archived": False,
+        }
         first = route_request(request, source=source, board=board)
         replay = route_request(request, source=source, board=board)
 

@@ -28,7 +28,7 @@ The plugin:
 - derives the authoritative source profile from Hermes' resolved runtime home;
 - accepts any syntactically valid user-facing profile name except `broker` and `project-manager`;
 - requires Telegram DM context, exact numeric chat/user/thread IDs, and the persisted exact Hermes session ID;
-- supports bounded comment, safe workflow-state change, issue-number targeting inside the single `SIS` team, deterministic description link removal, issue creation under an exact `SIS-N` parent, create-only hierarchy convergence, standalone top-level creation in an exact existing project/milestone, and one top-level issue plus 1–10 explicit sub-issues without caller-controlled entity IDs;
+- supports bounded comment, standard safe workflow-state change and exactly owner-approved `Done`/`Canceled`/`Duplicate`, issue-number targeting inside the single `SIS` team, deterministic description link removal, issue creation under an exact `SIS-N` parent, create-only hierarchy convergence, standalone top-level creation in an exact existing project/milestone, one top-level issue plus 1–10 explicit sub-issues, and non-destructive exact-name initiative create/update/project-link operations without caller-controlled entity IDs;
 - derives a global mutation key from only `operation`, `target`, `change`, and `policy`; source profile/session and command/correlation IDs are excluded;
 - derives a separate delivery key from that mutation key plus the exact source profile/platform/chat/user/thread/session;
 - atomically gets or creates one PM-assigned Kanban task by delivery key inside one Kanban write transaction;
@@ -45,13 +45,16 @@ The paired `linear-source-request-routing` skill requires short factual replies:
 Supported operations:
 
 - `read_issue`;
-- `change_state` to the safe non-terminal allowlist;
-- `update_issue` for an explicit non-empty subset of description, deterministic `remove_links`, safe state, and bounded priority on one exact `SIS-N`; the source accepts a positive `issue_number`, binds it to the fixed `SIS` team, and canonicalizes it to the exact `SIS-N` target before emitting the PM command;
+- `change_state` to the safe non-terminal allowlist under standard policy, or exactly `Done`, `Canceled`, or `Duplicate` with the fixed owner approval reference and live state-type validation;
+- `update_issue` for an explicit non-empty subset of `title`, literal `description` or `description_transform=remove_links`, safe `state`, bounded `priority`, `assignee`, exact `labels`, `due_date`, `estimate`, `parent_identifier`, and the complete `project`/`milestone` pair on one exact `SIS-N`; the source accepts a positive `issue_number`, binds it to the fixed `SIS` team, and canonicalizes it to the exact `SIS-N` target before emitting the PM command;
 - `add_comment` with deterministic-ID replay protection and a clean user-authored body;
 - `create_issue` in the `SIS` team under one exact `SIS-N` parent, with bounded title/description, safe state, and High/Medium/Low priority.
 - `converge_hierarchy` for exactly one `SIS` project → milestone → top-level issue; it performs complete bounded scoped preflight, safe unique exact-name reuse for project/milestone, deterministic-ID-only issue handling, exact scoped-list read-back, and crash/concurrent replay convergence under the existing hash-only journal lock.
 - `create_standalone_issue` for one top-level issue in an exact existing project/milestone, with explicit priority and absent parent; a unique exact-title legacy partial write may be safely adopted only inside the verified scope.
 - `converge_issue_tree` for one top-level issue plus 1–10 explicit sub-issues, each with deterministic identity, exact parent read-back, crash recovery, and literal replay no-op.
+- standalone `create_project`, `create_milestone`, `update_project`, and `update_milestone` operations with exact-name selection, deterministic create IDs, bounded name/description/target-date management, exact read-back, and names/dates-only source projection.
+- `create_initiative`, `update_initiative`, and `link_project_to_initiative` with exact-name selection, deterministic initiative/link UUIDv4 IDs, exact read-back/no-op replay, and names/dates-only source projection. Unlink, direct initiative archive/delete outside the owner-approved lifecycle shape, initiative hierarchy/status/owner/labels/search/approval, and arbitrary-team operations are not exposed.
+- `bulk_linear_operations` for 1–50 ordered exact mutating items, with all-child preflight before write, one aggregate owner approval when needed, deterministic child identities, fsync-backed ordered resume, and safe outcomes/counts-only source projection. Nested bulk, reads, bulk selectors, duplicate items, and repeated operation-specific complete entity selectors are rejected; distinct named project, milestone, and initiative creates may share the fixed team/workspace lane target.
 
 Comments, created issues, hierarchy entities, standalone issues, and every declared sub-issue use domain-separated deterministic Linear UUIDv4 IDs derived inside Project Manager from the global mutation key. The unique exact team key `SIS` identifies the team independently of its mutable display name. Project/milestone reuse requires unique exact-name, scope, and supplied-description verification. The PM journal request hash excludes source profile, command/correlation IDs, session, and delivery metadata, so identical requests from different source sessions converge globally while retaining distinct exact-wake tasks. Mutation text remains exactly user-authored; shared read-back comparison permits only the confirmed deterministic Linear plain-URL serialization. Failed read-back returns only allowlisted mismatched field names. No operation sets `verified=true` until every supplied scalar and structural relationship is read back exactly, and literal replay after a partial write produces no duplicate.
 
@@ -79,6 +82,16 @@ cd /Users/hermes/workspaces/swamp-ops
 hermes plugins doctor plugins/linear_source_route --ci
 hermes plugins doctor plugins/project_manager_linear --ci
 
+# PM credential context only; source profiles must never run this directly.
+HERMES_PROFILE=project-manager python scripts/linear_pm_readonly_smoke.py \
+  --live --operation inventory_linear \
+  --entity-type issues --entity-type projects \
+  --entity-type milestones --entity-type initiatives \
+  --exclude-archived
+
+HERMES_PROFILE=project-manager python scripts/linear_pm_readonly_smoke.py \
+  --live --operation inventory_team_states
+
 swamp model validate hermes-profile-bootstrap
 swamp workflow validate hermes-profile-bootstrap
 swamp model validate linear-command-lane-plan
@@ -91,7 +104,7 @@ env -u HERMES_DELEGATED_CHILD_CONTEXT \
   scripts/linear_source_local_route_smoke.py
 ```
 
-The local smoke performs no network mutation. Healthy output reports one ready task, one wake subscription, the exact session/thread, and replay without a second task. The concurrent temporary-DB test separately races one delivery and proves exactly one task and one subscription.
+The local route smoke performs no network mutation. Healthy output reports one ready task, one wake subscription, the exact session/thread, and replay without a second task. The live PM smoke uses only fixed read queries, exhausts pagination, emits safe counts, and creates no journal entry. Source profiles remain credential-free: no `LINEAR_TOKEN`, Linear MCP, GraphQL, or direct read client. The concurrent temporary-DB test separately races one delivery and proves exactly one task and one subscription.
 
 ## Reviewed rollout for existing profiles
 
