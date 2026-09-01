@@ -1287,8 +1287,8 @@ class ClientTests(unittest.TestCase):
             estimate=8,
         )
         self.assertIn("dueDate estimate", lane.ISSUE_QUERY)
-        self.assertIn("project { id }", lane.ISSUE_QUERY)
-        self.assertIn("projectMilestone { id }", lane.ISSUE_QUERY)
+        self.assertIn("project { id name }", lane.ISSUE_QUERY)
+        self.assertIn("projectMilestone { id name }", lane.ISSUE_QUERY)
         self.assertEqual(
             client.calls[-1],
             (

@@ -246,8 +246,8 @@ query LaneIssue($id: String!) {
     labels { nodes { id name } }
     team { id key }
     parent { id identifier }
-    project { id }
-    projectMilestone { id }
+    project { id name }
+    projectMilestone { id name }
   }
 }
 """

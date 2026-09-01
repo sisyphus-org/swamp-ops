@@ -518,6 +518,10 @@ class LinearEntityDestructionTests(unittest.TestCase):
         self.assertEqual(client.writes, [("archive", "issue", "issue-id")])
         verifier.assert_not_called()
 
+    def test_direct_issue_lookup_matches_dependency_project_field_depth(self):
+        self.assertIn("project { id name }", lane.ISSUE_QUERY)
+        self.assertIn("projectMilestone { id name }", lane.ISSUE_QUERY)
+
     def test_delete_crash_after_trash_recovers_without_second_mutation(self):
         class CrashDelete(DestructiveClient):
             crashed = False
