@@ -53,6 +53,20 @@ class _ReadOnlyClient:
         self._client = client
 
     def __getattr__(self, name: str) -> Any:
+        if name == "execute":
+            execute = getattr(self._client, name)
+
+            def readonly_execute(query: Any, variables: Any = None) -> Any:
+                if (
+                    not isinstance(query, str)
+                    or query.lstrip().lower().startswith("mutation")
+                ):
+                    raise RuntimeError(
+                        "read-only smoke attempted a GraphQL mutation"
+                    )
+                return execute(query, variables)
+
+            return readonly_execute
         if name in MUTATING_CLIENT_METHODS:
             def blocked(*_args: Any, **_kwargs: Any) -> Any:
                 raise RuntimeError("bulk plan-only smoke attempted a mutation")

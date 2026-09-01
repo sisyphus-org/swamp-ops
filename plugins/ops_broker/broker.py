@@ -565,18 +565,29 @@ def _approve_linear_attestation(
             or history.get("workflowName") != linear_approval.ATTEST_WORKFLOW
             or history.get("inputs") != expected_inputs
             or history.get("status") != "suspended"
-            or _linear_approval_step_status(history) != "waiting_approval"
         ):
             raise BrokerError("Linear owner approval run is not suspended at the exact approval gate")
-        approved = _json_command(
-            runner,
-            approve_command,
-            workspace=workspace,
-            timeout=60,
-            error_prefix="Linear owner approval",
-        )
-        if approved.get("runId") != attest_run_id:
-            raise BrokerError("Linear owner approval returned the wrong run")
+        try:
+            linear_approval.validate_expiry_window(
+                gate["expires_at"], datetime.now(timezone.utc)
+            )
+        except (KeyError, linear_approval.ContractError) as exc:
+            raise BrokerError("Linear owner approval gate binding is invalid") from exc
+        approval_status = _linear_approval_step_status(history)
+        if approval_status == "waiting_approval":
+            approved = _json_command(
+                runner,
+                approve_command,
+                workspace=workspace,
+                timeout=60,
+                error_prefix="Linear owner approval",
+            )
+            if approved.get("runId") != attest_run_id:
+                raise BrokerError("Linear owner approval returned the wrong run")
+        elif approval_status != "succeeded":
+            raise BrokerError(
+                "Linear owner approval run is not suspended at the exact approval gate"
+            )
         result = _json_command(
             runner,
             [
@@ -620,7 +631,6 @@ def _approve_linear_attestation(
                 "expiresAt": gate["expires_at"],
             }
             expected["checksum"] = linear_approval.artifact_checksum(expected)
-            linear_approval.validate_expiry_window(gate["expires_at"], datetime.now(timezone.utc))
         except (KeyError, linear_approval.ContractError) as exc:
             raise BrokerError("Linear owner approval gate binding is invalid") from exc
         if attestation != expected or not linear_approval.verify_artifact_checksum(attestation):

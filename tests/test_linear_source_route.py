@@ -828,6 +828,30 @@ class ParseTests(unittest.TestCase):
         )
 
     def test_issue_number_and_exact_identifier_are_mutually_exclusive(self):
+        parsed = route.parse_linear_request(
+            {
+                "operation": "update_issue",
+                "identifier": "SIS-86",
+                "parent_identifier": None,
+                "approval": approval_reference(),
+            },
+            source_profile="default",
+            uuid_factory=uuid_factory(),
+        )
+        self.assertIn("parent_identifier", parsed.command["change"])
+        self.assertIsNone(parsed.command["change"]["parent_identifier"])
+
+        with self.assertRaisesRegex(route.RouteError, "description_transform"):
+            route.parse_linear_request(
+                {
+                    "operation": "update_issue",
+                    "identifier": "SIS-86",
+                    "description_transform": ["remove_links"],
+                },
+                source_profile="default",
+                uuid_factory=uuid_factory(),
+            )
+
         with self.assertRaisesRegex(route.RouteError, "exactly one issue target"):
             route.parse_linear_request(
                 {
@@ -1167,6 +1191,52 @@ class DispatchTests(unittest.TestCase):
                 self.assertEqual([call[0] for call in board.calls], ["get_or_create"])
 
     def test_completed_workspace_read_literal_replay_uses_same_task_and_result(self):
+        requests_and_targets = (
+            (
+                {"operation": "create_issue_relation", "identifier": "SIS-77", "related_identifier": "SIS-94", "relation_type": "related"},
+                {"type": "issue_relation", "identifier": "SIS-77", "related_identifier": "SIS-94", "relation_type": "related"},
+            ),
+            (
+                {"operation": "remove_issue_relation", "identifier": "SIS-77", "related_identifier": "SIS-94", "relation_type": "related", "approval": approval_reference()},
+                {"type": "issue_relation", "identifier": "SIS-77", "related_identifier": "SIS-94", "relation_type": "related"},
+            ),
+            (
+                {"operation": "replace_issue_relation", "identifier": "SIS-77", "old_related_identifier": "SIS-94", "old_relation_type": "related", "new_related_identifier": "SIS-95", "new_relation_type": "blocks", "approval": approval_reference()},
+                {"type": "issue_relation_replacement", "old": {"identifier": "SIS-77", "related_identifier": "SIS-94", "relation_type": "related"}, "new": {"identifier": "SIS-77", "related_identifier": "SIS-95", "relation_type": "blocks"}},
+            ),
+        )
+        for relation_request, relation_target in requests_and_targets:
+            with self.subTest(operation=relation_request["operation"]):
+                persisted = route.parse_linear_request(
+                    relation_request,
+                    source_profile=source_context().profile,
+                    uuid_factory=uuid_factory(),
+                ).command
+                linear_result = {
+                    "schema_version": "linear-result.v2",
+                    "command_id": persisted["command_id"],
+                    "correlation_id": persisted["correlation_id"],
+                    "idempotency_key": persisted["idempotency_key"],
+                    "source_profile": persisted["source_profile"],
+                    "operation": persisted["operation"],
+                    "mode": "apply",
+                    "target": relation_target,
+                    "result": "applied",
+                    "before": {},
+                    "after": relation_target,
+                    "plan": [{"action": persisted["operation"]}],
+                    "no_op": False,
+                    "verified": True,
+                }
+                board = FakeBoard(existing={"id": "t_1234abcd", "status": "done", "session_id": source_context().session_id, "body": route.build_task_body(persisted), "result": json.dumps(linear_result)})
+                replay = route.route_request(
+                    relation_request,
+                    source=source_context(),
+                    board=board,
+                    uuid_factory=uuid_factory(),
+                )
+                self.assertEqual(replay["status"], "verified_no_op")
+
         request = {
             "operation": "inventory_linear",
             "entity_types": ["issues"],

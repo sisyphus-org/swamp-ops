@@ -3699,6 +3699,72 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(replay["result"], "no_op")
             self.assertEqual(len(client.writes), 1)
 
+    def test_remove_links_literal_replay_preserves_url_valued_markdown_label(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Path(tmp) / "journal.json"
+            client = FakeClient()
+            client.current["description"] = (
+                "[https://label.example](https://destination.example)"
+            )
+            raw = command(
+                "update_issue",
+                {"description_transform": "remove_links"},
+                key="linear:SIS-59:update:url-label-replay",
+            )
+
+            applied = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+            replay = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+
+            self.assertEqual(
+                applied["after"]["description"], "https://label.example"
+            )
+            self.assertEqual(
+                replay["after"]["description"], "https://label.example"
+            )
+            self.assertEqual(replay["result"], "no_op")
+            self.assertEqual(len(client.writes), 1)
+
+    def test_remove_links_recovers_post_write_crash_without_recomputing_after_state(self):
+        class CrashAfterWrite(FakeClient):
+            crashed = False
+
+            def update_issue_fields(self, issue_id, **fields):
+                super().update_issue_fields(issue_id, **fields)
+                if not self.crashed:
+                    self.crashed = True
+                    raise KeyboardInterrupt("simulated process death after update")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Path(tmp) / "journal.json"
+            client = CrashAfterWrite()
+            client.current["description"] = (
+                "[https://label.example](https://destination.example)"
+            )
+            raw = command(
+                "update_issue",
+                {"description_transform": "remove_links"},
+                key="linear:SIS-59:update:url-label-crash",
+            )
+
+            with self.assertRaisesRegex(KeyboardInterrupt, "process death"):
+                lane.execute_command(client, raw, mode="apply", journal_path=journal)
+            recovered = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+            replay = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+
+            self.assertEqual(client.current["description"], "https://label.example")
+            self.assertEqual(recovered["result"], "no_op")
+            self.assertTrue(recovered["recovered"])
+            self.assertEqual(replay["result"], "no_op")
+            self.assertEqual(len(client.writes), 1)
+
     def test_update_issue_clears_project_and_milestone_together(self):
         with tempfile.TemporaryDirectory() as tmp:
             client = FakeClient()
@@ -5179,23 +5245,33 @@ class ExecutionTests(unittest.TestCase):
             def list_project_milestones(self, project_id):
                 return json.loads(json.dumps(self.milestones))
             def update_project(self, project_id, **fields):
-                self.writes.append(("update_project", project_id, fields)); item = self.projects[0]
+                self.writes.append(("update_project", project_id, fields))
+                item = self.projects[0]
                 item["name"] = fields.get("new_name", item["name"])
-                if "description" in fields: item["description"] = fields["description"]
-                if "target_date" in fields: item["targetDate"] = fields["target_date"]
+                if "description" in fields:
+                    item["description"] = fields["description"]
+                if "target_date" in fields:
+                    item["targetDate"] = fields["target_date"]
             def update_project_milestone(self, milestone_id, **fields):
-                self.writes.append(("update_milestone", milestone_id, fields)); item = self.milestones[0]
+                self.writes.append(("update_milestone", milestone_id, fields))
+                item = self.milestones[0]
                 item["name"] = fields.get("new_name", item["name"])
-                if "description" in fields: item["description"] = fields["description"]
-                if "target_date" in fields: item["targetDate"] = fields["target_date"]
+                if "description" in fields:
+                    item["description"] = fields["description"]
+                if "target_date" in fields:
+                    item["targetDate"] = fields["target_date"]
 
         with tempfile.TemporaryDirectory() as tmp:
-            client = EditClient(); raw = project_command("update_project"); journal = Path(tmp) / "up.json"
+            client = EditClient()
+            raw = project_command("update_project")
+            journal = Path(tmp) / "up.json"
             applied = lane.execute_command(client, raw, mode="apply", journal_path=journal)
             self.assertEqual(applied["after"], {"name": "Hermes Personal Experience", "target_date": None})
             self.assertEqual(lane.execute_command(client, raw, mode="apply", journal_path=journal)["result"], "no_op")
             self.assertEqual(len(client.writes), 1)
-            client = EditClient(); raw = milestone_command("update_milestone"); journal = Path(tmp) / "um.json"
+            client = EditClient()
+            raw = milestone_command("update_milestone")
+            journal = Path(tmp) / "um.json"
             applied = lane.execute_command(client, raw, mode="apply", journal_path=journal)
             self.assertEqual(applied["after"], {"project": "Hermes Experience", "name": "Calendar and reminders", "target_date": None})
             self.assertEqual(lane.execute_command(client, raw, mode="apply", journal_path=journal)["result"], "no_op")
@@ -5217,7 +5293,8 @@ class ExecutionTests(unittest.TestCase):
             lane.execute_command(MissingClient(), project_command("update_project"), mode="plan")
 
     def test_linear_client_project_updates_use_minimal_fixed_graphql_payloads(self):
-        client = object.__new__(lane.LinearClient); calls = []
+        client = object.__new__(lane.LinearClient)
+        calls = []
         def execute(query, variables=None):
             calls.append((query, variables))
             return {"projectUpdate": {"success": True}} if "projectUpdate" in query else {"projectMilestoneUpdate": {"success": True}}

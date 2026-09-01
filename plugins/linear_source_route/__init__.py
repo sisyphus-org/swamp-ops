@@ -1527,7 +1527,7 @@ def _public_target(result: dict[str, Any]) -> tuple[dict[str, Any], dict[str, An
             public_target["estimate"] = estimate
         if operation == "update_issue" and "parent_identifier" in after:
             parent_identifier = after.get("parent_identifier")
-            if (
+            if parent_identifier is not None and (
                 not isinstance(parent_identifier, str)
                 or not PUBLIC_ISSUE_IDENTIFIER.fullmatch(parent_identifier)
             ):

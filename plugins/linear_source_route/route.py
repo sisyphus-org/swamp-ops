@@ -544,6 +544,55 @@ def _validate_canonical_bulk_item(item: dict[str, Any], index: int) -> None:
             _validate_clean_text(change.get(field), field, maximum=200, required=True)
 
 
+def _bulk_conflict_selector(item: dict[str, Any]) -> dict[str, Any]:
+    """Identify the complete semantic entity selected by one child operation."""
+    operation = item["operation"]
+    change = item["change"]
+    selector: dict[str, Any] = {
+        "operation": operation,
+        "target": item["target"],
+    }
+    fields = {
+        "add_comment": ("body",),
+        "create_issue": ("parent_identifier", "title"),
+        "create_issue_relation": ("related_identifier", "relation_type"),
+        "remove_issue_relation": ("related_identifier", "relation_type"),
+        "replace_issue_relation": ("old_related_identifier", "old_relation_type"),
+        "create_project": ("name",),
+        "update_project": ("name",),
+        "create_milestone": ("project", "name"),
+        "update_milestone": ("project", "name"),
+        "create_initiative": ("name",),
+        "update_initiative": ("name",),
+        "link_project_to_initiative": ("project", "initiative"),
+    }.get(operation, ())
+    if fields:
+        selector["selector"] = {field: change.get(field) for field in fields}
+    elif operation in {
+        "converge_hierarchy",
+        "create_standalone_issue",
+        "converge_issue_tree",
+    }:
+        selector["selector"] = {
+            "project": (
+                change.get("project", {}).get("name")
+                if isinstance(change.get("project"), dict)
+                else None
+            ),
+            "milestone": (
+                change.get("milestone", {}).get("name")
+                if isinstance(change.get("milestone"), dict)
+                else None
+            ),
+            "issue": (
+                change.get("issue", {}).get("title")
+                if isinstance(change.get("issue"), dict)
+                else None
+            ),
+        }
+    return selector
+
+
 def _validate_bulk_request(
     request: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
@@ -577,7 +626,12 @@ def _validate_bulk_request(
         encoded = json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         digest = hashlib.sha256(encoded.encode()).hexdigest()
         target_digest = hashlib.sha256(
-            json.dumps(target, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+            json.dumps(
+                _bulk_conflict_selector(item),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
         ).hexdigest()
         if digest in semantic:
             raise RouteError("bulk request contains a duplicate semantic item")
@@ -730,11 +784,15 @@ def parse_linear_request(
                     maximum=10_000,
                     required=False,
                 )
-            if (
-                "description_transform" in change
-                and change["description_transform"] not in DESCRIPTION_TRANSFORMS
-            ):
-                raise RouteError("description_transform is not in the bounded allowlist")
+            if "description_transform" in change:
+                description_transform = change["description_transform"]
+                if (
+                    not isinstance(description_transform, str)
+                    or description_transform not in DESCRIPTION_TRANSFORMS
+                ):
+                    raise RouteError(
+                        "description_transform is not in the bounded allowlist"
+                    )
             if "state" in change and change["state"] not in SAFE_STATES:
                 raise RouteError("state is not in the safe-state allowlist")
             if "priority" in change and change["priority"] not in PRIORITIES:
@@ -1247,6 +1305,35 @@ def _verified_replay(
             or url != after_issue.get("url")
         ):
             raise RouteError("completed replay has an invalid verified target")
+    elif operation in {
+        "create_issue_relation",
+        "remove_issue_relation",
+        "replace_issue_relation",
+    }:
+        change = persisted["change"]
+        if operation == "replace_issue_relation":
+            expected_target = {
+                "type": "issue_relation_replacement",
+                "old": {
+                    "identifier": persisted["target"]["identifier"],
+                    "related_identifier": change["old_related_identifier"],
+                    "relation_type": change["old_relation_type"],
+                },
+                "new": {
+                    "identifier": persisted["target"]["identifier"],
+                    "related_identifier": change["new_related_identifier"],
+                    "relation_type": change["new_relation_type"],
+                },
+            }
+        else:
+            expected_target = {
+                "type": "issue_relation",
+                "identifier": persisted["target"]["identifier"],
+                "related_identifier": change["related_identifier"],
+                "relation_type": change["relation_type"],
+            }
+        if target != expected_target:
+            raise RouteError("completed replay target does not match persisted command")
     elif (
         target.get("type") != persisted["target"].get("type")
         or target.get("identifier") != persisted["target"].get("identifier")

@@ -20,7 +20,7 @@ Required envelope:
 }
 ```
 
-`{"mode":"standard"}` remains the default. The existing exact fixed-shape `owner_approved` attestation reference documented in [linear-owner-approval.md](linear-owner-approval.md) is accepted only for `change_state` to exactly `Done`, `Canceled`, or `Duplicate`, parent-only `update_issue`, and exact issue-relation removal/replacement. Those terminal states and relation removal/replacement always reject standard policy.
+`{"mode":"standard"}` remains the default. The existing exact fixed-shape `owner_approved` attestation reference documented in [linear-owner-approval.md](linear-owner-approval.md) is accepted only for `change_state` to exactly `Done`, `Canceled`, or `Duplicate`; parent-only `update_issue`; exact issue-relation removal/replacement; the supported core lifecycle matrix; and a `bulk_linear_operations` parent containing at least one such owner-controlled child. Owner-controlled children always reject standard policy.
 
 The validator rejects unknown fields, arbitrary GraphQL or MCP method names, URLs, fuzzy identifiers, arrays/bulk targets, unsupported operations and unbounded payloads. After exact issue resolution, the execution lane additionally rejects targets whose resolved team is not `SIS`. `idempotency_key` is 8–200 characters, starts with an alphanumeric character, and thereafter uses only `A-Za-z0-9:._/-`.
 
@@ -49,8 +49,10 @@ The lane accepts only `linear-command.v2` and emits/accepts only `linear-result.
 - `create_initiative`: creates or reuses one unique exact-name workspace initiative. Optional managed fields are `description` and `target_date`; creation uses an internal deterministic UUIDv4 and exact bounded read-back.
 - `update_initiative`: selects one exact existing initiative by current `name`, then updates a non-empty subset of `new_name`, `description`, and `target_date` with exact read-back and no-op replay.
 - `link_project_to_initiative`: adds one unique exact existing `SIS` project to one unique exact existing initiative. The relation uses a deterministic caller UUIDv4 and exact initiative-project read-back. Unlink is intentionally unavailable. Live schema introspection confirmed `InitiativeCreateInput.id`, nullable `InitiativeCreateInput.targetDate` / `InitiativeUpdateInput.targetDate`, and `InitiativeToProjectCreateInput.id`, `initiativeId`, and `projectId`.
+- `archive_linear_entity`: owner-approved only for issue, project, or initiative; milestone archive is unsupported.
+- `delete_linear_entity`: owner-approved only for issue, project, project-scoped milestone, or initiative. Issue deletion is non-permanent trash semantics. Every lifecycle plan binds the exact entity and complete impact inventory, and apply immediately re-plans before any write.
 
-Arbitrary terminal names, nonterminal owner approval, arbitrary/raw search, initiative unlink/reparenting/status/owner/labels, archive/issue deletion, bulk relation mutation and unrestricted structure changes remain unavailable. Owner approval enables only the three exact terminal states, exact issue-parent replacement/clear, and exact single relation removal/rewire; see [linear-owner-approval.md](linear-owner-approval.md).
+Arbitrary terminal names, nonterminal owner approval, arbitrary/raw search, initiative unlink/reparenting/status/owner/labels, milestone archive, permanent issue deletion, and unrestricted structure changes remain unavailable. Owner approval enables only the three exact terminal states, exact issue-parent replacement/clear, exact single relation removal/rewire, the supported lifecycle matrix above, and an ordered bulk parent containing those exact shapes; see [linear-owner-approval.md](linear-owner-approval.md).
 
 ### Read-only credential boundary
 
@@ -100,7 +102,7 @@ The source plugin validates and persists this discriminated request but has no L
 
 ### Ordered bounded batches
 
-`bulk_linear_operations` targets exactly `{"type":"workspace","identifier":"current"}` and contains `change.items`, an ordered list of 1–50 entries. Every entry contains only `operation`, `target`, and `change` in an existing mutating single-item lane shape. Reads, nested bulk, policy/approval/identity fields, raw GraphQL, duplicate semantic entries, and multiple writes to the same exact canonical target are rejected before Linear access. The parent serialized intent is capped at 24 KiB.
+`bulk_linear_operations` targets exactly `{"type":"workspace","identifier":"current"}` and contains `change.items`, an ordered list of 1–50 entries. Every entry contains only `operation`, `target`, and `change` in an existing mutating single-item lane shape. Reads, nested bulk, policy/approval/identity fields, raw GraphQL, duplicate semantic entries, and multiple writes with the same operation-specific complete semantic entity selector are rejected before Linear access. Distinct named project, project-scoped milestone, and initiative creates may share the fixed team/workspace lane target. The parent serialized intent is capped at 24 KiB.
 
 Child command, correlation, and idempotency identities are domain-separated deterministic derivations of the complete ordered parent semantic identity and zero-based index. The lane validates every child and executes every child plan before the first write. Standard policy is accepted only when every child is standard-safe. A mixed safe/owner-controlled batch carries one parent `owner_approved` reference whose intent hash binds the full ordered list and whose before-state hash binds the ordered aggregate of every child before/impact snapshot and plan.
 

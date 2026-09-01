@@ -158,6 +158,27 @@ class SmokeTests(unittest.TestCase):
         self.assertTrue(result["verifiedNoMutation"])
 
     def test_destruction_preflight_smoke_is_schema_and_impact_read_only(self):
+        class ExecuteClient:
+            def __init__(self):
+                self.calls = []
+
+            def execute(self, query, variables=None):
+                self.calls.append((query, variables))
+                return {"ok": True}
+
+        raw_client = ExecuteClient()
+        readonly = smoke._ReadOnlyClient(raw_client)
+        self.assertEqual(
+            readonly.execute("query Safe { viewer { id } }"), {"ok": True}
+        )
+        with self.assertRaisesRegex(RuntimeError, "mutation"):
+            readonly.execute(
+                "  mutation Unsafe { issueDelete(id: \"x\") { success } }"
+            )
+        self.assertEqual(
+            raw_client.calls, [("query Safe { viewer { id } }", None)]
+        )
+
         test = self
         class Client:
             def execute(self, query, variables=None):

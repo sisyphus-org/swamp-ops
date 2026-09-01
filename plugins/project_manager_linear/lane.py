@@ -3409,8 +3409,100 @@ def execute_command(
         )
     if command["operation"] == "update_issue":
         change = dict(command["change"])
-        if change.pop("description_transform", None) == "remove_links":
-            change["description"] = remove_description_links(issue.get("description"))
+        description_transform = change.pop("description_transform", None)
+        description_recovery_path = (
+            journal_path.with_name(journal_path.name + ".description-transforms")
+            if description_transform == "remove_links" and journal_path is not None
+            else None
+        )
+        description_recovery_entries = (
+            load_relation_recovery_journal(description_recovery_path)
+            if description_recovery_path is not None
+            else {}
+        )
+        description_recovery = description_recovery_entries.get(key_hash)
+        command_hash = hashlib.sha256(
+            json.dumps(
+                command,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        description_binding = {
+            "approval_checksum": command_hash,
+            "intent_hash": request_hash,
+            "command_hash": command_hash,
+        }
+
+        def description_state_hash(value: Any) -> str:
+            return hashlib.sha256(
+                json.dumps(
+                    {"description": value},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+
+        description_recovered = False
+        description_before_hash = description_state_hash(issue.get("description"))
+        description_after_hash = description_before_hash
+        if description_transform == "remove_links":
+            if description_recovery is not None and (
+                description_recovery["request_hash"] != request_hash
+                or any(
+                    description_recovery[field] != value
+                    for field, value in description_binding.items()
+                )
+            ):
+                raise ContractError("description transform recovery request conflict")
+            if (
+                description_recovery is not None
+                and description_before_hash
+                == description_recovery["after_state_hash"]
+            ):
+                change["description"] = issue.get("description")
+                description_recovered = True
+            else:
+                if (
+                    description_recovery is not None
+                    and description_before_hash
+                    != description_recovery["before_state_hash"]
+                ):
+                    raise ContractError("description transform recovery state drifted")
+                change["description"] = remove_description_links(
+                    issue.get("description")
+                )
+            description_after_hash = description_state_hash(change["description"])
+
+        def record_description_recovery(
+            phase: str, *, after_description: Any = ...
+        ) -> None:
+            if description_recovery_path is None or mode != "apply":
+                return
+            description_recovery_entries[key_hash] = {
+                "request_hash": request_hash,
+                **description_binding,
+                "before_state_hash": (
+                    description_recovery["before_state_hash"]
+                    if description_recovery is not None
+                    else description_before_hash
+                ),
+                "after_state_hash": (
+                    description_state_hash(after_description)
+                    if after_description is not ...
+                    else (
+                        description_recovery["after_state_hash"]
+                        if description_recovery is not None
+                        else description_after_hash
+                    )
+                ),
+                "phase": phase,
+            }
+            write_relation_recovery_journal(
+                description_recovery_path, description_recovery_entries
+            )
         state_id = None
         assignee_id: str | None | object = ...
         assignee_name: str | None = None
@@ -3970,6 +4062,9 @@ def execute_command(
             if owner_before_hash != owner_recovery["before_state_hash"]:
                 raise ContractError("owner-approved issue recovery state drifted")
         if not fields:
+            record_description_recovery(
+                "completed", after_description=issue.get("description")
+            )
             completed_recovery = record_owner_recovery("completed")
             result = {
                 **base,
@@ -3980,6 +4075,8 @@ def execute_command(
                 "no_op": True,
                 "verified": True,
             }
+            if description_recovered:
+                result["recovered"] = True
             if completed_recovery is not None:
                 result["recovery_evidence"] = owner_recovery_evidence(
                     completed_recovery
@@ -4041,6 +4138,7 @@ def execute_command(
         if "project" in change:
             mutation["project_id"] = desired_project_id
             mutation["milestone_id"] = desired_milestone_id
+        record_description_recovery("prepared")
         record_owner_recovery("prepared")
         client.update_issue_fields(issue["id"], **mutation)
         verified_issue = client.get_issue(identifier)
@@ -4051,6 +4149,9 @@ def execute_command(
         fields = update_mismatches(verified_issue)
         if fields:
             raise ContractError(_COMPARISON.mismatch_message("update_issue", fields))
+        record_description_recovery(
+            "completed", after_description=verified_issue.get("description")
+        )
         completed_recovery = record_owner_recovery("completed")
         result = {
             **base,

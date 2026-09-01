@@ -1053,14 +1053,30 @@ class PmVerifierTests(unittest.TestCase):
 
     def test_wrong_run_version_checksum_intent_before_state_or_expiry_fails_closed(self):
         mutations = []
-        wrong_workflow = policy(); wrong_workflow["approval"]["workflow"] = "attacker-workflow"; mutations.append(wrong_workflow)
-        wrong_model = policy(); wrong_model["approval"]["model"] = "attacker-model"; mutations.append(wrong_model)
-        wrong_run = policy(); wrong_run["approval"]["run_id"] = RUN_ID; mutations.append(wrong_run)
-        wrong_version = policy(); wrong_version["approval"]["artifact_version"] = 8; mutations.append(wrong_version)
-        wrong_checksum = policy(); wrong_checksum["approval"]["checksum"] = "0" * 64; mutations.append(wrong_checksum)
-        wrong_intent = policy(); wrong_intent["approval"]["intent_hash"] = "1" * 64; mutations.append(wrong_intent)
-        wrong_before = policy(); wrong_before["approval"]["before_state_hash"] = "2" * 64; mutations.append(wrong_before)
-        wrong_expiry = policy(); wrong_expiry["approval"]["expires_at"] = "2026-08-31T12:30:00Z"; mutations.append(wrong_expiry)
+        wrong_workflow = policy()
+        wrong_workflow["approval"]["workflow"] = "attacker-workflow"
+        mutations.append(wrong_workflow)
+        wrong_model = policy()
+        wrong_model["approval"]["model"] = "attacker-model"
+        mutations.append(wrong_model)
+        wrong_run = policy()
+        wrong_run["approval"]["run_id"] = RUN_ID
+        mutations.append(wrong_run)
+        wrong_version = policy()
+        wrong_version["approval"]["artifact_version"] = 8
+        mutations.append(wrong_version)
+        wrong_checksum = policy()
+        wrong_checksum["approval"]["checksum"] = "0" * 64
+        mutations.append(wrong_checksum)
+        wrong_intent = policy()
+        wrong_intent["approval"]["intent_hash"] = "1" * 64
+        mutations.append(wrong_intent)
+        wrong_before = policy()
+        wrong_before["approval"]["before_state_hash"] = "2" * 64
+        mutations.append(wrong_before)
+        wrong_expiry = policy()
+        wrong_expiry["approval"]["expires_at"] = "2026-08-31T12:30:00Z"
+        mutations.append(wrong_expiry)
         for value in mutations:
             with self.subTest(value=value), self.assertRaises(approval.ApprovalError):
                 self.verify(policy_value=value)
@@ -1439,6 +1455,131 @@ class BrokerFoundationTests(unittest.TestCase):
                     workspace=ROOT,
                     audit_path=audit,
                 )
+
+    def test_broker_rejects_expired_gate_before_approve_or_resume(self):
+        expires = (datetime.now(timezone.utc) - timedelta(hours=1)).replace(
+            microsecond=0
+        ).isoformat().replace("+00:00", "Z")
+        future = (datetime.now(timezone.utc) + timedelta(hours=1)).replace(
+            microsecond=0
+        ).isoformat().replace("+00:00", "Z")
+        planned = owner_approval.build_plan(intent(), BEFORE_HASH, future)
+        encoded = owner_approval.encode_intent(intent())
+        request = broker.validate_request(
+            {
+                "request_id": "76666666-6666-4666-8666-666666666666",
+                "integration": "swamp",
+                "operation": "approve_linear_destructive_owner_approval_attest",
+                "arguments": {"attest_run_id": ATTEST_RUN_ID},
+                "mode": "apply",
+            }
+        )
+        calls = []
+        with tempfile.TemporaryDirectory() as tmp:
+            audit = Path(tmp) / "audit.jsonl"
+            audit.write_text(
+                json.dumps(
+                    {
+                        "event": "linear_owner_approval_gate",
+                        "attest_run_id": ATTEST_RUN_ID,
+                        "intent": encoded,
+                        "before_state_hash": BEFORE_HASH,
+                        "expires_at": expires,
+                        "plan_run_id": RUN_ID,
+                        "plan_checksum": planned["checksum"],
+                        "plan_artifact_version": 7,
+                    }
+                )
+                + "\n"
+            )
+
+            def runner(argv, **_kwargs):
+                calls.append(argv)
+                if argv[:4] != ["swamp", "workflow", "history", "get"]:
+                    self.fail("expired approval must not approve or resume")
+                payload = {
+                    "id": ATTEST_RUN_ID,
+                    "workflowName": owner_approval.ATTEST_WORKFLOW,
+                    "status": "suspended",
+                    "inputs": {
+                        "intent": encoded,
+                        "beforeStateHash": BEFORE_HASH,
+                        "expiresAt": expires,
+                        "planRunId": RUN_ID,
+                        "planArtifactVersion": 7,
+                        "planChecksum": planned["checksum"],
+                    },
+                    "jobs": [{"name": "attest", "steps": [{"name": "approve-linear-destructive-intent", "status": "waiting_approval"}]}],
+                }
+                return {"returncode": 0, "stdout": json.dumps(payload), "stderr": ""}
+
+            with self.assertRaisesRegex(broker.BrokerError, "gate binding"):
+                broker.execute_request(
+                    request,
+                    caller="owner",
+                    policy=self.broker_policy(),
+                    runner=runner,
+                    workspace=ROOT,
+                    audit_path=audit,
+                )
+        self.assertEqual(len(calls), 1)
+
+    def test_broker_resumes_when_linear_approval_step_already_succeeded(self):
+        expires = (datetime.now(timezone.utc) + timedelta(hours=1)).replace(
+            microsecond=0
+        ).isoformat().replace("+00:00", "Z")
+        planned = owner_approval.build_plan(intent(), BEFORE_HASH, expires)
+        encoded = owner_approval.encode_intent(intent())
+        attest = {
+            "schemaVersion": owner_approval.ATTESTATION_SCHEMA_VERSION,
+            "mode": "attestation",
+            "decision": "owner_approved",
+            "workflow": owner_approval.ATTEST_WORKFLOW,
+            "model": owner_approval.ATTEST_MODEL,
+            "plan": {"workflow": owner_approval.PLAN_WORKFLOW, "model": owner_approval.PLAN_MODEL, "runId": RUN_ID, "artifactVersion": 7, "checksum": planned["checksum"]},
+            "intent": intent(),
+            "intentHash": owner_approval.canonical_sha256(intent()),
+            "beforeStateHash": BEFORE_HASH,
+            "expiresAt": expires,
+        }
+        attest["checksum"] = owner_approval.artifact_checksum(attest)
+        request = broker.validate_request(
+            {
+                "request_id": "86666666-6666-4666-8666-666666666666",
+                "integration": "swamp",
+                "operation": "approve_linear_destructive_owner_approval_attest",
+                "arguments": {"attest_run_id": ATTEST_RUN_ID},
+                "mode": "apply",
+            }
+        )
+        calls = []
+        with tempfile.TemporaryDirectory() as tmp:
+            audit = Path(tmp) / "audit.jsonl"
+            audit.write_text(json.dumps({"event": "linear_owner_approval_gate", "attest_run_id": ATTEST_RUN_ID, "intent": encoded, "before_state_hash": BEFORE_HASH, "expires_at": expires, "plan_run_id": RUN_ID, "plan_checksum": planned["checksum"], "plan_artifact_version": 7}) + "\n")
+
+            def runner(argv, **_kwargs):
+                calls.append(argv)
+                if argv[:4] == ["swamp", "workflow", "history", "get"]:
+                    payload = {"id": ATTEST_RUN_ID, "workflowName": owner_approval.ATTEST_WORKFLOW, "status": "suspended", "inputs": {"intent": encoded, "beforeStateHash": BEFORE_HASH, "expiresAt": expires, "planRunId": RUN_ID, "planArtifactVersion": 7, "planChecksum": planned["checksum"]}, "jobs": [{"name": "attest", "steps": [{"name": "approve-linear-destructive-intent", "status": "succeeded"}]}]}
+                elif argv[:3] == ["swamp", "workflow", "approve"]:
+                    self.fail("an already-succeeded approval step must not be approved again")
+                elif argv[:3] == ["swamp", "workflow", "resume"]:
+                    payload = {"id": ATTEST_RUN_ID, "status": "succeeded", "jobs": [{"steps": [{"dataArtifacts": [{"name": "result", "version": 9}]}]}]}
+                else:
+                    payload = artifact(attest, run_id=ATTEST_RUN_ID, version=9)
+                return {"returncode": 0, "stdout": json.dumps(payload), "stderr": ""}
+
+            response = broker.execute_request(
+                request,
+                caller="owner",
+                policy=self.broker_policy(),
+                runner=runner,
+                workspace=ROOT,
+                audit_path=audit,
+            )
+        self.assertEqual(response["result"]["policy"], policy(attest))
+        self.assertFalse(any(call[:3] == ["swamp", "workflow", "approve"] for call in calls))
+        self.assertTrue(any(call[:3] == ["swamp", "workflow", "resume"] for call in calls))
 
     def test_non_owner_cannot_approve_even_if_peer_policy_is_misconfigured(self):
         request = broker.validate_request(

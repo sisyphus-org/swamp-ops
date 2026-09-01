@@ -164,12 +164,22 @@ def _canonical_impact(impact: dict[str, list[Any]]) -> dict[str, list[Any]]:
         raise RuntimeError("Linear dependency impact inventory is invalid")
     normalized: dict[str, list[Any]] = {}
     for key in sorted(impact):
+        raw_ids = [
+            item.get("id") if isinstance(item, dict) else None
+            for item in impact[key]
+        ]
+        if any(not isinstance(item, str) or not item for item in raw_ids):
+            raise RuntimeError(
+                "Linear dependency impact inventory contains an invalid raw ID"
+            )
+        if len(set(raw_ids)) != len(raw_ids):
+            raise RuntimeError(
+                "Linear dependency impact inventory contains duplicate raw IDs"
+            )
         values = [_scrub(item) for item in impact[key]]
         values.sort(key=lambda item: json.dumps(
             item, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         ))
-        if len({_hash(item) for item in values}) != len(values):
-            raise RuntimeError("Linear dependency impact inventory contains duplicates")
         normalized[key] = values
     return normalized
 
@@ -312,6 +322,21 @@ def execute(
     key_hash: str, request_hash: str, error_cls: type[Exception],
 ) -> dict[str, Any]:
     operation = command["operation"]
+    if mode == "apply":
+        required = (
+            "get_linear_entity",
+            "list_issue_relations",
+            "list_project_initiatives",
+        )
+        missing = [
+            capability
+            for capability in required
+            if not callable(getattr(client, capability, None))
+        ]
+        if missing:
+            raise error_cls(
+                "destructive apply requires client capability: " + missing[0]
+            )
     target = command["target"]
     entity_type = target["type"]
     selector = target["selector"]

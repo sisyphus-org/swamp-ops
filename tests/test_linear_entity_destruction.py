@@ -230,11 +230,11 @@ class LinearEntityDestructionTests(unittest.TestCase):
 
     def test_nonempty_dependency_inventory_is_bound_into_deterministic_plan(self):
         cases = (
-            ("issue", "children", [{"identifier": "SIS-78"}]),
-            ("project", "project_issues", [{"identifier": "SIS-78"}]),
-            ("project", "project_milestones", [{"name": "M2"}]),
-            ("milestone", "milestone_issues", [{"identifier": "SIS-78"}]),
-            ("initiative", "initiative_projects", [{"name": "P"}]),
+            ("issue", "children", [{"id": "child-id", "identifier": "SIS-78"}]),
+            ("project", "project_issues", [{"id": "issue-id", "identifier": "SIS-78"}]),
+            ("project", "project_milestones", [{"id": "milestone-id", "name": "M2"}]),
+            ("milestone", "milestone_issues", [{"id": "issue-id", "identifier": "SIS-78"}]),
+            ("initiative", "initiative_projects", [{"id": "project-id", "name": "P"}]),
         )
         selector = {
             "issue": {"identifier": "SIS-77"}, "project": {"name": "Empty project"},
@@ -255,6 +255,32 @@ class LinearEntityDestructionTests(unittest.TestCase):
             self.assertEqual(client.writes, [])
 
     def test_each_supported_operation_applies_with_nonempty_bound_impact(self):
+        client = DestructiveClient()
+        client.project_issues = [
+            {"id": "issue-a", "identifier": "SIS-78", "title": "Same"},
+            {"id": "issue-b", "identifier": "SIS-78", "title": "Same"},
+        ]
+        plan = lane.execute_command(
+            client,
+            destructive_command(
+                "archive_linear_entity", "project", {"name": "Empty project"}
+            ),
+            mode="plan",
+        )
+        self.assertEqual(plan["before"]["impact_counts"]["issues"], 2)
+
+        client.project_issues[1]["id"] = "issue-a"
+        with self.assertRaisesRegex(
+            (RuntimeError, lane.ContractError), "duplicate raw IDs"
+        ):
+            lane.execute_command(
+                client,
+                destructive_command(
+                    "archive_linear_entity", "project", {"name": "Empty project"}
+                ),
+                mode="plan",
+            )
+
         for operation, entity_type, selector in self.SUPPORTED:
             with self.subTest(operation=operation, entity_type=entity_type), tempfile.TemporaryDirectory() as tmp:
                 client = DestructiveClient()
@@ -270,6 +296,45 @@ class LinearEntityDestructionTests(unittest.TestCase):
                 self.assertEqual(result["plan"][0]["affected_entities"], result["before"]["impact"])
 
     def test_ambiguity_api_failure_and_readback_drift_fail_closed(self):
+        required = (
+            "get_linear_entity",
+            "list_issue_relations",
+            "list_project_initiatives",
+        )
+        for missing in required:
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as tmp:
+                class MissingCapabilityClient(DestructiveClient):
+                    missing_capability = missing
+
+                    def __getattribute__(self, name):
+                        if name == object.__getattribute__(
+                            self, "missing_capability"
+                        ):
+                            raise AttributeError(name)
+                        return super().__getattribute__(name)
+
+                client = MissingCapabilityClient()
+                raw = destructive_command(
+                    "archive_linear_entity",
+                    "issue",
+                    {"identifier": "SIS-77"},
+                    key=f"linear:destroy:missing:{missing}",
+                )
+                planned = lane.execute_command(client, raw, mode="plan")
+                raw, consumed = bind(raw, planned["before"])
+                auth = approval.ConsumedOwnerApproval(
+                    consumed, _marker=approval._CONSUMED_MARKER
+                )
+                with self.assertRaisesRegex(lane.ContractError, missing):
+                    lane.execute_command(
+                        client,
+                        raw,
+                        mode="apply",
+                        journal_path=Path(tmp) / "journal.json",
+                        owner_approval_authorization=auth,
+                    )
+                self.assertEqual(client.writes, [])
+
         ambiguous = DestructiveClient()
         ambiguous.entities["initiatives"].append(copy.deepcopy(ambiguous.entities["initiatives"][0]))
         ambiguous.entities["initiatives"][-1]["id"] = "other"

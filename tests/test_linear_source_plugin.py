@@ -1367,6 +1367,52 @@ class PluginTests(unittest.TestCase):
         self.assertIsNone(result["target"]["due_date"])
         self.assertEqual(result["target"]["estimate"], 8)
 
+    def test_handler_accepts_explicit_null_parent_update(self):
+        fake_board = mock.Mock()
+        set_existing_task(
+            fake_board,
+            {
+                "id": "t_1234abcd",
+                "status": "done",
+                "session_id": "20260828_120000_abcdef12",
+            },
+        )
+        session_values = {
+            "HERMES_SESSION_PROFILE": "default",
+            "HERMES_SESSION_PLATFORM": "telegram",
+            "HERMES_SESSION_CHAT_ID": "442308262",
+            "HERMES_SESSION_USER_ID": "442308262",
+            "HERMES_SESSION_CHAT_TYPE": "dm",
+            "HERMES_SESSION_THREAD_ID": "449233",
+            "HERMES_SESSION_ID": "20260828_120000_abcdef12",
+        }
+        result = json.loads(
+            handle_linear_source_request(
+                {
+                    "operation": "update_issue",
+                    "identifier": "SIS-94",
+                    "parent_identifier": None,
+                    "approval": {
+                        "workflow": "linear-destructive-owner-approval-attest",
+                        "model": "linear-destructive-owner-approval-attest",
+                        "run_id": "55555555-5555-4555-8555-555555555555",
+                        "artifact_version": 7,
+                        "checksum": "a" * 64,
+                        "intent_hash": "b" * 64,
+                        "before_state_hash": "c" * 64,
+                        "expires_at": "2026-09-01T13:00:00Z",
+                    },
+                },
+                session_id="20260828_120000_abcdef12",
+                board_factory=lambda **_kwargs: fake_board,
+                session_getter=lambda name, default="": session_values.get(name, default),
+                runtime_profile_getter=lambda: "default",
+            )
+        )
+        self.assertEqual(result["status"], "completed")
+        self.assertIn("parent_identifier", result["target"])
+        self.assertIsNone(result["target"]["parent_identifier"])
+
     def test_handler_accepts_exact_project_milestone_move_shape(self):
         fake_board = mock.Mock()
         set_existing_task(

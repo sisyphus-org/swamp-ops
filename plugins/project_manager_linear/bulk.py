@@ -88,6 +88,55 @@ def requires_owner(item: dict[str, Any]) -> bool:
     )
 
 
+def _conflict_selector(item: dict[str, Any]) -> dict[str, Any]:
+    """Identify the complete semantic entity selected by one child operation."""
+    operation = item["operation"]
+    change = item["change"]
+    selector: dict[str, Any] = {
+        "operation": operation,
+        "target": item["target"],
+    }
+    fields = {
+        "add_comment": ("body",),
+        "create_issue": ("parent_identifier", "title"),
+        "create_issue_relation": ("related_identifier", "relation_type"),
+        "remove_issue_relation": ("related_identifier", "relation_type"),
+        "replace_issue_relation": ("old_related_identifier", "old_relation_type"),
+        "create_project": ("name",),
+        "update_project": ("name",),
+        "create_milestone": ("project", "name"),
+        "update_milestone": ("project", "name"),
+        "create_initiative": ("name",),
+        "update_initiative": ("name",),
+        "link_project_to_initiative": ("project", "initiative"),
+    }.get(operation, ())
+    if fields:
+        selector["selector"] = {field: change.get(field) for field in fields}
+    elif operation in {
+        "converge_hierarchy",
+        "create_standalone_issue",
+        "converge_issue_tree",
+    }:
+        selector["selector"] = {
+            "project": (
+                change.get("project", {}).get("name")
+                if isinstance(change.get("project"), dict)
+                else None
+            ),
+            "milestone": (
+                change.get("milestone", {}).get("name")
+                if isinstance(change.get("milestone"), dict)
+                else None
+            ),
+            "issue": (
+                change.get("issue", {}).get("title")
+                if isinstance(change.get("issue"), dict)
+                else None
+            ),
+        }
+    return selector
+
+
 def validate_items(
     items: Any,
     *,
@@ -118,7 +167,7 @@ def validate_items(
         if semantic_hash in semantic_hashes:
             raise error_cls("bulk_linear_operations contains a duplicate semantic item")
         semantic_hashes.add(semantic_hash)
-        target_hash = _hash(value["target"])
+        target_hash = _hash(_conflict_selector(value))
         if target_hash in target_hashes:
             raise error_cls("bulk_linear_operations contains conflicting writes to the same exact target")
         target_hashes.add(target_hash)

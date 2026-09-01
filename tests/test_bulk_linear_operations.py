@@ -112,6 +112,41 @@ class BulkContractTests(unittest.TestCase):
             lane.validate_command(parent([item(0), conflicting]))
 
     def test_derives_stable_domain_separated_child_identities_and_binds_order(self):
+        team = {"type": "team", "identifier": "SIS"}
+        workspace = {"type": "workspace", "identifier": "current"}
+        distinct_creates = [
+            {"operation": "create_project", "target": team, "change": {"name": "Project A", "description": "", "target_date": None}},
+            {"operation": "create_project", "target": team, "change": {"name": "Project B", "description": "", "target_date": None}},
+            {"operation": "create_milestone", "target": team, "change": {"project": "Project A", "name": "Milestone", "description": "", "target_date": None}},
+            {"operation": "create_milestone", "target": team, "change": {"project": "Project B", "name": "Milestone", "description": "", "target_date": None}},
+            {"operation": "create_initiative", "target": workspace, "change": {"name": "Initiative A", "description": "", "target_date": None}},
+            {"operation": "create_initiative", "target": workspace, "change": {"name": "Initiative B", "description": "", "target_date": None}},
+        ]
+        self.assertEqual(
+            lane.validate_command(parent(distinct_creates))["change"]["items"],
+            distinct_creates,
+        )
+
+        same_entity = [copy.deepcopy(distinct_creates[2]), copy.deepcopy(distinct_creates[2])]
+        same_entity[1]["change"]["description"] = "different"
+        with self.assertRaisesRegex(lane.ContractError, "conflicting"):
+            lane.validate_command(parent(same_entity))
+
+        source_request = {
+            "operation": "bulk_linear_operations",
+            "items": distinct_creates[-2:],
+        }
+        self.assertEqual(
+            route.parse_linear_request(source_request).command["change"]["items"],
+            source_request["items"],
+        )
+        source_conflict = copy.deepcopy(source_request)
+        source_conflict["items"][1]["change"].update(
+            {"name": "Initiative A", "description": "different"}
+        )
+        with self.assertRaisesRegex(route.RouteError, "conflicting"):
+            route.parse_linear_request(source_conflict)
+
         first = bulk.derive_child_command(parent([item(0), item(1)]), 0)
         again = bulk.derive_child_command(parent([item(0), item(1)]), 0)
         second = bulk.derive_child_command(parent([item(0), item(1)]), 1)
