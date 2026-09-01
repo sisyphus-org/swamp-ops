@@ -6,7 +6,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from plugins.ops_broker import _verify_runtime_workspace, handle_ops_broker
+from plugins.ops_broker import (
+    OPS_BROKER_SCHEMA,
+    _verify_runtime_workspace,
+    handle_ops_broker,
+)
 from plugins.ops_broker.broker import (
     _canonical_plan_checksum,
     build_command,
@@ -57,6 +61,18 @@ class SmokeScriptTests(unittest.TestCase):
 
 
 class RequestValidationTests(unittest.TestCase):
+    def test_public_schema_exposes_owner_approval_operations(self):
+        operations = set(
+            OPS_BROKER_SCHEMA["parameters"]["properties"]["operation"]["enum"]
+        )
+        self.assertTrue(
+            {
+                "plan_linear_destructive_owner_approval",
+                "start_linear_destructive_owner_approval_attest",
+                "approve_linear_destructive_owner_approval_attest",
+            }.issubset(operations)
+        )
+
     def test_validate_request_accepts_minimal_readonly_request(self):
         request = validate_request(
             {
