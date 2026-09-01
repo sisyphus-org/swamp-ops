@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and attest exact, expiring approvals for issue-parent replacement/clear.
+"""Build and attest exact, expiring approvals for bounded Linear changes.
 
 This module never imports a Linear client and never mutates Linear.  It produces
 checksum-bound Swamp artifacts which the credential-holding Project Manager can
@@ -86,6 +86,7 @@ def validate_intent(value: Any) -> dict[str, Any]:
         raise ContractError("intent must contain exactly operation, target and change")
     operation = value.get("operation")
     if operation not in {
+        "change_state",
         "update_issue",
         "remove_issue_relation",
         "replace_issue_relation",
@@ -103,6 +104,16 @@ def validate_intent(value: Any) -> dict[str, Any]:
     change = value.get("change")
     if not isinstance(change, dict):
         raise ContractError("intent change must be an object")
+    if operation == "change_state":
+        if set(change) != {"state"} or change.get("state") not in {
+            "Done",
+            "Canceled",
+            "Duplicate",
+        }:
+            raise ContractError(
+                "change_state requires exactly one owner-controlled terminal state"
+            )
+        return value
     if operation == "update_issue":
         if set(change) != {"parent_identifier"}:
             raise ContractError("update_issue requires exactly parent_identifier")

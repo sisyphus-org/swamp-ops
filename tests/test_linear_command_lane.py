@@ -879,7 +879,7 @@ class ContractTests(unittest.TestCase):
             command("update_issue", {"due_date": None, "estimate": None})
         )
         for state in ("Done", "Canceled", "Duplicate"):
-            with self.assertRaisesRegex(lane.ContractError, "owner-controlled"):
+            with self.assertRaisesRegex(lane.ContractError, "owner approval required"):
                 lane.validate_command(command("change_state", {"state": state}))
         with self.assertRaisesRegex(lane.ContractError, "read_issue change"):
             lane.validate_command(command("read_issue", {"state": "Todo"}))

@@ -1548,7 +1548,7 @@ class PluginTests(unittest.TestCase):
         self.assertEqual(len(result["context"]["sub_issues"]), 4)
         self.assertNotIn("task_id", json.dumps(result))
 
-    def test_handler_accepts_structured_safe_state_request(self):
+    def test_handler_accepts_structured_bounded_state_requests(self):
         fake_board = mock.Mock()
         existing = {
             "id": "t_1234abcd",
@@ -1581,6 +1581,21 @@ class PluginTests(unittest.TestCase):
                 "operation": "change_state",
                 "identifier": "SIS-68",
                 "state": "In Review",
+            },
+            {
+                "operation": "change_state",
+                "identifier": "SIS-68",
+                "state": "Done",
+                "approval": {
+                    "workflow": "linear-destructive-owner-approval-attest",
+                    "model": "linear-destructive-owner-approval-attest",
+                    "run_id": "55555555-5555-4555-8555-555555555555",
+                    "artifact_version": 7,
+                    "checksum": "a" * 64,
+                    "intent_hash": "b" * 64,
+                    "before_state_hash": "c" * 64,
+                    "expires_at": "2026-09-01T13:00:00Z",
+                },
             },
             {
                 "operation": "create_issue",

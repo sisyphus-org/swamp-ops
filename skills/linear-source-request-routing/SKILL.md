@@ -1,7 +1,7 @@
 ---
 name: linear-source-request-routing
 description: Route Linear reads/writes through Project Manager.
-version: 0.9.0
+version: 1.0.0
 author: Alexey Petrov, Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -18,7 +18,7 @@ Use the typed Project Manager lane for every Linear read, creation, or mutation.
 ## Supported requests
 
 - Add one bounded comment to an exact uppercase `SIS-N` issue.
-- Change one exact `SIS-N` issue to `Backlog`, `Todo`, `Research`, `In Progress`, or `In Review`.
+- Change one exact `SIS-N` issue to `Backlog`, `Todo`, `Research`, `In Progress`, or `In Review` under standard policy, or to exactly `Done`, `Canceled`, or `Duplicate` with the fixed owner approval reference.
 - Update one exact `SIS-N` issue with any non-empty subset of description, safe state, and High/Medium/Low priority.
 - Create one bounded issue in the `SIS` team under one exact uppercase `SIS-N` parent, with bounded title/description, safe state, and High/Medium/Low priority.
 - Converge one bounded create-only `SIS` hierarchy: one exact project, one milestone, and one top-level issue, with optional descriptions and a safe issue state.
@@ -31,14 +31,14 @@ Use the typed Project Manager lane for every Linear read, creation, or mutation.
 - Attach a currently top-level issue to one exact `SIS-N` parent in standard mode. Replace an existing parent or clear it only when the owner supplies the exact fixed Swamp attestation reference as `approval` on a parent-only `update_issue`.
 - Create one exact `blocks`, `blocked_by`, or `related` issue relation in standard mode. Remove one exact existing relation with `remove_issue_relation`, or replace one exact old relation with one exact new relation using `replace_issue_relation`, only with the existing fixed `approval` reference. Supply endpoint identifiers/types only—never relation IDs.
 
-Do not use this path for fuzzy/missing mutation targets, server-side/raw search passthrough, bulk operations, terminal states, initiative unlink, archive/issue deletion, bulk relation mutation, initiative reparenting, arbitrary teams, other structural changes, or per-task Telegram topics. Owner approval authorizes only the exact parent or single-relation intent it binds.
+Do not use this path for fuzzy/missing mutation targets, server-side/raw search passthrough, bulk operations, arbitrary terminal names, nonterminal owner approval, initiative unlink, archive/issue deletion, bulk relation mutation, initiative reparenting, arbitrary teams, other structural changes, or per-task Telegram topics. Owner approval authorizes only the exact terminal state, parent, or single-relation intent it binds.
 
 ## Procedure
 
 1. Preserve exact identifiers and user-provided text; never repair or guess them.
 2. Call `linear_source_request` once with the matching bounded shape:
    - comment: `request=<exact supported comment text>`;
-   - state: `operation=change_state`, exact `identifier`, exact safe `state`;
+   - state: `operation=change_state`, exact `identifier`, exact safe `state`; for exactly `Done`, `Canceled`, or `Duplicate`, also supply the existing exact fixed `approval` object. Never attach approval to a nonterminal state;
    - issue fields: `operation=update_issue`, exact `identifier`, and a bounded managed-field subset. A standard top-level parent attach uses exact `parent_identifier`. Parent replacement or clear must contain only `parent_identifier` (exact `SIS-N` or `null`) plus the exact fixed `approval` reference;
    - create: `operation=create_issue`, bounded `title`, `description`, exact `parent_identifier`, safe `state`, and bounded `priority`.
    - hierarchy: `operation=converge_hierarchy` with exact `project`, `milestone`, and `issue` objects; names/titles are required, descriptions and a safe issue state are optional, and IDs are never supplied by the source.

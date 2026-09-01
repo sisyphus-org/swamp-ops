@@ -137,6 +137,41 @@ class SmokeTests(unittest.TestCase):
         self.assertNotIn("relation-internal", serialized)
         self.assertNotIn("issue-internal", serialized)
 
+    def test_team_state_inventory_smoke_reports_names_types_without_ids(self):
+        class Client:
+            def list_teams(self):
+                return [
+                    {"id": "team-internal", "key": "SIS", "name": "SIS"},
+                    {"id": "other-team", "key": "OTHER", "name": "Other"},
+                ]
+
+            def list_states(self, team_id):
+                self.team_id = team_id
+                return [
+                    {"id": "done-internal", "name": "Done", "type": "completed"},
+                    {"id": "canceled-internal", "name": "Canceled", "type": "canceled"},
+                    {"id": "duplicate-internal", "name": "Duplicate", "type": "duplicate"},
+                ]
+
+        result = smoke.run_team_state_inventory_smoke(
+            environ={"HERMES_PROFILE": "project-manager", "LINEAR_TOKEN": "fixture"},
+            client_factory=lambda token: Client() if token == "fixture" else None,
+        )
+        self.assertEqual(result["result"], "pass")
+        self.assertTrue(result["readOnly"])
+        self.assertEqual(
+            result["states"],
+            [
+                {"name": "Canceled", "type": "canceled"},
+                {"name": "Done", "type": "completed"},
+                {"name": "Duplicate", "type": "duplicate"},
+            ],
+        )
+        self.assertRegex(result["inventorySha256"], r"^[0-9a-f]{64}$")
+        serialized = json.dumps(result)
+        for internal_id in ("team-internal", "done-internal", "canceled-internal"):
+            self.assertNotIn(internal_id, serialized)
+
 
 if __name__ == "__main__":
     unittest.main()

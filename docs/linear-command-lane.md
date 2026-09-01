@@ -20,7 +20,7 @@ Required envelope:
 }
 ```
 
-`{"mode":"standard"}` remains the default. The existing exact fixed-shape `owner_approved` attestation reference documented in [linear-owner-approval.md](linear-owner-approval.md) is accepted only for parent-only `update_issue` and exact issue-relation removal/replacement. Relation removal/replacement always reject standard policy.
+`{"mode":"standard"}` remains the default. The existing exact fixed-shape `owner_approved` attestation reference documented in [linear-owner-approval.md](linear-owner-approval.md) is accepted only for `change_state` to exactly `Done`, `Canceled`, or `Duplicate`, parent-only `update_issue`, and exact issue-relation removal/replacement. Those terminal states and relation removal/replacement always reject standard policy.
 
 The validator rejects unknown fields, arbitrary GraphQL or MCP method names, URLs, fuzzy identifiers, arrays/bulk targets, unsupported operations and unbounded payloads. After exact issue resolution, the execution lane additionally rejects targets whose resolved team is not `SIS`. `idempotency_key` is 8–200 characters, starts with an alphanumeric character, and thereafter uses only `A-Za-z0-9:._/-`.
 
@@ -33,7 +33,7 @@ The lane accepts only `linear-command.v2` and emits/accepts only `linear-result.
 - `read_issue`: `change` must be empty.
 - `inventory_linear`: workspace target only; requires an explicit non-empty unique ordered subset of `issues`, `projects`, `milestones`, and `initiatives`, plus an explicit `include_archived` boolean.
 - `search_linear`: the same complete inventory scope plus an exact non-empty query. PM exhausts fixed 100-node cursor pages with cursor and duplicate validation, then applies deterministic Python Unicode `casefold()` substring matching to issue identifiers/titles and entity names. There is no 100-item total cap and no server-side/raw query passthrough.
-- `change_state`: `change` must contain only `state`; exact allowlist is `Backlog`, `Todo`, `Research`, `In Progress`, `In Review`.
+- `change_state`: `change` must contain only `state`; standard exact allowlist is `Backlog`, `Todo`, `Research`, `In Progress`, `In Review`. Exact `Done`, `Canceled`, and `Duplicate` require owner approval and resolve uniquely in the target SIS team with live semantic types `completed`, `canceled`, and `duplicate` respectively.
 - `update_issue`: `change` is a non-empty subset of `description`, safe `state`, and `High|Medium|Low` priority for one exact `SIS-N`; apply uses exact read-back and literal replay is a verified no-op.
 - `create_issue_relation`: safely creates one exact `blocks`, `blocked_by`, or symmetric `related` relation between same-team non-self `SIS-N` issues.
 - `remove_issue_relation`: owner-approved only; resolves exactly one existing relation from exact endpoint identifiers/type and deletes it with immediate full-inventory read-back. Zero or ambiguous matches fail closed.
@@ -50,7 +50,7 @@ The lane accepts only `linear-command.v2` and emits/accepts only `linear-result.
 - `update_initiative`: selects one exact existing initiative by current `name`, then updates a non-empty subset of `new_name`, `description`, and `target_date` with exact read-back and no-op replay.
 - `link_project_to_initiative`: adds one unique exact existing `SIS` project to one unique exact existing initiative. The relation uses a deterministic caller UUIDv4 and exact initiative-project read-back. Unlink is intentionally unavailable. Live schema introspection confirmed `InitiativeCreateInput.id`, nullable `InitiativeCreateInput.targetDate` / `InitiativeUpdateInput.targetDate`, and `InitiativeToProjectCreateInput.id`, `initiativeId`, and `projectId`.
 
-`Done`, `Canceled`, `Duplicate`, arbitrary/raw search, initiative unlink/reparenting/status/owner/labels, archive/issue deletion, bulk relation mutation and unrestricted structure changes remain unavailable. Owner approval enables only exact issue-parent replacement/clear and exact single relation removal/rewire; see [linear-owner-approval.md](linear-owner-approval.md).
+Arbitrary terminal names, nonterminal owner approval, arbitrary/raw search, initiative unlink/reparenting/status/owner/labels, archive/issue deletion, bulk relation mutation and unrestricted structure changes remain unavailable. Owner approval enables only the three exact terminal states, exact issue-parent replacement/clear, and exact single relation removal/rewire; see [linear-owner-approval.md](linear-owner-approval.md).
 
 ### Read-only credential boundary
 
@@ -68,6 +68,10 @@ HERMES_PROFILE=project-manager python scripts/linear_pm_readonly_smoke.py \
 # Exact read-only relation inventory hash/count; performs no mutation.
 HERMES_PROFILE=project-manager python scripts/linear_pm_readonly_smoke.py \
   --live --operation inventory_issue_relations --identifier SIS-77
+
+# Exact read-only SIS team workflow-state name/type inventory; performs no mutation.
+HERMES_PROFILE=project-manager python scripts/linear_pm_readonly_smoke.py \
+  --live --operation inventory_team_states
 ```
 
 ### SIS-77 hierarchy tracer contract (live proof post-deploy)
@@ -125,7 +129,7 @@ The normal journal is `$HERMES_HOME/linear-command-lane/journal.json`. It stores
 ## Idempotency and recovery
 
 - A mutation apply requires the hash-only journal. A journal-wide advisory file lock serializes the complete local read/check/mutate/read-back/journal sequence across processes, preventing concurrent same-key comments and lost journal updates.
-- State changes read current state first. Already-converged state is a verified no-op, so replay after a crash cannot duplicate the mutation.
+- State changes read current state first. Already-converged state is a verified no-op. Owner-terminal apply writes prepared/completed before/after hashes, mutates only `stateId`, immediately verifies state ID/name/type plus every unmanaged issue field, and recovers a post-write crash through the public durable claimed-task seam without a second mutation.
 - Comments use a deterministic Linear UUID derived from the hashed idempotency key. Preflight resolves that ID only inside the exact issue's bounded comment list because Linear returns an error, not `null`, when `comment(id:)` targets a missing entity. Post-create read-back uses the exact ID and body. Replay is a verified no-op; the same key with a different request fails closed without exposing metadata in the comment.
 - Issue creation uses a separate deterministic Linear UUID derived from the same hashed key. Preflight searches that ID only in the exact parent's bounded child list because Linear errors rather than returning `null` for a missing `issue(id:)`; post-create read-back verifies the exact ID, parent, title, description, state and priority. Replay after a post-create crash converges without a duplicate issue or visible metadata in the description.
 - Child, hierarchy, standalone, and issue-tree paths share one comparison module. Mutation text is never rewritten. Read-back accepts exact bytes or only Linear's confirmed deterministic transformation of every unambiguous plain HTTP(S) URL to `[url](<url>)`; Markdown/code/emphasis, punctuation ambiguity, partial conversion, changed labels, or whitespace drift remain mismatches.
@@ -149,4 +153,4 @@ The 2026-08-28 live SIS-59 run predates the SIS-77 protocol-version cutover and 
 - replay returned `no_op`; Linear read-back showed exactly one clean user-authored comment;
 - a real state plan recorded `In Progress → In Review`, apply returned `applied` with exact read-back, and immediate replay returned verified `no_op`.
 
-The final closure to `Done` remains outside the lane and owner/task-workflow controlled.
+Closure to `Done` is available only through the exact owner-approved terminal-state contract; standard policy remains blocked.

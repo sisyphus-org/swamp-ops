@@ -1,8 +1,8 @@
 name: ops-broker
-version: 0.4.0
+version: 0.5.0
 description: >-
   Typed, policy-allowlisted operations broker for authenticated A2A peers.
-  Adds owner-only Swamp attestation for future destructive Linear operations without granting Linear mutation capability.
+  Adds owner-only Swamp attestation for bounded destructive Linear operations without granting Linear mutation capability.
 author: sisyphus-org
 kind: backend
 provides_tools:

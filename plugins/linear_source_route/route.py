@@ -30,6 +30,7 @@ CREDENTIAL_SHAPES = (
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
 )
 SAFE_STATES = {"Backlog", "Todo", "Research", "In Progress", "In Review"}
+OWNER_CONTROLLED_STATES = {"Done", "Canceled", "Duplicate"}
 RESERVED_MARKER = "<!-- linear-command"
 MAX_HIERARCHY_BYTES = 24_576
 MAX_ISSUE_TREE_BYTES = 65_536
@@ -405,16 +406,21 @@ def parse_linear_request(
     elif isinstance(request, dict):
         operation = request.get("operation")
         if operation == "change_state":
-            if set(request) != {"operation", "identifier", "state"}:
+            state = request.get("state")
+            expected_fields = {"operation", "identifier", "state"}
+            if state in OWNER_CONTROLLED_STATES:
+                expected_fields.add("approval")
+            if set(request) != expected_fields:
                 raise RouteError("structured state request has invalid fields")
             identifier = request.get("identifier")
-            state = request.get("state")
             if not isinstance(identifier, str) or not re.fullmatch(
                 r"SIS-[1-9][0-9]*", identifier
             ):
                 raise RouteError("target must be an exact SIS-N identifier")
-            if state not in SAFE_STATES:
+            if state not in SAFE_STATES and state not in OWNER_CONTROLLED_STATES:
                 raise RouteError("state is not in the safe-state allowlist")
+            if state in OWNER_CONTROLLED_STATES:
+                approval_reference = _validate_approval_reference(request["approval"])
             target = {"type": "issue", "identifier": identifier}
             change = {"state": state}
         elif operation == "update_issue":

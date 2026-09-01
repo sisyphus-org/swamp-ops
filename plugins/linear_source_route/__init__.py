@@ -28,12 +28,34 @@ PUBLIC_INTERNAL_MARKER = re.compile(
     r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-"
     r"[0-9a-f]{12}\b)"
 )
-PUBLIC_STATES = {"Backlog", "Todo", "Research", "In Progress", "In Review"}
+PUBLIC_STATES = {
+    "Backlog",
+    "Todo",
+    "Research",
+    "In Progress",
+    "In Review",
+    "Done",
+    "Canceled",
+    "Duplicate",
+}
 PUBLIC_MISMATCH_FIELDS = (
     r"(?:id/title|description|state|priority|assignee|labels|due_date|estimate|parent|project|milestone|team)"
 )
 PUBLIC_MISMATCH_LIST = rf"{PUBLIC_MISMATCH_FIELDS}(?:, {PUBLIC_MISMATCH_FIELDS})*"
 PUBLIC_BLOCK_REASON_PATTERNS = {
+    "change_state": (
+        re.compile(r"^exact Linear issue not found: SIS-[1-9][0-9]*$"),
+        re.compile(r"^exact target is not in the SIS team: SIS-[1-9][0-9]*$"),
+        re.compile(
+            r"^exact workflow state not found: (?:Backlog|Todo|Research|In Progress|In Review|Done|Canceled|Duplicate)$"
+        ),
+        re.compile(
+            r"^exact workflow state has incompatible semantic type: (?:Done|Canceled|Duplicate)$"
+        ),
+        re.compile(r"^state read-back verification failed$"),
+        re.compile(r"^state read-back changed unmanaged fields$"),
+        re.compile(r"^owner-approved state recovery state drifted$"),
+    ),
     "update_issue": (
         re.compile(r"^exact Linear issue not found: SIS-[1-9][0-9]*$"),
         re.compile(r"^exact target is not in the SIS team: SIS-[1-9][0-9]*$"),
@@ -222,7 +244,16 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
             },
             "state": {
                 "type": "string",
-                "enum": ["Backlog", "Todo", "Research", "In Progress", "In Review"],
+                "enum": [
+                    "Backlog",
+                    "Todo",
+                    "Research",
+                    "In Progress",
+                    "In Review",
+                    "Done",
+                    "Canceled",
+                    "Duplicate",
+                ],
             },
             "title": {"type": "string", "minLength": 1, "maxLength": 200},
             "name": {"type": "string", "minLength": 1, "maxLength": 200},
@@ -398,6 +429,28 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
             {
                 "required": ["operation", "identifier", "state"],
                 "properties": {"operation": {"const": "change_state"}},
+                "oneOf": [
+                    {
+                        "properties": {
+                            "state": {
+                                "enum": [
+                                    "Backlog",
+                                    "Todo",
+                                    "Research",
+                                    "In Progress",
+                                    "In Review",
+                                ]
+                            }
+                        },
+                        "not": {"required": ["approval"]},
+                    },
+                    {
+                        "required": ["approval"],
+                        "properties": {
+                            "state": {"enum": ["Done", "Canceled", "Duplicate"]}
+                        },
+                    },
+                ],
             },
             {
                 "required": ["operation", "identifier"],
@@ -1405,7 +1458,14 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
             and ((args.get("operation") == "search_linear") == ("query" in args))
         ):
             request = dict(args)
-        elif set(args) == {"operation", "identifier", "state"}:
+        elif (
+            args.get("operation") == "change_state"
+            and set(args)
+            in (
+                {"operation", "identifier", "state"},
+                {"operation", "identifier", "state", "approval"},
+            )
+        ):
             request = dict(args)
         elif (
             set(args) == {"operation", "identifier"}

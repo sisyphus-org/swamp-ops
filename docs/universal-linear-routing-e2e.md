@@ -28,7 +28,7 @@ The plugin:
 - derives the authoritative source profile from Hermes' resolved runtime home;
 - accepts any syntactically valid user-facing profile name except `broker` and `project-manager`;
 - requires Telegram DM context, exact numeric chat/user/thread IDs, and the persisted exact Hermes session ID;
-- supports bounded comment, safe workflow-state change, issue creation under an exact `SIS-N` parent, create-only hierarchy convergence, standalone top-level creation in an exact existing project/milestone, one top-level issue plus 1–10 explicit sub-issues, and non-destructive exact-name initiative create/update/project-link operations without caller-controlled entity IDs;
+- supports bounded comment, standard safe workflow-state change, exactly owner-approved `Done`/`Canceled`/`Duplicate`, issue creation under an exact `SIS-N` parent, create-only hierarchy convergence, standalone top-level creation in an exact existing project/milestone, one top-level issue plus 1–10 explicit sub-issues, and non-destructive exact-name initiative create/update/project-link operations without caller-controlled entity IDs;
 - derives a global mutation key from only `operation`, `target`, `change`, and `policy`; source profile/session and command/correlation IDs are excluded;
 - derives a separate delivery key from that mutation key plus the exact source profile/platform/chat/user/thread/session;
 - atomically gets or creates one PM-assigned Kanban task by delivery key inside one Kanban write transaction;
@@ -45,7 +45,7 @@ The paired `linear-source-request-routing` skill requires short factual replies:
 Supported operations:
 
 - `read_issue`;
-- `change_state` to the safe non-terminal allowlist;
+- `change_state` to the safe non-terminal allowlist under standard policy, or exactly `Done`, `Canceled`, or `Duplicate` with the fixed owner approval reference and live state-type validation;
 - `update_issue` for an explicit non-empty subset of description, safe state, and bounded priority on one exact `SIS-N`;
 - `add_comment` with deterministic-ID replay protection and a clean user-authored body;
 - `create_issue` in the `SIS` team under one exact `SIS-N` parent, with bounded title/description, safe state, and High/Medium/Low priority.
@@ -87,6 +87,9 @@ HERMES_PROFILE=project-manager python scripts/linear_pm_readonly_smoke.py \
   --entity-type issues --entity-type projects \
   --entity-type milestones --entity-type initiatives \
   --exclude-archived
+
+HERMES_PROFILE=project-manager python scripts/linear_pm_readonly_smoke.py \
+  --live --operation inventory_team_states
 
 swamp model validate hermes-profile-bootstrap
 swamp workflow validate hermes-profile-bootstrap

@@ -205,13 +205,87 @@ def run_relation_inventory_smoke(
     }
 
 
+def run_team_state_inventory_smoke(
+    *,
+    environ: Mapping[str, str] = os.environ,
+    client_factory: Any | None = None,
+) -> dict[str, Any]:
+    """Inventory the exact SIS team workflow schema without exposing internal IDs."""
+    if environ.get("HERMES_PROFILE") != "project-manager":
+        raise RuntimeError("live Linear read smoke requires project-manager profile")
+    token = str(environ.get("LINEAR_TOKEN") or "").strip()
+    if not token:
+        raise RuntimeError("project-manager LINEAR_TOKEN is missing")
+    factory = client_factory or bundled_lane.LinearClient
+    client = factory(token)
+    teams = client.list_teams()
+    matches = [
+        team
+        for team in teams
+        if isinstance(team, dict) and team.get("key") == "SIS"
+    ]
+    if len(matches) != 1:
+        raise RuntimeError("exact SIS team was not found or was ambiguous")
+    team = matches[0]
+    if not isinstance(team.get("id"), str) or not team["id"]:
+        raise RuntimeError("exact SIS team payload is invalid")
+    raw_states = client.list_states(team["id"])
+    if not isinstance(raw_states, list) or len(raw_states) > 100:
+        raise RuntimeError("SIS team state inventory payload is invalid")
+    normalized: list[dict[str, str]] = []
+    seen_ids: set[str] = set()
+    for state in raw_states:
+        if (
+            not isinstance(state, dict)
+            or set(state) != {"id", "name", "type"}
+            or not isinstance(state.get("id"), str)
+            or not state["id"]
+            or state["id"] in seen_ids
+            or not isinstance(state.get("name"), str)
+            or not state["name"]
+            or not isinstance(state.get("type"), str)
+            or not state["type"]
+        ):
+            raise RuntimeError("SIS team state inventory payload is invalid")
+        seen_ids.add(state["id"])
+        normalized.append(
+            {"id": state["id"], "name": state["name"], "type": state["type"]}
+        )
+    normalized.sort(key=lambda item: (item["name"], item["type"], item["id"]))
+    digest = hashlib.sha256(
+        json.dumps(
+            {"team": "SIS", "states": normalized},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return {
+        "result": "pass",
+        "readOnly": True,
+        "operation": "inventory_team_states",
+        "team": "SIS",
+        "stateCount": len(normalized),
+        "states": [
+            {"name": item["name"], "type": item["type"]} for item in normalized
+        ],
+        "inventorySha256": digest,
+        "verified": True,
+    }
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--live", action="store_true", help="Required live-network acknowledgement")
     parser.add_argument(
         "--operation",
         required=True,
-        choices=("search_linear", "inventory_linear", "inventory_issue_relations"),
+        choices=(
+            "search_linear",
+            "inventory_linear",
+            "inventory_issue_relations",
+            "inventory_team_states",
+        ),
     )
     parser.add_argument(
         "--entity-type",
@@ -238,6 +312,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ):
             parser.error("inventory_issue_relations requires only --identifier")
         return args
+    if args.operation == "inventory_team_states":
+        if (
+            args.identifier is not None
+            or args.entity_types
+            or args.query is not None
+            or args.include_archived
+            or args.exclude_archived
+        ):
+            parser.error("inventory_team_states accepts no additional selectors")
+        return args
     if not args.entity_types or args.identifier is not None:
         parser.error("workspace reads require --entity-type and forbid --identifier")
     if not (args.include_archived or args.exclude_archived):
@@ -252,6 +336,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.operation == "inventory_issue_relations":
             result = run_relation_inventory_smoke(identifier=args.identifier)
+        elif args.operation == "inventory_team_states":
+            result = run_team_state_inventory_smoke()
         else:
             result = run_smoke(
                 operation=args.operation,
