@@ -1025,6 +1025,9 @@ class WorkflowContractTests(unittest.TestCase):
             "multiple plausible matches",
             "continue the ordered plan automatically after each wake",
             "Never claim that the lane lacks a capability merely because no single operation",
+            "A blocked mutating route is not proof that the external mutation did not happen",
+            "bounded read-only reconciliation",
+            "Never report that an entity is absent or a write failed solely from task status",
         )
         for statement in required:
             with self.subTest(statement=statement):
