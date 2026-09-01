@@ -268,11 +268,6 @@ class ParseTests(unittest.TestCase):
                 "related_identifier": {"id": "internal"},
                 "relation_type": "blocks",
             },
-            {
-                "identifier": "SIS-77",
-                "related_identifier": "SIS-94",
-                "relation_type": "duplicate",
-            },
         )
         for values in invalid:
             with self.subTest(values=values), self.assertRaises(route.RouteError):
@@ -281,6 +276,19 @@ class ParseTests(unittest.TestCase):
                     source_profile="default",
                     uuid_factory=uuid_factory(),
                 )
+
+        duplicate = route.parse_linear_request(
+            {
+                "operation": "create_issue_relation",
+                "identifier": "SIS-77",
+                "related_identifier": "SIS-94",
+                "relation_type": "duplicate",
+            },
+            source_profile="default",
+            uuid_factory=uuid_factory(),
+        )
+        self.assertEqual(duplicate.command["policy"], {"mode": "standard"})
+        self.assertEqual(duplicate.command["change"]["relation_type"], "duplicate")
 
     def test_structured_standalone_and_issue_tree_requests_become_bounded_commands(self):
         standalone = {
@@ -507,7 +515,7 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(parsed.command["change"], {"state": "In Review"})
 
     def test_terminal_state_request_needs_no_separate_approval(self):
-        for state in ("Done", "Canceled", "Duplicate"):
+        for state in ("Done", "Canceled"):
             with self.subTest(state=state):
                 parsed = route.parse_linear_request(
                     {
@@ -520,6 +528,16 @@ class ParseTests(unittest.TestCase):
                 )
                 self.assertEqual(parsed.command["change"], {"state": state})
                 self.assertEqual(parsed.command["policy"], {"mode": "standard"})
+        with self.assertRaises(route.RouteError):
+            route.parse_linear_request(
+                {
+                    "operation": "change_state",
+                    "identifier": "SIS-102",
+                    "state": "Duplicate",
+                },
+                source_profile="default",
+                uuid_factory=uuid_factory(),
+            )
 
     def test_structured_issue_update_preserves_only_explicit_fields(self):
         parsed = route.parse_linear_request(

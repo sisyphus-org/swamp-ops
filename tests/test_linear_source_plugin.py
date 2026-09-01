@@ -252,6 +252,17 @@ class AdapterTests(unittest.TestCase):
                 }},
                 schema,
             )
+        with self.assertRaises(jsonschema.ValidationError):
+            jsonschema.validate({**request, "state": "Duplicate"}, schema)
+        jsonschema.validate(
+            {
+                "operation": "create_issue_relation",
+                "identifier": "SIS-102",
+                "related_identifier": "SIS-77",
+                "relation_type": "duplicate",
+            },
+            schema,
+        )
 
     def test_tool_schema_exposes_exact_workspace_read_shapes(self):
         parameters = LINEAR_SOURCE_REQUEST_SCHEMA["parameters"]
@@ -307,7 +318,10 @@ class AdapterTests(unittest.TestCase):
         )
         self.assertEqual(
             parameters["properties"]["relation_type"],
-            {"type": "string", "enum": ["blocks", "blocked_by", "related"]},
+            {
+                "type": "string",
+                "enum": ["blocks", "blocked_by", "related", "duplicate"],
+            },
         )
         branch = next(
             item
@@ -1076,6 +1090,32 @@ class PluginTests(unittest.TestCase):
                 },
             },
         )
+        self.assertNotIn("must-not-leak", json.dumps(result))
+
+    def test_public_result_exposes_duplicate_relation_without_internal_ids(self):
+        result = _public_result(
+            {
+                "status": "verified_no_op",
+                "linear_result": {
+                    "verified": True,
+                    "result": "applied",
+                    "operation": "create_issue_relation",
+                    "target": {
+                        "type": "issue_relation",
+                        "identifier": "SIS-102",
+                        "related_identifier": "SIS-77",
+                        "relation_type": "duplicate",
+                    },
+                    "after": {
+                        "identifier": "SIS-102",
+                        "related_identifier": "SIS-77",
+                        "relation_type": "duplicate",
+                        "id": "must-not-leak",
+                    },
+                },
+            }
+        )
+        self.assertEqual(result["target"]["relation_type"], "duplicate")
         self.assertNotIn("must-not-leak", json.dumps(result))
 
     def test_public_result_projects_relation_removal_and_replacement_without_raw_ids(self):

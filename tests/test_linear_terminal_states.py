@@ -50,9 +50,11 @@ def standard_state_command(state="Done", *, key=None):
 
 
 class StandardWorkflowStateTests(unittest.TestCase):
-    def test_every_supported_state_is_reachable_from_every_supported_state_without_approval(self):
-        destinations = tuple(WorkflowStateClient.STATE_TYPES)
-        source_states = (*destinations, "Awaiting External")
+    def test_every_directly_writable_state_is_reachable_from_any_current_state_without_approval(self):
+        destinations = tuple(
+            state for state in WorkflowStateClient.STATE_TYPES if state != "Duplicate"
+        )
+        source_states = (*destinations, "Duplicate", "Awaiting External")
         for source_state in source_states:
             for target_state in destinations:
                 with self.subTest(source=source_state, target=target_state), tempfile.TemporaryDirectory() as tmp:
@@ -116,7 +118,7 @@ class StandardWorkflowStateTests(unittest.TestCase):
         self.assertTrue(replay["result"]["verified"])
 
     def test_source_terminal_requests_emit_standard_policy(self):
-        for state in ("Done", "Canceled", "Duplicate"):
+        for state in ("Done", "Canceled"):
             with self.subTest(state=state):
                 parsed = route.parse_linear_request(
                     {
@@ -141,26 +143,14 @@ class StandardWorkflowStateTests(unittest.TestCase):
                     *[
                         item
                         for item in super().list_states(team_id)
-                        if item["name"] not in {"Done", "Canceled", "Duplicate"}
+                        if item["name"] not in {"Done", "Canceled"}
                     ],
                     *self.terminal_states,
                 ]
 
         cases = (
             ([], "not found", "Done"),
-            (
-                [
-                    {"id": "duplicate-a", "name": "Duplicate", "type": "duplicate"},
-                    {"id": "duplicate-b", "name": "Duplicate", "type": "duplicate"},
-                ],
-                "not found",
-                "Duplicate",
-            ),
-            (
-                [{"id": "duplicate", "name": "Duplicate", "type": "completed"}],
-                "incompatible semantic type",
-                "Duplicate",
-            ),
+
             (
                 [{"id": "done", "name": "Done", "type": "canceled"}],
                 "incompatible semantic type",
@@ -185,7 +175,7 @@ class StandardWorkflowStateTests(unittest.TestCase):
             self.assertEqual(client.writes, [])
 
     def test_owner_approved_policy_is_rejected_for_state_changes(self):
-        for state in ("Done", "Canceled", "Duplicate", "In Review"):
+        for state in ("Done", "Canceled", "In Review"):
             raw = standard_state_command(state)
             raw["policy"] = owner_policy()
             with self.subTest(state=state), self.assertRaisesRegex(
@@ -219,7 +209,7 @@ class StandardWorkflowStateTests(unittest.TestCase):
                     raise KeyboardInterrupt("simulated process death")
 
         client = CrashAfterState()
-        raw = standard_state_command("Duplicate", key="linear:SIS-102:terminal-crash")
+        raw = standard_state_command("Canceled", key="linear:SIS-102:terminal-crash")
         with tempfile.TemporaryDirectory() as tmp:
             journal = Path(tmp) / "journal.json"
             with self.assertRaises(KeyboardInterrupt):
@@ -238,7 +228,7 @@ class StandardWorkflowStateTests(unittest.TestCase):
                 journal_path=journal,
             )
         self.assertEqual(recovered["result"]["result"], "no_op")
-        self.assertEqual(client.writes, [("state", "issue-uuid", "state-Duplicate")])
+        self.assertEqual(client.writes, [("state", "issue-uuid", "state-Canceled")])
 
     def test_terminal_readback_state_or_unmanaged_drift_fails_closed(self):
         class ReadbackDrift(WorkflowStateClient):
@@ -272,7 +262,7 @@ class StandardWorkflowStateTests(unittest.TestCase):
                 )
 
     def test_arbitrary_state_names_are_rejected(self):
-        for state in ("Completed", "Archived", "done", "Review Canary"):
+        for state in ("Duplicate", "Completed", "Archived", "done", "Review Canary"):
             with self.subTest(state=state), self.assertRaises(lane.ContractError):
                 lane.validate_command(standard_state_command(state))
 

@@ -8,7 +8,7 @@ This repository exposes narrowly owner-approved destructive slices only:
 4. archive one exact issue, SIS-scoped project, or workspace initiative;
 5. delete/trash one exact issue, SIS-scoped project, project milestone, or workspace initiative.
 
-Workflow-state transitions never use this approval path. Arbitrary state names, nonterminal owner approval, bulk targets, caller-selected cascade flags, arbitrary entity types, and destructive lifecycle operations remain unavailable.
+Directly writable workflow-state transitions and exact duplicate relation creation never use this approval path. Arbitrary state names, nonterminal owner approval, bulk targets, caller-selected cascade flags, arbitrary entity types, and destructive lifecycle operations remain unavailable.
 
 ## Trust boundaries
 
@@ -26,7 +26,7 @@ persisted linear-command.v2 → PM common approval gate → bounded Linear mutat
 
 ## Exact approval intents
 
-`linear-destructive-owner-approval-plan.v1` accepts only a parent-only update, an exact relation change, or a supported archive/delete intent. A `change_state` intent is rejected because all eight exact workflow states use the standard PM route.
+`linear-destructive-owner-approval-plan.v1` accepts only a parent-only update, an exact destructive relation change, or a supported archive/delete intent. A `change_state` intent is rejected because directly writable states use the standard PM route; reserved `Duplicate` is created by a standard exact duplicate relation.
 
 ```json
 {

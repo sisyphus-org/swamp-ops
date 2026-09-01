@@ -30,12 +30,13 @@ CREDENTIAL_SHAPES = (
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
 )
 SAFE_STATES = {"Backlog", "Todo", "Research", "In Progress", "In Review"}
-TERMINAL_STATES = {"Done", "Canceled", "Duplicate"}
+TERMINAL_STATES = {"Done", "Canceled"}
 RESERVED_MARKER = "<!-- linear-command"
 MAX_HIERARCHY_BYTES = 24_576
 MAX_ISSUE_TREE_BYTES = 65_536
 PRIORITIES = {"High", "Medium", "Low"}
 ISSUE_RELATION_TYPES = {"blocks", "blocked_by", "related"}
+CREATE_ISSUE_RELATION_TYPES = ISSUE_RELATION_TYPES | {"duplicate"}
 LINEAR_ENTITY_TYPES = ("issues", "projects", "milestones", "initiatives")
 MAX_SEARCH_QUERY = 500
 MAX_BULK_ITEMS = 50
@@ -968,7 +969,7 @@ def parse_linear_request(
             if related_identifier == identifier:
                 raise RouteError("an issue cannot be related to itself")
             relation_type = request.get("relation_type")
-            if relation_type not in ISSUE_RELATION_TYPES:
+            if relation_type not in CREATE_ISSUE_RELATION_TYPES:
                 raise RouteError("relation_type is not in the bounded allowlist")
             target = {"type": "issue", "identifier": identifier}
             change = {

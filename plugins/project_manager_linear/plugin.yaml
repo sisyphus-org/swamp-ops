@@ -1,8 +1,8 @@
 name: project-manager-linear
 version: 1.4.0
 description: >-
-  Deterministic PM Linear lane with unrestricted exact workflow-state transitions,
-  link-removal, owner-approved parent/relation/core archive-delete mutations, and
+  Deterministic PM Linear lane with direct writable-state transitions, reserved
+  duplicate relation handling, owner-approved destructive mutations, and
   bounded ordered bulk orchestration.
 author: sisyphus-org
 kind: backend

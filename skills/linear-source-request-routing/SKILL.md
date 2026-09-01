@@ -18,7 +18,8 @@ Use the typed Project Manager lane for every Linear read, creation, or mutation.
 ## Supported requests
 
 - Add one bounded comment to an exact uppercase `SIS-N` issue.
-- Change one exact `SIS-N` issue, or one positive issue number in the single `SIS` team, from any current state to any of `Backlog`, `Todo`, `Research`, `In Progress`, `In Review`, `Done`, `Canceled`, or `Duplicate` under standard policy.
+- Change one exact `SIS-N` issue, or one positive issue number in the single `SIS` team, from any current state to any directly writable state: `Backlog`, `Todo`, `Research`, `In Progress`, `In Review`, `Done`, or `Canceled`, under standard policy.
+- Mark one exact `SIS-N` issue as a duplicate of one exact canonical `SIS-N` issue with `create_issue_relation` and `relation_type=duplicate`; Linear applies its reserved `Duplicate` status automatically and PM verifies both relation and state.
 - Update one exact `SIS-N` issue, or one positive issue number in the single `SIS` team, with any non-empty bounded managed-field subset, including deterministic link removal.
 - Create one bounded issue in the `SIS` team under one exact uppercase `SIS-N` parent, with bounded title/description, safe state, and High/Medium/Low priority.
 - Converge one bounded create-only `SIS` hierarchy: one exact project, one milestone, and one top-level issue, with optional descriptions and a safe issue state.
@@ -29,7 +30,7 @@ Use the typed Project Manager lane for every Linear read, creation, or mutation.
 - Inventory an explicit non-empty subset of `issues`, `projects`, `milestones`, and `initiatives`, with an explicit `include_archived` boolean.
 - Search the same explicit core subset with an exact non-empty `query`; matching is deterministic Unicode casefold substring matching over issue identifiers/titles and entity names.
 - Attach a currently top-level issue to one exact `SIS-N` parent in standard mode. Replace an existing parent or clear it only when the owner supplies the exact fixed Swamp attestation reference as `approval` on a parent-only `update_issue`.
-- Create one exact `blocks`, `blocked_by`, or `related` issue relation in standard mode. Remove one exact existing relation with `remove_issue_relation`, or replace one exact old relation with one exact new relation using `replace_issue_relation`, only with the existing fixed `approval` reference. Supply endpoint identifiers/types only—never relation IDs.
+- Create one exact `blocks`, `blocked_by`, `related`, or directed `duplicate` issue relation in standard mode. A duplicate relation marks the target issue as a duplicate of the exact canonical related issue and verifies Linear's reserved `Duplicate` state. Remove one exact existing non-duplicate relation with `remove_issue_relation`, or replace one exact old non-duplicate relation with one exact new non-duplicate relation using `replace_issue_relation`, only with the existing fixed `approval` reference. Supply endpoint identifiers/types only—never relation IDs.
 - With the same exact approval reference, archive one exact issue (`{identifier:SIS-N}`), unique SIS-scoped project (`{name}`), or unique initiative (`{name}`); delete/trash one exact issue, project, project milestone (`{project,name}`), or initiative. Nonempty impact is permitted only when the owner-approved before hash binds the deterministic complete affected-entity inventory/counts and the immediate live re-plan is identical. Milestone archive is the only core matrix cell unavailable because the authenticated schema exposes no such mutation.
 - Route `bulk_linear_operations` with an ordered 1–50 `items` list. Each item is exactly `{operation,target,change}` in an already-supported mutating lane shape. Never add child approval/policy/IDs. Supply no parent approval when every child is standard-safe; if any child is owner-controlled, supply exactly one parent `approval` binding the full ordered intent and aggregate preflight.
 
@@ -77,7 +78,7 @@ If authoritative mutation-scoped provenance identifies one exact compatible resu
    - ask only when there is no task number, more than one plausible task number, or the number belongs to unrelated prose rather than a task reference.
 2. Call `linear_source_request` once with the matching bounded shape:
    - comment: `request=<exact supported comment text>`;
-   - state: `operation=change_state`, exactly one of exact `identifier` or positive `issue_number`, and one exact supported `state`. Never attach approval to a state transition;
+   - state: `operation=change_state`, exactly one of exact `identifier` or positive `issue_number`, and one exact directly writable `state`. Never attach approval to a state transition. `Duplicate` is not writable through `change_state`;
    - issue fields: `operation=update_issue`, exactly one of exact `identifier` or positive `issue_number`, and a bounded managed-field subset. A standard top-level parent attach uses exact `parent_identifier`. Parent replacement or clear must contain only `parent_identifier` (exact `SIS-N` or `null`) plus the exact fixed `approval` reference;
    - when the owner says to remove links from the description, use `description_transform=remove_links`; this preserves visible text (including Markdown labels) and removes HTTP(S) destinations. Do not ask whether to clear the whole description unless the owner explicitly asked to clear it;
    - create: `operation=create_issue`, bounded `title`, `description`, exact `parent_identifier`, safe `state`, and bounded `priority`.
@@ -90,6 +91,7 @@ If authoritative mutation-scoped provenance identifies one exact compatible resu
    - initiative project link: `operation=link_project_to_initiative` with exact existing `project` and `initiative` names. This only adds the link; unlink is not exposed.
    - inventory: `operation=inventory_linear`, explicit non-empty unique `entity_types`, and explicit `include_archived`;
    - search: `operation=search_linear`, exact non-empty `query`, explicit non-empty unique `entity_types`, and explicit `include_archived`.
+   - relation creation: `operation=create_issue_relation`, exact `identifier`, exact `related_identifier`, and `blocks|blocked_by|related|duplicate`. For `duplicate`, `identifier` is the duplicate issue and `related_identifier` is the canonical issue;
    - relation removal: `operation=remove_issue_relation`, exact `identifier`, exact `related_identifier`, exact `relation_type`, and the existing fixed `approval` object;
    - relation replacement: `operation=replace_issue_relation`, exact target `identifier`, exact `old_related_identifier`/`old_relation_type`, exact `new_related_identifier`/`new_relation_type`, and the existing fixed `approval` object;
    - archive/delete: `operation=archive_linear_entity` or `delete_linear_entity`, exact singular `entity_type`, exact typed `selector`, and the existing fixed `approval`. Delete selectors are issue `{identifier}`, project `{name}`, milestone `{project,name}`, and initiative `{name}`; do not translate trash-style delete requests into archive.

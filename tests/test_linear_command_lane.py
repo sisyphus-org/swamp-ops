@@ -770,6 +770,61 @@ class ContractTests(unittest.TestCase):
             {"related_identifier": "SIS-56", "relation_type": "blocked_by"},
         )
 
+    def test_duplicate_relation_marks_issue_duplicate_and_verifies_reserved_state(self):
+        class DuplicateClient(FakeClient):
+            def list_states(self, team_id):
+                return [
+                    *super().list_states(team_id),
+                    {"id": "state-Duplicate", "name": "Duplicate", "type": "duplicate"},
+                ]
+
+            def create_issue_relation(self, **kwargs):
+                super().create_issue_relation(**kwargs)
+                if kwargs["relation_type"] == "duplicate":
+                    self.current["state"] = {
+                        "id": "state-Duplicate",
+                        "name": "Duplicate",
+                        "type": "duplicate",
+                    }
+
+        client = DuplicateClient()
+        raw = relation_command("duplicate", "linear:SIS:relation:duplicate")
+        with tempfile.TemporaryDirectory() as tmp:
+            result = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "journal.json",
+            )
+        self.assertEqual(result["result"], "applied")
+        self.assertEqual(result["after"]["relation_type"], "duplicate")
+        self.assertEqual(client.current["state"]["name"], "Duplicate")
+        self.assertEqual(
+            [write[-1] for write in client.writes if write[0] == "create_issue_relation"],
+            ["duplicate"],
+        )
+
+    def test_duplicate_relation_fails_when_state_readback_changes_unmanaged_issue_fields(self):
+        class DriftClient(FakeClient):
+            def create_issue_relation(self, **kwargs):
+                super().create_issue_relation(**kwargs)
+                self.current["state"] = {
+                    "id": "state-Duplicate",
+                    "name": "Duplicate",
+                    "type": "duplicate",
+                }
+                self.current["title"] = "drifted"
+
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(
+            lane.ContractError, "changed unmanaged fields"
+        ):
+            lane.execute_command(
+                DriftClient(),
+                relation_command("duplicate", "linear:SIS:relation:duplicate-drift"),
+                mode="apply",
+                journal_path=Path(tmp) / "journal.json",
+            )
+
     def test_relation_removal_and_replacement_require_owner_policy_and_exact_changes(self):
         for operation in ("remove_issue_relation", "replace_issue_relation"):
             with self.subTest(operation=operation):
@@ -884,8 +939,10 @@ class ContractTests(unittest.TestCase):
         lane.validate_command(
             command("update_issue", {"due_date": None, "estimate": None})
         )
-        for state in ("Done", "Canceled", "Duplicate"):
+        for state in ("Done", "Canceled"):
             lane.validate_command(command("change_state", {"state": state}))
+        with self.assertRaises(lane.ContractError):
+            lane.validate_command(command("change_state", {"state": "Duplicate"}))
         with self.assertRaisesRegex(lane.ContractError, "read_issue change"):
             lane.validate_command(command("read_issue", {"state": "Todo"}))
         with self.assertRaisesRegex(lane.ContractError, "comment body"):

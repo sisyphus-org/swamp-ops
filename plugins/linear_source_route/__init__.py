@@ -53,10 +53,10 @@ PUBLIC_BLOCK_REASON_PATTERNS = {
         re.compile(r"^exact Linear issue not found: SIS-[1-9][0-9]*$"),
         re.compile(r"^exact target is not in the SIS team: SIS-[1-9][0-9]*$"),
         re.compile(
-            r"^exact workflow state not found: (?:Backlog|Todo|Research|In Progress|In Review|Done|Canceled|Duplicate)$"
+            r"^exact workflow state not found: (?:Backlog|Todo|Research|In Progress|In Review|Done|Canceled)$"
         ),
         re.compile(
-            r"^exact workflow state has incompatible semantic type: (?:Done|Canceled|Duplicate)$"
+            r"^exact workflow state has incompatible semantic type: (?:Done|Canceled)$"
         ),
         re.compile(r"^state read-back verification failed$"),
         re.compile(r"^state read-back changed unmanaged fields$"),
@@ -296,7 +296,7 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
             },
             "relation_type": {
                 "type": "string",
-                "enum": ["blocks", "blocked_by", "related"],
+                "enum": ["blocks", "blocked_by", "related", "duplicate"],
             },
             "old_relation_type": {
                 "type": "string",
@@ -316,7 +316,6 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                     "In Review",
                     "Done",
                     "Canceled",
-                    "Duplicate",
                 ],
             },
             "title": {"type": "string", "minLength": 1, "maxLength": 200},
@@ -592,7 +591,11 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                     "approval",
                 ],
                 "properties": {
-                    "operation": {"const": "remove_issue_relation"}
+                    "operation": {"const": "remove_issue_relation"},
+                    "relation_type": {
+                        "type": "string",
+                        "enum": ["blocks", "blocked_by", "related"],
+                    },
                 },
             },
             {
@@ -1216,13 +1219,18 @@ def _public_target(result: dict[str, Any]) -> tuple[dict[str, Any], dict[str, An
         identifier = target.get("identifier")
         related_identifier = target.get("related_identifier")
         relation_type = target.get("relation_type")
+        allowed_relation_types = (
+            {"blocks", "blocked_by", "related", "duplicate"}
+            if operation == "create_issue_relation"
+            else {"blocks", "blocked_by", "related"}
+        )
         if (
             not isinstance(identifier, str)
             or not PUBLIC_ISSUE_IDENTIFIER.fullmatch(identifier)
             or not isinstance(related_identifier, str)
             or not PUBLIC_ISSUE_IDENTIFIER.fullmatch(related_identifier)
             or related_identifier == identifier
-            or relation_type not in {"blocks", "blocked_by", "related"}
+            or relation_type not in allowed_relation_types
             or after.get("identifier") != identifier
             or after.get("related_identifier") != related_identifier
             or after.get("relation_type") != relation_type

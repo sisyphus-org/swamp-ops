@@ -52,16 +52,16 @@ OPERATIONS = {
 READ_OPERATIONS = {"read_issue", "inventory_sub_issues", "search_linear", "inventory_linear"}
 LINEAR_ENTITY_TYPES = ("issues", "projects", "milestones", "initiatives")
 MAX_SEARCH_QUERY = 500
-TERMINAL_STATES = {"Done", "Canceled", "Duplicate"}
+TERMINAL_STATES = {"Done", "Canceled"}
 TERMINAL_STATE_TYPES = {
     "Done": "completed",
     "Canceled": "canceled",
-    "Duplicate": "duplicate",
 }
 OWNER_APPROVAL_PARENT_BLOCKER = (
     "owner approval required: clearing or replacing an issue parent"
 )
 ISSUE_RELATION_TYPES = {"blocks", "blocked_by", "related"}
+CREATE_ISSUE_RELATION_TYPES = ISSUE_RELATION_TYPES | {"duplicate"}
 PRIORITIES = {"High": 2, "Medium": 3, "Low": 4}
 MAX_COMMENT_LENGTH = 4000
 MAX_TITLE_LENGTH = 200
@@ -1607,7 +1607,7 @@ def validate_command(raw: Any) -> dict[str, Any]:
             raise ContractError(
                 "create_issue_relation related_identifier must be an exact SIS-N identifier"
             )
-        if change.get("relation_type") not in ISSUE_RELATION_TYPES:
+        if change.get("relation_type") not in CREATE_ISSUE_RELATION_TYPES:
             raise ContractError(
                 "create_issue_relation relation_type is not in the bounded allowlist"
             )
@@ -3166,6 +3166,8 @@ def execute_command(
             source, destination, linear_type = related, issue, "blocks"
         elif user_type == "blocks":
             source, destination, linear_type = issue, related, "blocks"
+        elif user_type == "duplicate":
+            source, destination, linear_type = issue, related, "duplicate"
         else:
             source, destination = sorted(
                 (issue, related), key=lambda item: item["identifier"]
@@ -3187,6 +3189,31 @@ def execute_command(
             "mode": mode,
             "target": relation_target,
         }
+
+        def verify_duplicate_issue_readback() -> None:
+            duplicate_issue = client.get_issue(identifier)
+            duplicate_state = (
+                duplicate_issue.get("state")
+                if isinstance(duplicate_issue, dict)
+                else None
+            )
+            if (
+                not isinstance(duplicate_issue, dict)
+                or duplicate_issue.get("id") != issue.get("id")
+                or duplicate_issue.get("identifier") != identifier
+                or not isinstance(duplicate_state, dict)
+                or duplicate_state.get("name") != "Duplicate"
+                or duplicate_state.get("type") != "duplicate"
+            ):
+                raise ContractError("duplicate relation state read-back verification failed")
+            if any(
+                duplicate_issue.get(field) != value
+                for field, value in issue.items()
+                if field != "state"
+            ) or any(
+                field not in issue for field in duplicate_issue if field != "state"
+            ):
+                raise ContractError("duplicate relation read-back changed unmanaged fields")
 
         def relation_matches(candidate: Any, *, expected_id: str | None = None) -> bool:
             if not isinstance(candidate, dict):
@@ -3233,6 +3260,8 @@ def execute_command(
         if len(existing) > 1:
             raise ContractError("exact issue relation exists more than once")
         if existing:
+            if user_type == "duplicate":
+                verify_duplicate_issue_readback()
             return finish(
                 {
                     **relation_base,
@@ -3276,6 +3305,8 @@ def execute_command(
         verified_relation = client.get_issue_relation(relation_id)
         if not relation_matches(verified_relation, expected_id=relation_id):
             raise ContractError("issue relation read-back verification failed")
+        if user_type == "duplicate":
+            verify_duplicate_issue_readback()
         return finish(
             {
                 **relation_base,
