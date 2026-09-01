@@ -1012,6 +1012,24 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertNotIn("inputs.mode", workflow)
         self.assertNotIn("--mode apply", workflow)
 
+    def test_source_skill_requires_semantic_resolution_and_composition(self):
+        skill = (
+            Path(__file__).parents[1]
+            / "skills"
+            / "linear-source-request-routing"
+            / "SKILL.md"
+        ).read_text()
+        required = (
+            "Exactness applies only after semantic resolution",
+            "one unique plausible match",
+            "multiple plausible matches",
+            "continue the ordered plan automatically after each wake",
+            "Never claim that the lane lacks a capability merely because no single operation",
+        )
+        for statement in required:
+            with self.subTest(statement=statement):
+                self.assertIn(statement, skill)
+
     def test_active_protocol_artifacts_contain_only_current_contract(self):
         root = Path(__file__).parents[1]
         paths = [
@@ -2206,6 +2224,72 @@ class ExecutionTests(unittest.TestCase):
                 writes,
             )
             self.assertEqual(len(client.issues), 1)
+
+    def test_standalone_accepts_consistent_partial_exact_title_projection(self):
+        class PartialTitleProjectionClient(FakeIssueTreeClient):
+            conflict = False
+
+            def list_project_issues(self, project_id):
+                issues = super().list_project_issues(project_id)
+                for issue in issues:
+                    issue.update(
+                        {
+                            "dueDate": None,
+                            "estimate": None,
+                            "archivedAt": None,
+                            "assignee": None,
+                            "labels": {"nodes": []},
+                        }
+                    )
+                    issue["state"]["type"] = "started"
+                    issue["project"]["name"] = "Wardrobe & Style"
+                    issue["projectMilestone"]["name"] = "Autumn 2026"
+                return issues
+
+            def list_team_issues_by_title(self, team_id, title):
+                self.calls.append(("list_team_issues_by_title", team_id, title))
+                return [
+                    {
+                        "id": issue["id"],
+                        "identifier": issue["identifier"],
+                        "title": issue["title"],
+                        "url": issue["url"],
+                        "description": issue["description"],
+                        "priority": issue["priority"],
+                        "state": {
+                            "id": issue["state"]["id"],
+                            "name": (
+                                "Backlog" if self.conflict else issue["state"]["name"]
+                            ),
+                        },
+                        "team": dict(issue["team"]),
+                        "project": {"id": issue["project"]["id"]},
+                        "projectMilestone": {
+                            "id": issue["projectMilestone"]["id"]
+                        },
+                        "parent": issue["parent"],
+                    }
+                    for issue in self.issues
+                    if issue["title"] == title
+                ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = PartialTitleProjectionClient()
+            raw = standalone_command()
+            applied = lane.execute_command(
+                client, raw, mode="apply", journal_path=Path(tmp) / "create.json"
+            )
+            replay = lane.execute_command(
+                client, raw, mode="apply", journal_path=Path(tmp) / "replay.json"
+            )
+        self.assertEqual(applied["result"], "applied")
+        self.assertEqual(replay["result"], "no_op")
+        self.assertEqual(len(client.issues), 1)
+        client.conflict = True
+        with self.assertRaisesRegex(
+            lane.ContractError, "SIS exact-title issue read-back is inconsistent"
+        ):
+            lane.execute_command(client, raw, mode="plan")
 
     def test_standalone_reconciles_one_exact_legacy_child_without_duplicate(self):
         class LegacyOutsideDirectProjectQuery(FakeIssueTreeClient):
