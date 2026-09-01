@@ -36,6 +36,7 @@ class ApprovalError(RuntimeError):
 
 _VERIFIED_MARKER = object()
 _CONSUMED_MARKER = object()
+_BULK_CHILD_MARKER = object()
 
 
 class VerifiedOwnerApproval(Mapping[str, Any]):
@@ -124,6 +125,59 @@ class ConsumedOwnerApproval:
         return value
 
 
+class BulkChildAuthorization:
+    """Opaque child capability minted only from an exact consumed parent claim."""
+
+    __slots__ = ("_intent", "_command_hash", "_parent_command_hash", "_marker")
+
+    def __init__(
+        self,
+        *,
+        intent: dict[str, Any],
+        command_hash: str,
+        parent_command_hash: str,
+        _marker: object,
+    ) -> None:
+        if _marker is not _BULK_CHILD_MARKER:
+            raise ApprovalError("bulk child authorization cannot be constructed by callers")
+        self._intent = intent
+        self._command_hash = command_hash
+        self._parent_command_hash = parent_command_hash
+        self._marker = _marker
+
+
+def _mint_bulk_child_authorization(
+    authorization: Any,
+    *,
+    parent_command: dict[str, Any],
+    child_command: dict[str, Any],
+) -> BulkChildAuthorization:
+    """Narrow one exact durable parent claim to one deterministic child."""
+    expected_parent_intent = {
+        "operation": parent_command.get("operation"),
+        "target": parent_command.get("target"),
+        "change": parent_command.get("change"),
+    }
+    require_consumed_owner_approval(
+        authorization,
+        expected_intent=expected_parent_intent,
+        expected_command=parent_command,
+    )
+    if parent_command.get("operation") != "bulk_linear_operations":
+        raise ApprovalError("bulk child authorization requires an exact bulk parent")
+    child_intent = {
+        "operation": child_command.get("operation"),
+        "target": child_command.get("target"),
+        "change": child_command.get("change"),
+    }
+    return BulkChildAuthorization(
+        intent=child_intent,
+        command_hash=command_binding_hash(child_command),
+        parent_command_hash=command_binding_hash(parent_command),
+        _marker=_BULK_CHILD_MARKER,
+    )
+
+
 def require_consumed_owner_approval(
     authorization: Any,
     *,
@@ -131,18 +185,26 @@ def require_consumed_owner_approval(
     expected_command: dict[str, Any] | None = None,
 ) -> None:
     """Fail closed unless authorization came from atomic one-time consumption."""
-    if (
-        not isinstance(authorization, ConsumedOwnerApproval)
-        or authorization._marker is not _CONSUMED_MARKER
-        or authorization._intent != expected_intent
-        or (
-            authorization._command_hash is not None
-            and (
-                expected_command is None
-                or authorization._command_hash != command_binding_hash(expected_command)
+    consumed_valid = (
+        isinstance(authorization, ConsumedOwnerApproval)
+        and authorization._marker is _CONSUMED_MARKER
+        and authorization._intent == expected_intent
+        and (
+            authorization._command_hash is None
+            or (
+                expected_command is not None
+                and authorization._command_hash == command_binding_hash(expected_command)
             )
         )
-    ):
+    )
+    child_valid = (
+        isinstance(authorization, BulkChildAuthorization)
+        and authorization._marker is _BULK_CHILD_MARKER
+        and authorization._intent == expected_intent
+        and expected_command is not None
+        and authorization._command_hash == command_binding_hash(expected_command)
+    )
+    if not (consumed_valid or child_valid):
         raise ApprovalError("apply requires a consumed owner approval for the exact intent")
 
 

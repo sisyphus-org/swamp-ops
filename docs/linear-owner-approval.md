@@ -115,7 +115,7 @@ The exact supported matrix is deliberately asymmetric:
 | `archive_linear_entity` | `issueArchive` | deprecated but live authenticated `projectArchive` | unsupported: authenticated schema exposes no milestone archive mutation | `initiativeArchive` |
 | `delete_linear_entity` | `issueDelete(permanentlyDelete:false)` trash | `projectDelete` trash | `projectMilestoneDelete` | `initiativeDelete` trash |
 
-Selectors are public names only: issue `{identifier: SIS-N}`; project `{name}` with exact unique workspace name and SIS team membership; milestone `{project,name}` with both exact and the project SIS-scoped; initiative `{name}` unique in the workspace. Raw IDs, account/team entities, arbitrary entities, bulk selectors, and cascade flags are not accepted.
+Selectors are public names only: issue `{identifier: SIS-N}`; project `{name}` with exact unique workspace name and SIS team membership; milestone `{project,name}` with both exact and the project SIS-scoped; initiative `{name}` unique in the workspace. Raw IDs, account/team entities, arbitrary entities, bulk selectors, and cascade flags are not accepted. The separate `bulk_linear_operations` parent may order exact single-target operations, including these lifecycle operations; it never accepts a bulk selector or cascade. One approval binds the full ordered parent intent and aggregate ordered before/impact snapshots, and one durable parent claim is narrowed internally to exact deterministic children.
 
 Preflight reads the exact entity snapshot plus complete applicable impact: recursive issue children and relations; project issues, milestones, and initiative links; milestone issues; initiative projects. It canonicalizes and sorts affected entities, includes deterministic counts and affected public snapshots in the plan, and binds all of it into the approval before-state hash. Nonempty impact never blocks after the owner approves that exact snapshot. Apply still performs only the one fixed lifecycle mutation—never a caller-selected cascade or bulk document.
 
@@ -125,4 +125,4 @@ The read-only live smoke `inventory_entity_destruction` introspects the current 
 
 ## Deliberately unavailable
 
-Arbitrary terminal names, nonterminal owner approval, account/team archive or delete, milestone archive, bulk archive/delete, caller-selected cascade, permanent issue deletion, initiative unlink as a standalone operation, arbitrary GraphQL, arbitrary relation IDs, and all other destructive lifecycle operations remain rejected before mutation.
+Arbitrary terminal names, nonterminal owner approval, account/team archive or delete, milestone archive, bulk selectors/cascade, caller-selected cascade, permanent issue deletion, initiative unlink as a standalone operation, arbitrary GraphQL, arbitrary relation IDs, and all other destructive lifecycle operations remain rejected before mutation.

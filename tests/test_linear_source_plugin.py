@@ -564,7 +564,6 @@ class AdapterTests(unittest.TestCase):
             "initiative_status",
             "initiative_owner",
             "initiative_labels",
-            "bulk",
             "search_initiative",
         ):
             self.assertNotIn(forbidden, serialized)
@@ -626,6 +625,7 @@ class PluginTests(unittest.TestCase):
                 "query",
                 "entity_types",
                 "include_archived",
+                "items",
                 "entity_type",
                 "selector",
                 "identifier",
@@ -728,10 +728,11 @@ class PluginTests(unittest.TestCase):
             create_branch["properties"]["parent_identifier"],
             {"type": "string", "pattern": "^SIS-[1-9][0-9]*$"},
         )
-        self.assertEqual(len(parameters["oneOf"]), 22)
+        self.assertEqual(len(parameters["oneOf"]), 23)
         self.assertEqual(
             parameters["properties"]["operation"]["enum"],
             [
+                "bulk_linear_operations",
                 "change_state",
                 "update_issue",
                 "inventory_sub_issues",
@@ -760,6 +761,7 @@ class PluginTests(unittest.TestCase):
             [branch.get("properties", {}).get("operation", {}).get("const") for branch in parameters["oneOf"]],
             [
                 None,
+                "bulk_linear_operations",
                 "search_linear",
                 "inventory_linear",
                 None,

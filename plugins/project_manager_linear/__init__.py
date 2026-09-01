@@ -316,8 +316,25 @@ def execute_pm_command(
             operation = expected_intent["operation"]
             target_identifier = expected_intent["target"].get("identifier")
             change = expected_intent["change"]
-            if operation in {"archive_linear_entity", "delete_linear_entity"}:
+            approved_before_matches = isinstance(plan.get("before"), dict)
+            live_before_matches = isinstance(live_plan.get("before"), dict)
+            if operation == "bulk_linear_operations":
                 approved_target_matches = approved_target == expected_intent["target"]
+                expected_items = change.get("items")
+                approved_before_matches = (
+                    isinstance(plan.get("before"), list)
+                    and isinstance(expected_items, list)
+                    and len(plan["before"]) == len(expected_items)
+                )
+                live_before_matches = (
+                    isinstance(live_plan.get("before"), list)
+                    and isinstance(expected_items, list)
+                    and len(live_plan["before"]) == len(expected_items)
+                )
+            elif operation in {"archive_linear_entity", "delete_linear_entity"}:
+                approved_target_matches = approved_target == expected_intent["target"]
+                approved_before_matches = isinstance(plan.get("before"), dict)
+                live_before_matches = isinstance(live_plan.get("before"), dict)
             elif operation == "remove_issue_relation":
                 approved_target_matches = approved_target == {
                     "type": "issue_relation",
@@ -347,11 +364,11 @@ def execute_pm_command(
                     and approved_target.get("identifier") == target_identifier
                 )
             if (
-                not isinstance(plan.get("before"), dict)
+                not approved_before_matches
                 or approved_plan_binding["operation"] != expected_intent["operation"]
                 or not approved_target_matches
                 or approved_plan_binding["plan"] is None
-                or not isinstance(live_plan.get("before"), dict)
+                or not live_before_matches
                 or contract.canonical_sha256(live_plan.get("before"))
                 != before_state_hash
                 or contract.canonical_sha256(live_plan_binding)
@@ -437,7 +454,15 @@ def human_summary(result: dict[str, Any]) -> str:
         else ""
     )
     operation = result.get("operation")
-    if operation == "read_issue":
+    if operation == "bulk_linear_operations":
+        counts = result.get("counts")
+        total = counts.get("total") if isinstance(counts, dict) else None
+        lead = (
+            f"Пакет Linear выполнен: {total} операций."
+            if isinstance(total, int) and not isinstance(total, bool)
+            else "Пакет Linear выполнен."
+        )
+    elif operation == "read_issue":
         lead = "Задача Linear прочитана."
     elif operation == "search_linear":
         lead = "Поиск Linear выполнен."

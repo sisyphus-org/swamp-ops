@@ -12,7 +12,7 @@ inputs:
   properties:
     intent:
       type: string
-      pattern: "^[A-Za-z0-9_-]{16,4096}$"
+      pattern: "^[A-Za-z0-9_-]{16,34000}$"
     beforeStateHash:
       type: string
       pattern: "^[0-9a-f]{64}$"

@@ -98,6 +98,23 @@ The source plugin validates and persists this discriminated request but has no L
 
 ## Plan and apply
 
+### Ordered bounded batches
+
+`bulk_linear_operations` targets exactly `{"type":"workspace","identifier":"current"}` and contains `change.items`, an ordered list of 1–50 entries. Every entry contains only `operation`, `target`, and `change` in an existing mutating single-item lane shape. Reads, nested bulk, policy/approval/identity fields, raw GraphQL, duplicate semantic entries, and multiple writes to the same exact canonical target are rejected before Linear access. The parent serialized intent is capped at 24 KiB.
+
+Child command, correlation, and idempotency identities are domain-separated deterministic derivations of the complete ordered parent semantic identity and zero-based index. The lane validates every child and executes every child plan before the first write. Standard policy is accepted only when every child is standard-safe. A mixed safe/owner-controlled batch carries one parent `owner_approved` reference whose intent hash binds the full ordered list and whose before-state hash binds the ordered aggregate of every child before/impact snapshot and plan.
+
+Apply holds the normal lane lock plus a parent recovery claim, executes children in order through the unchanged fixed single-item executors, and fsyncs the parent binding, aggregate plan/desired-after hashes, approved before/after hashes, and each prepared/completed safe outcome before advancing. A crash resumes the same parent at its first unfinished child; completed children are re-planned/read back but never applied again. Any child error is an explicit partial failure. Exact completed replay returns an aggregate verified no-op. Source projection contains only ordered `{index,operation,outcome,verified}` entries and exact applied/no-op/total counts—never descriptions, IDs, hashes, task metadata, or raw child snapshots.
+
+The live smoke is deliberately plan-only and wraps the client in a fixed mutation-blocking proxy:
+
+```bash
+python scripts/linear_pm_readonly_smoke.py --live \
+  --operation plan_bulk_safe --identifier SIS-70 --peer-identifier SIS-71
+```
+
+It preflights one bounded issue update plus one safe relation create and reports only operation names/counts. Any fixed mutation method call fails the smoke immediately.
+
 Plan is read-only:
 
 ```bash

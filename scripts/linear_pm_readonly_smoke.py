@@ -24,6 +24,94 @@ ENTITY_TYPES = ("issues", "projects", "milestones", "initiatives")
 ISSUE_IDENTIFIER = bundled_lane.ISSUE_IDENTIFIER
 
 
+MUTATING_CLIENT_METHODS = {
+    "update_issue_state",
+    "create_comment",
+    "create_issue",
+    "create_issue_relation",
+    "delete_issue_relation",
+    "create_project",
+    "create_project_milestone",
+    "update_project",
+    "update_project_milestone",
+    "create_initiative",
+    "update_initiative",
+    "create_initiative_project_link",
+    "archive_linear_entity",
+    "delete_linear_entity",
+    "create_project_issue",
+    "update_scoped_issue",
+    "update_issue_fields",
+    "update_project_issue",
+}
+
+
+class _ReadOnlyClient:
+    """Fail immediately if a plan-only smoke reaches any fixed mutation method."""
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+
+    def __getattr__(self, name: str) -> Any:
+        if name in MUTATING_CLIENT_METHODS:
+            def blocked(*_args: Any, **_kwargs: Any) -> Any:
+                raise RuntimeError("bulk plan-only smoke attempted a mutation")
+
+            return blocked
+        return getattr(self._client, name)
+
+
+def run_bulk_plan_smoke(
+    *,
+    items: list[dict[str, Any]],
+    environ: Mapping[str, str] = os.environ,
+    lane: Any = bundled_lane,
+    client_factory: Any | None = None,
+) -> dict[str, Any]:
+    """Run a mixed-operation live batch preflight behind a mutation-blocking proxy."""
+    if environ.get("HERMES_PROFILE") != "project-manager":
+        raise RuntimeError("live Linear read smoke requires project-manager profile")
+    token = str(environ.get("LINEAR_TOKEN") or "").strip()
+    if not token:
+        raise RuntimeError("project-manager LINEAR_TOKEN is missing")
+    semantic = {
+        "operation": "bulk_linear_operations",
+        "target": {"type": "workspace", "identifier": "current"},
+        "change": {"items": items},
+        "policy": {"mode": "standard"},
+    }
+    digest = hashlib.sha256(
+        json.dumps(semantic, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    command = {
+        "schema_version": "linear-command.v2",
+        "command_id": str(uuid.uuid4()),
+        "correlation_id": str(uuid.uuid4()),
+        "idempotency_key": f"linear:v2:{digest[:32]}",
+        "source_profile": "project-manager",
+        **semantic,
+    }
+    client = _ReadOnlyClient((client_factory or lane.LinearClient)(token))
+    result = lane.execute_command(client, command, mode="plan", journal_path=None)
+    if (
+        result.get("schema_version") != "linear-result.v2"
+        or result.get("operation") != "bulk_linear_operations"
+        or result.get("result") != "planned"
+        or result.get("mode") != "plan"
+        or result.get("verified") is not False
+        or len(result.get("items", [])) != len(items)
+    ):
+        raise RuntimeError("bulk plan-only smoke did not return a bounded aggregate plan")
+    return {
+        "result": "pass",
+        "readOnly": True,
+        "operation": "bulk_linear_operations",
+        "itemCount": len(items),
+        "operations": [item["operation"] for item in result["items"]],
+        "verifiedNoMutation": True,
+    }
+
+
 def build_command(
     *,
     operation: str,
@@ -369,6 +457,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "inventory_issue_relations",
             "inventory_team_states",
             "inventory_entity_destruction",
+            "plan_bulk_safe",
         ),
     )
     parser.add_argument(
@@ -380,6 +469,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--query")
     parser.add_argument("--identifier")
+    parser.add_argument("--peer-identifier")
     parser.add_argument(
         "--destructive-operation",
         choices=("archive_linear_entity", "delete_linear_entity"),
@@ -395,6 +485,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if not args.live:
         parser.error("--live is required")
+    if args.operation == "plan_bulk_safe":
+        if (
+            args.identifier is None
+            or args.peer_identifier is None
+            or args.identifier == args.peer_identifier
+            or args.entity_types
+            or args.query is not None
+            or args.include_archived
+            or args.exclude_archived
+            or args.destructive_operation is not None
+            or args.entity_kind is not None
+            or args.name is not None
+            or args.project is not None
+        ):
+            parser.error("plan_bulk_safe requires two distinct exact issue identifiers only")
+        if (
+            ISSUE_IDENTIFIER.fullmatch(args.identifier) is None
+            or ISSUE_IDENTIFIER.fullmatch(args.peer_identifier) is None
+        ):
+            parser.error("plan_bulk_safe identifiers must be exact SIS-N values")
+        return args
+    if args.peer_identifier is not None:
+        parser.error("--peer-identifier is allowed only for plan_bulk_safe")
     if args.operation == "inventory_entity_destruction":
         if (
             args.destructive_operation is None
@@ -446,7 +559,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
-        if args.operation == "inventory_entity_destruction":
+        if args.operation == "plan_bulk_safe":
+            result = run_bulk_plan_smoke(
+                items=[
+                    {
+                        "operation": "update_issue",
+                        "target": {"type": "issue", "identifier": args.identifier},
+                        "change": {"priority": "Low"},
+                    },
+                    {
+                        "operation": "create_issue_relation",
+                        "target": {
+                            "type": "issue",
+                            "identifier": args.peer_identifier,
+                        },
+                        "change": {
+                            "related_identifier": args.identifier,
+                            "relation_type": "related",
+                        },
+                    },
+                ]
+            )
+        elif args.operation == "inventory_entity_destruction":
             selector = (
                 {"identifier": args.identifier}
                 if args.entity_kind == "issue"

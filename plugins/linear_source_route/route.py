@@ -38,6 +38,20 @@ PRIORITIES = {"High", "Medium", "Low"}
 ISSUE_RELATION_TYPES = {"blocks", "blocked_by", "related"}
 LINEAR_ENTITY_TYPES = ("issues", "projects", "milestones", "initiatives")
 MAX_SEARCH_QUERY = 500
+MAX_BULK_ITEMS = 50
+MAX_BULK_BYTES = 24_576
+BULK_MUTATING_OPERATIONS = {
+    "change_state", "update_issue", "update_sub_issues", "add_comment", "create_issue",
+    "converge_hierarchy", "create_standalone_issue", "converge_issue_tree",
+    "create_issue_relation", "remove_issue_relation", "replace_issue_relation",
+    "create_project", "create_milestone", "update_project", "update_milestone",
+    "create_initiative", "update_initiative", "link_project_to_initiative",
+    "archive_linear_entity", "delete_linear_entity",
+}
+BULK_OWNER_OPERATIONS = {
+    "remove_issue_relation", "replace_issue_relation",
+    "archive_linear_entity", "delete_linear_entity",
+}
 APPROVAL_WORKFLOW = "linear-destructive-owner-approval-attest"
 APPROVAL_MODEL = "linear-destructive-owner-approval-attest"
 APPROVAL_FIELDS = {
@@ -410,6 +424,182 @@ def _validate_scoped_issue_request(request: dict[str, Any]) -> dict[str, Any]:
     return change
 
 
+def _validate_canonical_bulk_item(item: dict[str, Any], index: int) -> None:
+    """Apply source-side lane-shape checks without importing the credentialed lane."""
+    operation = item["operation"]
+    target = item["target"]
+    change = item["change"]
+    issue_target = (
+        isinstance(target, dict)
+        and set(target) == {"type", "identifier"}
+        and target.get("type") == "issue"
+        and isinstance(target.get("identifier"), str)
+        and re.fullmatch(r"SIS-[1-9][0-9]*", target["identifier"]) is not None
+    )
+    team_target = target == {"type": "team", "identifier": "SIS"}
+    workspace_target = target == {"type": "workspace", "identifier": "current"}
+    issue_ops = {
+        "change_state", "update_issue", "update_sub_issues", "add_comment",
+        "create_issue_relation", "remove_issue_relation", "replace_issue_relation",
+    }
+    team_ops = {
+        "create_issue", "converge_hierarchy", "create_standalone_issue",
+        "converge_issue_tree", "create_project", "create_milestone",
+        "update_project", "update_milestone", "link_project_to_initiative",
+    }
+    workspace_ops = {"create_initiative", "update_initiative"}
+    if operation in issue_ops and not issue_target:
+        raise RouteError(f"bulk item {index} requires an exact issue target")
+    if operation in team_ops and not team_target:
+        raise RouteError(f"bulk item {index} requires the exact SIS team target")
+    if operation in workspace_ops and not workspace_target:
+        raise RouteError(f"bulk item {index} requires the current workspace target")
+    if operation in {"archive_linear_entity", "delete_linear_entity"}:
+        entity_type = target.get("type") if isinstance(target, dict) else None
+        selector = target.get("selector") if isinstance(target, dict) else None
+        safe = {
+            ("archive_linear_entity", "issue"),
+            ("archive_linear_entity", "project"),
+            ("archive_linear_entity", "initiative"),
+            ("delete_linear_entity", "issue"),
+            ("delete_linear_entity", "project"),
+            ("delete_linear_entity", "milestone"),
+            ("delete_linear_entity", "initiative"),
+        }
+        if (operation, entity_type) not in safe or not isinstance(selector, dict) or change:
+            raise RouteError(f"bulk item {index} has an invalid lifecycle shape")
+        if entity_type == "issue":
+            valid = set(selector) == {"identifier"} and isinstance(selector.get("identifier"), str) and re.fullmatch(r"SIS-[1-9][0-9]*", selector["identifier"]) is not None
+        elif entity_type in {"project", "initiative"}:
+            valid = set(selector) == {"name"}
+            if valid:
+                _validate_clean_text(selector.get("name"), "selector.name", maximum=200, required=True)
+        else:
+            valid = set(selector) == {"project", "name"}
+            if valid:
+                for field in ("project", "name"):
+                    _validate_clean_text(selector.get(field), f"selector.{field}", maximum=200, required=True)
+        if not valid:
+            raise RouteError(f"bulk item {index} has an invalid lifecycle selector")
+        return
+    if operation == "change_state":
+        if set(change) != {"state"} or change.get("state") not in SAFE_STATES | OWNER_CONTROLLED_STATES:
+            raise RouteError(f"bulk item {index} has an invalid state change")
+    elif operation == "update_issue":
+        reconstructed = {"operation": operation, "identifier": target["identifier"], **change}
+        # Source approval belongs only to the parent; validate the managed fields
+        # through the normal parser and remove its parent-only approval expectation.
+        if set(change) == {"parent_identifier"}:
+            parent = change["parent_identifier"]
+            if parent is not None and (not isinstance(parent, str) or re.fullmatch(r"SIS-[1-9][0-9]*", parent) is None):
+                raise RouteError(f"bulk item {index} has an invalid parent target")
+        else:
+            parse_linear_request(reconstructed)
+    elif operation == "update_sub_issues":
+        if set(change) != {"description"}:
+            raise RouteError(f"bulk item {index} has an invalid sub-issue update")
+        _validate_clean_text(change.get("description"), "description", maximum=10_000, required=False)
+    elif operation == "add_comment":
+        if set(change) != {"body"}:
+            raise RouteError(f"bulk item {index} has an invalid comment")
+        _validate_clean_text(change.get("body"), "body", maximum=4_000, required=True)
+    elif operation in {"create_issue_relation", "remove_issue_relation", "replace_issue_relation"}:
+        if operation in {"create_issue_relation", "remove_issue_relation"}:
+            expected = {"related_identifier", "relation_type"}
+            endpoints = ("related_identifier",)
+            types = ("relation_type",)
+        else:
+            expected = {"old_related_identifier", "old_relation_type", "new_related_identifier", "new_relation_type"}
+            endpoints = ("old_related_identifier", "new_related_identifier")
+            types = ("old_relation_type", "new_relation_type")
+        if set(change) != expected:
+            raise RouteError(f"bulk item {index} has invalid relation fields")
+        for field in endpoints:
+            if not isinstance(change.get(field), str) or re.fullmatch(r"SIS-[1-9][0-9]*", change[field]) is None or change[field] == target["identifier"]:
+                raise RouteError(f"bulk item {index} has an invalid relation endpoint")
+        if any(change.get(field) not in ISSUE_RELATION_TYPES for field in types):
+            raise RouteError(f"bulk item {index} has an invalid relation type")
+    elif operation == "create_issue":
+        reconstructed = {"operation": operation, **change}
+        parsed = parse_linear_request(reconstructed)
+        if parsed.command["target"] != target or parsed.command["change"] != change:
+            raise RouteError(f"bulk item {index} create shape drifted")
+    elif operation == "converge_hierarchy":
+        if _validate_hierarchy_request({"operation": operation, **change}) != change:
+            raise RouteError(f"bulk item {index} hierarchy shape drifted")
+    elif operation in {"create_standalone_issue", "converge_issue_tree"}:
+        if _validate_scoped_issue_request({"operation": operation, **change}) != change:
+            raise RouteError(f"bulk item {index} scoped issue shape drifted")
+    elif operation in {"create_project", "create_milestone", "update_project", "update_milestone"}:
+        if _validate_project_management_request({"operation": operation, **change}) != change:
+            raise RouteError(f"bulk item {index} project shape drifted")
+    elif operation in {"create_initiative", "update_initiative"}:
+        if _validate_initiative_management_request({"operation": operation, **change}) != change:
+            raise RouteError(f"bulk item {index} initiative shape drifted")
+    elif operation == "link_project_to_initiative":
+        if set(change) != {"project", "initiative"}:
+            raise RouteError(f"bulk item {index} initiative link shape is invalid")
+        for field in ("project", "initiative"):
+            _validate_clean_text(change.get(field), field, maximum=200, required=True)
+
+
+def _validate_bulk_request(
+    request: dict[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    expected = {"operation", "items"}
+    if "approval" in request:
+        expected.add("approval")
+    if set(request) != expected:
+        raise RouteError("bulk request contains unsupported parent fields")
+    items = request.get("items")
+    if not isinstance(items, list) or not 1 <= len(items) <= MAX_BULK_ITEMS:
+        raise RouteError("bulk request items must contain 1-50 entries")
+    if len(json.dumps(request, ensure_ascii=False).encode("utf-8")) > MAX_BULK_BYTES:
+        raise RouteError("bulk request exceeds the bounded serialized size")
+    semantic: set[str] = set()
+    targets: set[str] = set()
+    owner_required = False
+    validated: list[dict[str, Any]] = []
+    for index, item in enumerate(items):
+        if not isinstance(item, dict) or set(item) != {"operation", "target", "change"}:
+            raise RouteError(
+                f"bulk item {index} must contain exactly operation, target, and change"
+            )
+        operation = item.get("operation")
+        target = item.get("target")
+        change = item.get("change")
+        if operation not in BULK_MUTATING_OPERATIONS:
+            raise RouteError(f"bulk item {index} is not an allowed mutating operation")
+        if not isinstance(target, dict) or not isinstance(change, dict):
+            raise RouteError(f"bulk item {index} target/change must be objects")
+        _validate_canonical_bulk_item(item, index)
+        encoded = json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        digest = hashlib.sha256(encoded.encode()).hexdigest()
+        target_digest = hashlib.sha256(
+            json.dumps(target, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        if digest in semantic:
+            raise RouteError("bulk request contains a duplicate semantic item")
+        if target_digest in targets:
+            raise RouteError("bulk request contains conflicting writes to the same exact target")
+        semantic.add(digest)
+        targets.add(target_digest)
+        owner_required = owner_required or operation in BULK_OWNER_OPERATIONS or (
+            operation == "change_state" and change.get("state") in OWNER_CONTROLLED_STATES
+        ) or (operation == "update_issue" and set(change) == {"parent_identifier"})
+        validated.append(dict(item))
+    approval = (
+        _validate_approval_reference(request["approval"])
+        if "approval" in request
+        else None
+    )
+    if owner_required and approval is None:
+        raise RouteError("bulk request with owner-controlled items requires one owner approval")
+    if not owner_required and approval is not None:
+        raise RouteError("bulk owner approval is allowed only when an item requires it")
+    return validated, approval
+
+
 def parse_linear_request(
     request: Any,
     *,
@@ -437,7 +627,11 @@ def parse_linear_request(
         change = {"body": body}
     elif isinstance(request, dict):
         operation = request.get("operation")
-        if operation == "change_state":
+        if operation == "bulk_linear_operations":
+            items, approval_reference = _validate_bulk_request(request)
+            target = {"type": "workspace", "identifier": "current"}
+            change = {"items": items}
+        elif operation == "change_state":
             state = request.get("state")
             expected_fields = {"operation", "identifier", "state"}
             if state in OWNER_CONTROLLED_STATES:
@@ -955,6 +1149,26 @@ def _verified_replay(
             )
         ):
             raise RouteError("completed replay read scope does not match persisted command")
+    elif operation == "bulk_linear_operations":
+        if target != {"type": "workspace", "identifier": "current"}:
+            raise RouteError("completed bulk replay target does not match persisted command")
+        items = result.get("items")
+        counts = result.get("counts")
+        if (
+            not isinstance(items, list)
+            or len(items) != len(persisted["change"]["items"])
+            or not isinstance(counts, dict)
+            or counts.get("total") != len(items)
+            or any(
+                not isinstance(item, dict)
+                or item.get("index") != index
+                or item.get("operation") != persisted["change"]["items"][index]["operation"]
+                or item.get("outcome") not in {"applied", "no_op"}
+                or item.get("verified") is not True
+                for index, item in enumerate(items)
+            )
+        ):
+            raise RouteError("completed bulk replay has invalid ordered outcomes")
     elif operation in {"create_initiative", "update_initiative"}:
         change = persisted["change"]
         expected_target = {

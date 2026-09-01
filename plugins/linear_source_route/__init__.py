@@ -42,6 +42,13 @@ PUBLIC_MISMATCH_FIELDS = (
 )
 PUBLIC_MISMATCH_LIST = rf"{PUBLIC_MISMATCH_FIELDS}(?:, {PUBLIC_MISMATCH_FIELDS})*"
 PUBLIC_BLOCK_REASON_PATTERNS = {
+    "bulk_linear_operations": (
+        re.compile(
+            r"^bulk_linear_operations partial failure after (?:0|[1-9][0-9]?) of (?:[1-9]|[1-4][0-9]|50) verified items$"
+        ),
+        re.compile(r"^bulk recovery aggregate preflight binding drifted$"),
+        re.compile(r"^bulk recovery binding conflicts with the exact parent intent/order$"),
+    ),
     "change_state": (
         re.compile(r"^exact Linear issue not found: SIS-[1-9][0-9]*$"),
         re.compile(r"^exact target is not in the SIS team: SIS-[1-9][0-9]*$"),
@@ -173,7 +180,8 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
         "standalone issue in an exact existing scope, one exact project or milestone "
         "create/edit request, one initiative create/edit/project-link request, one "
         "owner-approved exact core-entity archive or Linear delete/trash request, "
-        "or one top-level issue plus 1-10 explicit sub-issues. "
+        "one ordered 1-50 item mutating batch, or one top-level issue plus "
+        "1-10 explicit sub-issues. "
         "The calling profile never mutates Linear "
         "directly; the tool creates or replays one audited wake-only task and "
         "returns its state."
@@ -191,6 +199,7 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
             "operation": {
                 "type": "string",
                 "enum": [
+                    "bulk_linear_operations",
                     "change_state",
                     "update_issue",
                     "inventory_sub_issues",
@@ -227,6 +236,21 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                 },
             },
             "include_archived": {"type": "boolean"},
+            "items": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 50,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "operation": {"type": "string"},
+                        "target": {"type": "object"},
+                        "change": {"type": "object"},
+                    },
+                    "required": ["operation", "target", "change"],
+                },
+            },
             "entity_type": {
                 "type": "string",
                 "enum": ["issue", "project", "milestone", "initiative"],
@@ -444,6 +468,12 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
         },
         "oneOf": [
             {"required": ["request"]},
+            {
+                "required": ["operation", "items"],
+                "properties": {
+                    "operation": {"const": "bulk_linear_operations"}
+                },
+            },
             {
                 "required": [
                     "operation",
@@ -1073,6 +1103,47 @@ def _public_target(result: dict[str, Any]) -> tuple[dict[str, Any], dict[str, An
     """Return only validated user-relevant target facts from one PM result."""
     operation = result.get("operation")
     after = result.get("after")
+    if operation == "bulk_linear_operations":
+        target = result.get("target")
+        items = result.get("items")
+        counts = result.get("counts")
+        allowed_operations = {
+            "change_state", "update_issue", "update_sub_issues", "add_comment",
+            "create_issue", "converge_hierarchy", "create_standalone_issue",
+            "converge_issue_tree", "create_issue_relation", "remove_issue_relation",
+            "replace_issue_relation", "create_project", "create_milestone",
+            "update_project", "update_milestone", "create_initiative",
+            "update_initiative", "link_project_to_initiative",
+            "archive_linear_entity", "delete_linear_entity",
+        }
+        if (
+            target != {"type": "workspace", "identifier": "current"}
+            or not isinstance(items, list)
+            or not 1 <= len(items) <= 50
+            or not isinstance(counts, dict)
+            or set(counts) != {"total", "applied", "no_op"}
+        ):
+            raise RouteError("verified bulk result lacks safe aggregate facts")
+        public_items: list[dict[str, Any]] = []
+        for index, item in enumerate(items):
+            if (
+                not isinstance(item, dict)
+                or set(item) != {"index", "operation", "outcome", "verified"}
+                or item.get("index") != index
+                or item.get("operation") not in allowed_operations
+                or item.get("outcome") not in {"applied", "no_op"}
+                or item.get("verified") is not True
+            ):
+                raise RouteError("verified bulk result contains an unsafe item outcome")
+            public_items.append(dict(item))
+        applied = sum(item["outcome"] == "applied" for item in public_items)
+        no_op = len(public_items) - applied
+        if counts != {"total": len(public_items), "applied": applied, "no_op": no_op}:
+            raise RouteError("verified bulk result counts do not match ordered outcomes")
+        return {"type": "workspace", "identifier": "current"}, {
+            "items": public_items,
+            "counts": dict(counts),
+        }
     if operation in {"search_linear", "inventory_linear"}:
         return _public_workspace_read(result)
     if operation in {"archive_linear_entity", "delete_linear_entity"}:
@@ -1531,6 +1602,14 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
             request: Any = args["request"]
             if not isinstance(request, str):
                 raise RouteError("request must be text")
+        elif (
+            args.get("operation") == "bulk_linear_operations"
+            and set(args) in (
+                {"operation", "items"},
+                {"operation", "items", "approval"},
+            )
+        ):
+            request = dict(args)
         elif (
             args.get("operation") in {"search_linear", "inventory_linear"}
             and "entity_types" in args

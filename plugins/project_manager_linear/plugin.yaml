@@ -1,8 +1,9 @@
 name: project-manager-linear
-version: 1.2.0
+version: 1.3.0
 description: >-
   Deterministic PM Linear lane with fixed owner-approved terminal, parent,
-  relation and complete owner-approved core archive/delete mutations.
+  relation, complete owner-approved core archive/delete mutations, and bounded
+  ordered bulk orchestration.
 author: sisyphus-org
 kind: backend
 provides_tools:

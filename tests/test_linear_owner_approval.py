@@ -850,6 +850,140 @@ class PmExecutionBoundaryTests(unittest.TestCase):
                     approval_lease_seconds=1,
                 )
 
+    @staticmethod
+    def mixed_bulk_command(*, key: str) -> dict:
+        return {
+            "schema_version": "linear-command.v2",
+            "command_id": "77777777-7777-4777-8777-777777777777",
+            "correlation_id": "88888888-8888-4888-8888-888888888888",
+            "idempotency_key": key,
+            "source_profile": "swe",
+            "operation": "bulk_linear_operations",
+            "target": {"type": "workspace", "identifier": "current"},
+            "change": {
+                "items": [
+                    {
+                        "operation": "add_comment",
+                        "target": {"type": "issue", "identifier": "SIS-56"},
+                        "change": {"body": "public bulk durable prefix"},
+                    },
+                    {
+                        "operation": "update_issue",
+                        "target": {"type": "issue", "identifier": "SIS-59"},
+                        "change": {"parent_identifier": None},
+                    },
+                ]
+            },
+            "policy": policy(),
+        }
+
+    def test_public_claimed_owner_mixed_bulk_recovers_parent_after_child_write_crash(self):
+        from tests.test_linear_command_lane import FakeClient
+
+        class CrashAfterOwnerChildWrite(FakeClient):
+            crashed = False
+
+            def update_issue_fields(self, issue_id, **fields):
+                super().update_issue_fields(issue_id, **fields)
+                if "parent_id" in fields and not self.crashed:
+                    self.crashed = True
+                    raise KeyboardInterrupt("process death after owner child write")
+
+        client = CrashAfterOwnerChildWrite()
+        raw = self.mixed_bulk_command(
+            key="linear:v2:public-owner-bulk-crash-restart"
+        )
+        initial = lane.execute_command(client, raw, mode="plan")
+        raw, verified = self.bind_owner_command(raw, initial["before"])
+        with tempfile.TemporaryDirectory() as tmp, mock.patch(
+            "plugins.project_manager_linear.approval.verify_owner_approval",
+            return_value=verified,
+        ) as verify:
+            journal = Path(tmp) / "journal.json"
+            with self.assertRaises(KeyboardInterrupt):
+                execute_claimed_task(
+                    raw,
+                    task_id="t_abcdef01",
+                    lane=lane,
+                    client=client,
+                    journal_path=journal,
+                    approval_now=NOW,
+                    approval_lease_seconds=1,
+                )
+            verify.reset_mock()
+            recovered = execute_claimed_task(
+                raw,
+                task_id="t_abcdef01",
+                lane=lane,
+                client=client,
+                journal_path=journal,
+                approval_now=NOW + timedelta(seconds=2),
+                approval_lease_seconds=1,
+            )
+        self.assertEqual(
+            [write[0] for write in client.writes], ["comment", "fields"]
+        )
+        self.assertEqual(
+            recovered["result"]["items"],
+            [
+                {
+                    "index": 0,
+                    "operation": "add_comment",
+                    "outcome": "applied",
+                    "verified": True,
+                },
+                {
+                    "index": 1,
+                    "operation": "update_issue",
+                    "outcome": "no_op",
+                    "verified": True,
+                },
+            ],
+        )
+        verify.assert_not_called()
+
+    def test_public_claimed_owner_mixed_bulk_partial_failure_keeps_second_zero_write_and_retry_closed(self):
+        from tests.test_linear_command_lane import FakeClient
+
+        class IndirectDriftAfterFirstChild(FakeClient):
+            def create_comment(self, issue_id, comment_id, body):
+                super().create_comment(issue_id, comment_id, body)
+                self.current["parent"] = None
+
+        client = IndirectDriftAfterFirstChild()
+        raw = self.mixed_bulk_command(
+            key="linear:v2:public-owner-bulk-partial-failure"
+        )
+        initial = lane.execute_command(client, raw, mode="plan")
+        raw, verified = self.bind_owner_command(raw, initial["before"])
+        with tempfile.TemporaryDirectory() as tmp, mock.patch(
+            "plugins.project_manager_linear.approval.verify_owner_approval",
+            return_value=verified,
+        ):
+            journal = Path(tmp) / "journal.json"
+            with self.assertRaisesRegex(RuntimeError, "1 of 2"):
+                execute_claimed_task(
+                    raw,
+                    task_id="t_abcdef02",
+                    lane=lane,
+                    client=client,
+                    journal_path=journal,
+                    approval_now=NOW,
+                    approval_lease_seconds=1,
+                )
+            self.assertEqual([write[0] for write in client.writes], ["comment"])
+            with self.assertRaisesRegex(RuntimeError, "1 of 2"):
+                execute_claimed_task(
+                    raw,
+                    task_id="t_abcdef02",
+                    lane=lane,
+                    client=client,
+                    journal_path=journal,
+                    approval_now=NOW + timedelta(seconds=2),
+                    approval_lease_seconds=1,
+                )
+        self.assertEqual([write[0] for write in client.writes], ["comment"])
+
 
 class PmVerifierTests(unittest.TestCase):
     @staticmethod

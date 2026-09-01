@@ -99,6 +99,64 @@ class SmokeTests(unittest.TestCase):
         serialized = json.dumps(result).lower()
         for forbidden in ("token", "description", "url", "idempotency", "command_id"):
             self.assertNotIn(forbidden, serialized)
+    def test_bulk_live_cli_requires_two_distinct_exact_issue_identifiers(self):
+        args = smoke.parse_args([
+            "--live", "--operation", "plan_bulk_safe",
+            "--identifier", "SIS-70", "--peer-identifier", "SIS-71",
+        ])
+        self.assertEqual((args.identifier, args.peer_identifier), ("SIS-70", "SIS-71"))
+        for argv in (
+            ["--live", "--operation", "plan_bulk_safe", "--identifier", "SIS-70"],
+            ["--live", "--operation", "plan_bulk_safe", "--identifier", "SIS-70", "--peer-identifier", "SIS-70"],
+            ["--live", "--operation", "plan_bulk_safe", "--identifier", "sis-70", "--peer-identifier", "SIS-71"],
+        ):
+            with self.subTest(argv=argv), self.assertRaises(SystemExit):
+                smoke.parse_args(argv)
+
+    def test_bulk_plan_smoke_is_mixed_and_mutation_blocked(self):
+        test = self
+
+        class Client:
+            def update_issue_fields(self, *_args, **_kwargs):
+                raise AssertionError("raw client mutation should be hidden")
+
+        class Lane:
+            LinearClient = Client
+
+            @staticmethod
+            def execute_command(client, command, *, mode, journal_path=None):
+                test.assertEqual(mode, "plan")
+                test.assertIsNone(journal_path)
+                test.assertEqual(command["operation"], "bulk_linear_operations")
+                with test.assertRaisesRegex(RuntimeError, "attempted a mutation"):
+                    client.update_issue_fields("id", description="x")
+                return {
+                    "schema_version": "linear-result.v2",
+                    "operation": "bulk_linear_operations",
+                    "mode": "plan",
+                    "result": "planned",
+                    "verified": False,
+                    "items": [
+                        {"index": index, "operation": item["operation"], "outcome": "planned", "verified": False}
+                        for index, item in enumerate(command["change"]["items"])
+                    ],
+                }
+
+        items = [
+            {"operation": "update_issue", "target": {"type": "issue", "identifier": "SIS-70"}, "change": {"description": "x"}},
+            {"operation": "create_issue_relation", "target": {"type": "issue", "identifier": "SIS-71"}, "change": {"related_identifier": "SIS-72", "relation_type": "related"}},
+        ]
+        result = smoke.run_bulk_plan_smoke(
+            items=items,
+            environ={"HERMES_PROFILE": "project-manager", "LINEAR_TOKEN": "fixture"},
+            lane=Lane,
+            client_factory=lambda token: Client() if token == "fixture" else None,
+        )
+        self.assertEqual(result["operations"], ["update_issue", "create_issue_relation"])
+        self.assertEqual(result["itemCount"], 2)
+        self.assertTrue(result["readOnly"])
+        self.assertTrue(result["verifiedNoMutation"])
+
     def test_destruction_preflight_smoke_is_schema_and_impact_read_only(self):
         test = self
         class Client:

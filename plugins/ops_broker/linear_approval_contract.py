@@ -29,7 +29,7 @@ SHA256 = re.compile(r"^[0-9a-f]{64}$")
 UUID = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
 )
-ENCODED_INTENT = re.compile(r"^[A-Za-z0-9_-]{16,4096}$")
+ENCODED_INTENT = re.compile(r"^[A-Za-z0-9_-]{16,34000}$")
 MAX_APPROVAL_LIFETIME = timedelta(hours=24)
 
 
@@ -86,6 +86,7 @@ def validate_intent(value: Any) -> dict[str, Any]:
         raise ContractError("intent must contain exactly operation, target and change")
     operation = value.get("operation")
     if operation not in {
+        "bulk_linear_operations",
         "change_state",
         "update_issue",
         "remove_issue_relation",
@@ -96,6 +97,59 @@ def validate_intent(value: Any) -> dict[str, Any]:
         raise ContractError("intent operation is not owner-approvable")
     target = value.get("target")
     change = value.get("change")
+    if operation == "bulk_linear_operations":
+        if target != {"type": "workspace", "identifier": "current"}:
+            raise ContractError("bulk intent target must be the current workspace")
+        if not isinstance(change, dict) or set(change) != {"items"}:
+            raise ContractError("bulk intent change must contain exactly items")
+        items = change.get("items")
+        mutating = {
+            "change_state", "update_issue", "update_sub_issues", "add_comment",
+            "create_issue", "converge_hierarchy", "create_standalone_issue",
+            "converge_issue_tree", "create_issue_relation", "remove_issue_relation",
+            "replace_issue_relation", "create_project", "create_milestone",
+            "update_project", "update_milestone", "create_initiative",
+            "update_initiative", "link_project_to_initiative",
+            "archive_linear_entity", "delete_linear_entity",
+        }
+        if (
+            not isinstance(items, list)
+            or not 1 <= len(items) <= 50
+            or len(canonical_json(items)) > 24_576
+        ):
+            raise ContractError("bulk intent must contain 1-50 bounded items")
+        semantic: set[str] = set()
+        targets: set[str] = set()
+        owner_required = False
+        for item in items:
+            if (
+                not isinstance(item, dict)
+                or set(item) != {"operation", "target", "change"}
+                or item.get("operation") not in mutating
+                or not isinstance(item.get("target"), dict)
+                or not isinstance(item.get("change"), dict)
+            ):
+                raise ContractError("bulk intent item shape is invalid")
+            item_hash = canonical_sha256(item)
+            target_hash = canonical_sha256(item["target"])
+            if item_hash in semantic or target_hash in targets:
+                raise ContractError("bulk intent contains duplicate/conflicting items")
+            semantic.add(item_hash)
+            targets.add(target_hash)
+            child_change = item["change"]
+            owner_required = owner_required or item["operation"] in {
+                "remove_issue_relation", "replace_issue_relation",
+                "archive_linear_entity", "delete_linear_entity",
+            } or (
+                item["operation"] == "change_state"
+                and child_change.get("state") in {"Done", "Canceled", "Duplicate"}
+            ) or (
+                item["operation"] == "update_issue"
+                and set(child_change) == {"parent_identifier"}
+            )
+        if not owner_required:
+            raise ContractError("bulk owner approval requires an owner-controlled item")
+        return value
     if operation in {"archive_linear_entity", "delete_linear_entity"}:
         if not isinstance(target, dict) or set(target) != {"type", "selector"}:
             raise ContractError("archive/delete target must contain exactly type and selector")

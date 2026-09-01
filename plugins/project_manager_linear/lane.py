@@ -23,6 +23,7 @@ ISSUE_IDENTIFIER = re.compile(r"^SIS-[1-9][0-9]*$")
 PROFILE_NAME = re.compile(r"^[a-z][a-z0-9-]{1,30}$")
 IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:._/-]{7,199}$")
 OPERATIONS = {
+    "bulk_linear_operations",
     "read_issue",
     "change_state",
     "update_issue",
@@ -520,6 +521,10 @@ def _load_entity_destruction() -> Any:
     return _load_bundled_module(
         "entity_destruction.py", "project_manager_linear_entity_destruction"
     )
+
+
+def _load_bulk() -> Any:
+    return _load_bundled_module("bulk.py", "project_manager_linear_bulk")
 
 
 _VALIDATION = _load_validation()
@@ -1191,11 +1196,16 @@ def validate_command(raw: Any) -> dict[str, Any]:
         "archive_linear_entity",
         "delete_linear_entity",
     }
-    if destructive_operation:
+    if operation == "bulk_linear_operations":
+        if target != {"type": "workspace", "identifier": "current"}:
+            raise ContractError(
+                "bulk_linear_operations target must be the current workspace"
+            )
+    elif destructive_operation:
         _load_entity_destruction().validate_target(target, operation, ContractError)
     elif not isinstance(target, dict) or set(target) != {"type", "identifier"}:
         raise ContractError("target must contain exactly type and identifier")
-    if destructive_operation:
+    if destructive_operation or operation == "bulk_linear_operations":
         pass
     elif operation in {
         "create_issue",
@@ -1227,7 +1237,19 @@ def validate_command(raw: Any) -> dict[str, Any]:
     change = raw["change"]
     if not isinstance(change, dict):
         raise ContractError("change must be an object")
-    if destructive_operation:
+    if operation == "bulk_linear_operations":
+        if set(change) != {"items"}:
+            raise ContractError(
+                "bulk_linear_operations change must contain exactly items"
+            )
+        bulk = _load_bulk()
+
+        bulk.validate_items(
+            change.get("items"), parent_policy=raw["policy"], error_cls=ContractError
+        )
+        for index in range(len(change["items"])):
+            validate_command(bulk.derive_child_command(raw, index))
+    elif destructive_operation:
         if change:
             raise ContractError(f"{operation} change must be empty")
     elif operation in {"search_linear", "inventory_linear"}:
@@ -1524,7 +1546,7 @@ def validate_command(raw: Any) -> dict[str, Any]:
         approval.validate_policy(raw["policy"])
     except approval.ApprovalError as exc:
         raise ContractError(str(exc)) from exc
-    owner_approvable = destructive_operation or (
+    owner_approvable = operation == "bulk_linear_operations" or destructive_operation or (
         operation == "update_issue" and set(change) == {"parent_identifier"}
     ) or operation in {"remove_issue_relation", "replace_issue_relation"} or (
         operation == "change_state" and change.get("state") in OWNER_CONTROLLED_STATES
@@ -2055,9 +2077,60 @@ def execute_command(
             and journal_path is not None
             and result.get("verified") is True
         ):
-            journal[key_hash] = request_hash
-            write_journal(journal_path, journal)
+            latest = load_journal(journal_path)
+            latest_existing = latest.get(key_hash)
+            if latest_existing is not None and latest_existing != request_hash:
+                raise ContractError("idempotency key conflict with a different request")
+            latest[key_hash] = request_hash
+            write_journal(journal_path, latest)
         return result
+
+    if command["operation"] == "bulk_linear_operations":
+        bulk = _load_bulk()
+
+        recovery_path = (
+            journal_path.with_name(f"{journal_path.name}.bulk-{key_hash}")
+            if journal_path is not None
+            else None
+        )
+
+        def execute_bulk_child(
+            child: dict[str, Any], child_mode: str, authorization: Any = None
+        ) -> dict[str, Any]:
+            kwargs: dict[str, Any] = {
+                "mode": child_mode,
+                "journal_path": journal_path,
+            }
+            if child_mode == "apply":
+                kwargs["_lock_held"] = True
+            if authorization is not None:
+                kwargs["owner_approval_authorization"] = authorization
+            return execute_command(client, child, **kwargs)
+
+        def authorize_bulk_child(child: dict[str, Any]) -> Any:
+            if child["policy"].get("mode") != "owner_approved":
+                return None
+            approval = _load_approval()
+            try:
+                return approval._mint_bulk_child_authorization(
+                    owner_approval_authorization,
+                    parent_command=command,
+                    child_command=child,
+                )
+            except approval.ApprovalError as exc:
+                raise ContractError(str(exc)) from exc
+
+        return finish(
+            bulk.execute_parent(
+                command,
+                validate_child=validate_command,
+                execute_child=execute_bulk_child,
+                recovery_path=recovery_path,
+                authorization_factory=authorize_bulk_child,
+                error_cls=ContractError,
+                mode=mode,
+            )
+        )
 
     if command["operation"] == "converge_hierarchy":
         return finish(
