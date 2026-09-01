@@ -1,7 +1,7 @@
 name: linear-source-route
 version: 1.2.0
 description: >-
-  Exact-session ingress for bounded PM-routed Linear reads and writes.
+  Exact-session ingress for SIS issue-number aliases and bounded PM-routed Linear reads and writes.
 author: sisyphus-org
 kind: backend
 provides_tools:

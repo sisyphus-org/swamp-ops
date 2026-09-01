@@ -68,6 +68,7 @@ SHA256 = re.compile(r"^[0-9a-f]{64}$")
 UUID = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
 )
+DESCRIPTION_TRANSFORMS = {"remove_links"}
 
 
 class RouteError(RuntimeError):
@@ -598,6 +599,23 @@ def _validate_bulk_request(
     if not owner_required and approval is not None:
         raise RouteError("bulk owner approval is allowed only when an item requires it")
     return validated, approval
+def _issue_identifier(request: dict[str, Any]) -> str:
+    """Resolve one exact SIS target from an identifier or bounded issue number."""
+    has_identifier = "identifier" in request
+    has_number = "issue_number" in request
+    if has_identifier == has_number:
+        raise RouteError("request must contain exactly one issue target")
+    if has_identifier:
+        identifier = request["identifier"]
+        if not isinstance(identifier, str) or not re.fullmatch(
+            r"SIS-[1-9][0-9]*", identifier
+        ):
+            raise RouteError("target must be an exact SIS-N identifier")
+        return identifier
+    number = request["issue_number"]
+    if isinstance(number, bool) or not isinstance(number, int) or number < 1:
+        raise RouteError("issue_number must be a positive integer")
+    return f"SIS-{number}"
 
 
 def parse_linear_request(
@@ -633,16 +651,13 @@ def parse_linear_request(
             change = {"items": items}
         elif operation == "change_state":
             state = request.get("state")
-            expected_fields = {"operation", "identifier", "state"}
+            identifier = _issue_identifier(request)
+            target_field = "identifier" if "identifier" in request else "issue_number"
+            expected_fields = {"operation", target_field, "state"}
             if state in OWNER_CONTROLLED_STATES:
                 expected_fields.add("approval")
             if set(request) != expected_fields:
                 raise RouteError("structured state request has invalid fields")
-            identifier = request.get("identifier")
-            if not isinstance(identifier, str) or not re.fullmatch(
-                r"SIS-[1-9][0-9]*", identifier
-            ):
-                raise RouteError("target must be an exact SIS-N identifier")
             if state not in SAFE_STATES and state not in OWNER_CONTROLLED_STATES:
                 raise RouteError("state is not in the safe-state allowlist")
             if state in OWNER_CONTROLLED_STATES:
@@ -653,8 +668,10 @@ def parse_linear_request(
             allowed = {
                 "operation",
                 "identifier",
+                "issue_number",
                 "title",
                 "description",
+                "description_transform",
                 "state",
                 "priority",
                 "assignee",
@@ -666,22 +683,15 @@ def parse_linear_request(
                 "milestone",
                 "approval",
             }
-            if (
-                not set(request).issubset(allowed)
-                or "identifier" not in request
-                or len(request) < 3
-            ):
+            if not set(request).issubset(allowed) or len(request) < 3:
                 raise RouteError("structured issue update has invalid fields")
-            identifier = request.get("identifier")
-            if not isinstance(identifier, str) or not re.fullmatch(
-                r"SIS-[1-9][0-9]*", identifier
-            ):
-                raise RouteError("target must be an exact SIS-N identifier")
+            identifier = _issue_identifier(request)
             change = {
                 key: request[key]
                 for key in (
                     "title",
                     "description",
+                    "description_transform",
                     "state",
                     "priority",
                     "assignee",
@@ -694,6 +704,12 @@ def parse_linear_request(
                 )
                 if key in request
             }
+            if not change:
+                raise RouteError("structured issue update has no changed fields")
+            if "description" in change and "description_transform" in change:
+                raise RouteError(
+                    "description and description_transform are mutually exclusive"
+                )
             if "approval" in request:
                 if set(change) != {"parent_identifier"}:
                     raise RouteError(
@@ -714,6 +730,11 @@ def parse_linear_request(
                     maximum=10_000,
                     required=False,
                 )
+            if (
+                "description_transform" in change
+                and change["description_transform"] not in DESCRIPTION_TRANSFORMS
+            ):
+                raise RouteError("description_transform is not in the bounded allowlist")
             if "state" in change and change["state"] not in SAFE_STATES:
                 raise RouteError("state is not in the safe-state allowlist")
             if "priority" in change and change["priority"] not in PRIORITIES:

@@ -28,7 +28,7 @@ The plugin:
 - derives the authoritative source profile from Hermes' resolved runtime home;
 - accepts any syntactically valid user-facing profile name except `broker` and `project-manager`;
 - requires Telegram DM context, exact numeric chat/user/thread IDs, and the persisted exact Hermes session ID;
-- supports bounded comment, standard safe workflow-state change, exactly owner-approved `Done`/`Canceled`/`Duplicate`, issue creation under an exact `SIS-N` parent, create-only hierarchy convergence, standalone top-level creation in an exact existing project/milestone, one top-level issue plus 1–10 explicit sub-issues, and non-destructive exact-name initiative create/update/project-link operations without caller-controlled entity IDs;
+- supports bounded comment, standard safe workflow-state change and exactly owner-approved `Done`/`Canceled`/`Duplicate`, issue-number targeting inside the single `SIS` team, deterministic description link removal, issue creation under an exact `SIS-N` parent, create-only hierarchy convergence, standalone top-level creation in an exact existing project/milestone, one top-level issue plus 1–10 explicit sub-issues, and non-destructive exact-name initiative create/update/project-link operations without caller-controlled entity IDs;
 - derives a global mutation key from only `operation`, `target`, `change`, and `policy`; source profile/session and command/correlation IDs are excluded;
 - derives a separate delivery key from that mutation key plus the exact source profile/platform/chat/user/thread/session;
 - atomically gets or creates one PM-assigned Kanban task by delivery key inside one Kanban write transaction;
@@ -46,7 +46,7 @@ Supported operations:
 
 - `read_issue`;
 - `change_state` to the safe non-terminal allowlist under standard policy, or exactly `Done`, `Canceled`, or `Duplicate` with the fixed owner approval reference and live state-type validation;
-- `update_issue` for an explicit non-empty subset of description, safe state, and bounded priority on one exact `SIS-N`;
+- `update_issue` for an explicit non-empty subset of title, literal description or deterministic `remove_links`, safe state, bounded priority, assignee, labels, due date, estimate, parent, and project/milestone scope on one exact `SIS-N`; the source accepts a positive `issue_number`, binds it to the fixed `SIS` team, and canonicalizes it to the exact `SIS-N` target before emitting the PM command;
 - `add_comment` with deterministic-ID replay protection and a clean user-authored body;
 - `create_issue` in the `SIS` team under one exact `SIS-N` parent, with bounded title/description, safe state, and High/Medium/Low priority.
 - `converge_hierarchy` for exactly one `SIS` project → milestone → top-level issue; it performs complete bounded scoped preflight, safe unique exact-name reuse for project/milestone, deterministic-ID-only issue handling, exact scoped-list read-back, and crash/concurrent replay convergence under the existing hash-only journal lock.

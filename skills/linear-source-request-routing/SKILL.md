@@ -1,6 +1,6 @@
 ---
 name: linear-source-request-routing
-description: Route Linear reads/writes through Project Manager.
+description: Route Linear reads/writes through broker and Project Manager.
 version: 1.2.0
 author: Alexey Petrov, Hermes Agent
 license: MIT
@@ -18,8 +18,8 @@ Use the typed Project Manager lane for every Linear read, creation, or mutation.
 ## Supported requests
 
 - Add one bounded comment to an exact uppercase `SIS-N` issue.
-- Change one exact `SIS-N` issue to `Backlog`, `Todo`, `Research`, `In Progress`, or `In Review` under standard policy, or to exactly `Done`, `Canceled`, or `Duplicate` with the fixed owner approval reference.
-- Update one exact `SIS-N` issue with any non-empty subset of description, safe state, and High/Medium/Low priority.
+- Change one exact `SIS-N` issue, or one positive issue number in the single `SIS` team, to `Backlog`, `Todo`, `Research`, `In Progress`, or `In Review` under standard policy, or to exactly `Done`, `Canceled`, or `Duplicate` with the fixed owner approval reference.
+- Update one exact `SIS-N` issue, or one positive issue number in the single `SIS` team, with any non-empty bounded managed-field subset, including deterministic link removal.
 - Create one bounded issue in the `SIS` team under one exact uppercase `SIS-N` parent, with bounded title/description, safe state, and High/Medium/Low priority.
 - Converge one bounded create-only `SIS` hierarchy: one exact project, one milestone, and one top-level issue, with optional descriptions and a safe issue state.
 - Create one standalone top-level issue in one exact existing project/milestone with explicit description, safe state, and priority.
@@ -37,11 +37,16 @@ Do not use this path for fuzzy/missing mutation targets, server-side/raw search 
 
 ## Procedure
 
-1. Preserve exact identifiers and user-provided text; never repair or guess them.
+1. Resolve the target without needless confirmation:
+   - preserve an exact uppercase `SIS-N` identifier as `identifier`;
+   - when the owner gives one unambiguous positive task number in forms such as `86`, `задача 86`, `#86`, `sis-86`, or `Sis 86`, pass the integer as `issue_number=86`; the source tool, not the model, binds it to the only allowed team `SIS`;
+   - do not ask solely about omitted `SIS-`, case, or the word `задача`;
+   - ask only when there is no task number, more than one plausible task number, or the number belongs to unrelated prose rather than a task reference.
 2. Call `linear_source_request` once with the matching bounded shape:
    - comment: `request=<exact supported comment text>`;
-   - state: `operation=change_state`, exact `identifier`, exact safe `state`; for exactly `Done`, `Canceled`, or `Duplicate`, also supply the existing exact fixed `approval` object. Never attach approval to a nonterminal state;
-   - issue fields: `operation=update_issue`, exact `identifier`, and a bounded managed-field subset. A standard top-level parent attach uses exact `parent_identifier`. Parent replacement or clear must contain only `parent_identifier` (exact `SIS-N` or `null`) plus the exact fixed `approval` reference;
+   - state: `operation=change_state`, exactly one of exact `identifier` or positive `issue_number`, and exact `state`; for exactly `Done`, `Canceled`, or `Duplicate`, also supply the existing exact fixed `approval` object. Never attach approval to a nonterminal state;
+   - issue fields: `operation=update_issue`, exactly one of exact `identifier` or positive `issue_number`, and a bounded managed-field subset. A standard top-level parent attach uses exact `parent_identifier`. Parent replacement or clear must contain only `parent_identifier` (exact `SIS-N` or `null`) plus the exact fixed `approval` reference;
+   - when the owner says to remove links from the description, use `description_transform=remove_links`; this preserves visible text (including Markdown labels) and removes HTTP(S) destinations. Do not ask whether to clear the whole description unless the owner explicitly asked to clear it;
    - create: `operation=create_issue`, bounded `title`, `description`, exact `parent_identifier`, safe `state`, and bounded `priority`.
    - hierarchy: `operation=converge_hierarchy` with exact `project`, `milestone`, and `issue` objects; names/titles are required, descriptions and a safe issue state are optional, and IDs are never supplied by the source.
    - standalone: `operation=create_standalone_issue` with exact `project`/`milestone` names and optional supplied descriptions plus an `issue` containing exact `title`, `description`, safe `state`, and `priority`.

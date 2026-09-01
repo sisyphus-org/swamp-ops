@@ -176,7 +176,9 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
     "description": (
         "Route one bounded Linear request from an allowed user-facing profile "
         "through the project-manager Kanban lane. Accepts an exact comment text, "
-        "a structured state/field/child request, one bounded hierarchy request, one "
+        "a structured state/field/child request targeting either exact SIS-N or a "
+        "positive issue_number in the single SIS team, deterministic description "
+        "link removal, one bounded hierarchy request, one "
         "standalone issue in an exact existing scope, one exact project or milestone "
         "create/edit request, one initiative create/edit/project-link request, one "
         "owner-approved exact core-entity archive or Linear delete/trash request, "
@@ -273,6 +275,13 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                 "type": "string",
                 "pattern": "^SIS-[1-9][0-9]*$",
             },
+            "issue_number": {
+                "type": "integer",
+                "minimum": 1,
+                "description": (
+                    "Positive issue number for shorthand references in the single SIS team."
+                ),
+            },
             "related_identifier": {
                 "type": "string",
                 "pattern": "^SIS-[1-9][0-9]*$",
@@ -315,6 +324,10 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
             "new_name": {"type": "string", "minLength": 1, "maxLength": 200},
             "initiative": {"type": "string", "minLength": 1, "maxLength": 200},
             "description": {"type": "string", "maxLength": 10000},
+            "description_transform": {
+                "type": "string",
+                "enum": ["remove_links"],
+            },
             "target_date": {
                 "oneOf": [
                     {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
@@ -496,36 +509,51 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                 },
             },
             {
-                "required": ["operation", "identifier", "state"],
+                "required": ["operation", "state"],
                 "properties": {"operation": {"const": "change_state"}},
-                "oneOf": [
+                "allOf": [
                     {
-                        "properties": {
-                            "state": {
-                                "enum": [
-                                    "Backlog",
-                                    "Todo",
-                                    "Research",
-                                    "In Progress",
-                                    "In Review",
-                                ]
-                            }
-                        },
-                        "not": {"required": ["approval"]},
+                        "oneOf": [
+                            {"required": ["identifier"]},
+                            {"required": ["issue_number"]},
+                        ]
                     },
                     {
-                        "required": ["approval"],
-                        "properties": {
-                            "state": {"enum": ["Done", "Canceled", "Duplicate"]}
-                        },
+                        "oneOf": [
+                            {
+                                "properties": {
+                                    "state": {
+                                        "enum": [
+                                            "Backlog", "Todo", "Research",
+                                            "In Progress", "In Review",
+                                        ]
+                                    }
+                                },
+                                "not": {"required": ["approval"]},
+                            },
+                            {
+                                "required": ["approval"],
+                                "properties": {
+                                    "state": {"enum": ["Done", "Canceled", "Duplicate"]}
+                                },
+                            },
+                        ]
                     },
                 ],
             },
             {
-                "required": ["operation", "identifier"],
+                "required": ["operation"],
+                "oneOf": [
+                    {"required": ["identifier"]},
+                    {"required": ["issue_number"]},
+                ],
+                "not": {
+                    "required": ["description", "description_transform"]
+                },
                 "anyOf": [
                     {"required": ["title"]},
                     {"required": ["description"]},
+                    {"required": ["description_transform"]},
                     {"required": ["state"]},
                     {"required": ["priority"]},
                     {"required": ["assignee"]},
@@ -1627,10 +1655,10 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
             request = dict(args)
         elif (
             args.get("operation") == "change_state"
-            and set(args)
-            in (
-                {"operation", "identifier", "state"},
-                {"operation", "identifier", "state", "approval"},
+            and "state" in args
+            and bool(set(args) & {"identifier", "issue_number"})
+            and set(args).issubset(
+                {"operation", "identifier", "issue_number", "state", "approval"}
             )
         ):
             request = dict(args)
@@ -1683,12 +1711,13 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
             request = dict(args)
         elif (
             args.get("operation") == "update_issue"
-            and "identifier" in args
+            and bool(set(args) & {"identifier", "issue_number"})
             and bool(
                 set(args)
                 & {
                     "title",
                     "description",
+                    "description_transform",
                     "state",
                     "priority",
                     "assignee",
@@ -1704,8 +1733,10 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
                 {
                     "operation",
                     "identifier",
+                    "issue_number",
                     "title",
                     "description",
+                    "description_transform",
                     "state",
                     "priority",
                     "assignee",

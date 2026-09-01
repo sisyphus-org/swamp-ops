@@ -807,6 +807,37 @@ class ParseTests(unittest.TestCase):
             {"type": "issue", "identifier": "SIS-86"},
         )
         self.assertEqual(parsed.command["change"], {"description": ""})
+    def test_issue_number_targets_the_single_sis_team_without_model_normalization(self):
+        parsed = route.parse_linear_request(
+            {
+                "operation": "update_issue",
+                "issue_number": 86,
+                "description_transform": "remove_links",
+                "state": "Todo",
+            },
+            source_profile="books",
+            uuid_factory=uuid_factory(),
+        )
+
+        self.assertEqual(
+            parsed.command["target"], {"type": "issue", "identifier": "SIS-86"}
+        )
+        self.assertEqual(
+            parsed.command["change"],
+            {"description_transform": "remove_links", "state": "Todo"},
+        )
+
+    def test_issue_number_and_exact_identifier_are_mutually_exclusive(self):
+        with self.assertRaisesRegex(route.RouteError, "exactly one issue target"):
+            route.parse_linear_request(
+                {
+                    "operation": "change_state",
+                    "identifier": "SIS-86",
+                    "issue_number": 86,
+                    "state": "Todo",
+                },
+                uuid_factory=uuid_factory(),
+            )
 
     def test_structured_create_request_becomes_bounded_team_command(self):
         parsed = route.parse_linear_request(

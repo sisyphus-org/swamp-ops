@@ -8,6 +8,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import jsonschema
+
 
 ROOT = Path(__file__).parents[1]
 if str(ROOT) not in sys.path:
@@ -635,6 +637,7 @@ class PluginTests(unittest.TestCase):
                 "relation_type",
                 "old_relation_type",
                 "new_relation_type",
+                "issue_number",
                 "state",
                 "title",
                 "name",
@@ -642,6 +645,7 @@ class PluginTests(unittest.TestCase):
                 "initiative",
                 "description",
                 "target_date",
+                "description_transform",
                 "parent_identifier",
                 "priority",
                 "assignee",
@@ -729,6 +733,10 @@ class PluginTests(unittest.TestCase):
             {"type": "string", "pattern": "^SIS-[1-9][0-9]*$"},
         )
         self.assertEqual(len(parameters["oneOf"]), 23)
+        self.assertEqual(
+            parameters["properties"]["description_transform"]["enum"],
+            ["remove_links"],
+        )
         self.assertEqual(
             parameters["properties"]["operation"]["enum"],
             [
@@ -1395,6 +1403,32 @@ class PluginTests(unittest.TestCase):
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["target"]["project"], "Project Two")
         self.assertEqual(result["target"]["milestone"], "Milestone Two")
+
+    def test_tool_schema_rejects_conflicting_issue_targets_and_description_modes(self):
+        invalid = (
+            {
+                "operation": "change_state",
+                "identifier": "SIS-86",
+                "issue_number": 86,
+                "state": "Todo",
+            },
+            {
+                "operation": "update_issue",
+                "identifier": "SIS-86",
+                "issue_number": 86,
+                "state": "Todo",
+            },
+            {
+                "operation": "update_issue",
+                "issue_number": 86,
+                "description": "literal",
+                "description_transform": "remove_links",
+            },
+        )
+        for payload in invalid:
+            with self.subTest(payload=payload):
+                with self.assertRaises(jsonschema.ValidationError):
+                    jsonschema.validate(payload, LINEAR_SOURCE_REQUEST_SCHEMA["parameters"])
 
     def test_handler_uses_request_scoped_gateway_identity(self):
         fake_board = mock.Mock()
