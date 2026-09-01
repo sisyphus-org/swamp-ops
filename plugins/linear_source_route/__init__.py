@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import re
 from datetime import date
-from pathlib import Path
 from typing import Any, Callable
 
 from .audit import audit_route as bundled_audit_route
@@ -153,6 +152,17 @@ PUBLIC_BLOCK_REASON_PATTERNS["link_project_to_initiative"] = (
     re.compile(r"^exact initiative project link exists more than once$"),
     re.compile(r"^initiative project link exact read-back verification failed$"),
 )
+_ENTITY_DESTRUCTION_BLOCK_REASONS = (
+    re.compile(r"^exact active Linear (?:issue|project|milestone|initiative) not found$"),
+    re.compile(r"^exact Linear (?:issue|project|milestone|initiative) selector is ambiguous$"),
+    re.compile(r"^(?:archive|delete)_linear_entity exact read-back verification failed(?:: archived is not absent)?$"),
+    re.compile(r"^archive_linear_entity read-back changed unmanaged fields$"),
+    re.compile(r"^(?:archive|delete)_linear_entity [^\x00-\x1f]{1,160} (?:read-back drifted|disappeared|remained linked|did not cascade)$"),
+    re.compile(r"^delete_linear_entity direct lookup still returned the target$"),
+)
+for _operation in ("archive_linear_entity", "delete_linear_entity"):
+    PUBLIC_BLOCK_REASON_PATTERNS[_operation] = _ENTITY_DESTRUCTION_BLOCK_REASONS
+
 
 LINEAR_SOURCE_REQUEST_SCHEMA = {
     "name": "linear_source_request",
@@ -161,8 +171,9 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
         "through the project-manager Kanban lane. Accepts an exact comment text, "
         "a structured state/field/child request, one bounded hierarchy request, one "
         "standalone issue in an exact existing scope, one exact project or milestone "
-        "create/edit request, one non-destructive initiative create/edit/project-link "
-        "request, or one top-level issue plus 1-10 explicit sub-issues. "
+        "create/edit request, one initiative create/edit/project-link request, one "
+        "owner-approved exact core-entity archive or Linear delete/trash request, "
+        "or one top-level issue plus 1-10 explicit sub-issues. "
         "The calling profile never mutates Linear "
         "directly; the tool creates or replays one audited wake-only task and "
         "returns its state."
@@ -200,6 +211,8 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                     "link_project_to_initiative",
                     "search_linear",
                     "inventory_linear",
+                    "archive_linear_entity",
+                    "delete_linear_entity",
                 ],
             },
             "query": {"type": "string", "minLength": 1, "maxLength": 500},
@@ -214,6 +227,24 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                 },
             },
             "include_archived": {"type": "boolean"},
+            "entity_type": {
+                "type": "string",
+                "enum": ["issue", "project", "milestone", "initiative"],
+            },
+            "selector": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "identifier": {"type": "string", "pattern": "^SIS-[1-9][0-9]*$"},
+                    "project": {"type": "string", "minLength": 1, "maxLength": 200},
+                    "name": {"type": "string", "minLength": 1, "maxLength": 200},
+                },
+                "oneOf": [
+                    {"required": ["identifier"], "minProperties": 1, "maxProperties": 1},
+                    {"required": ["name"], "minProperties": 1, "maxProperties": 1},
+                    {"required": ["project", "name"], "minProperties": 2, "maxProperties": 2},
+                ],
+            },
             "identifier": {
                 "type": "string",
                 "pattern": "^SIS-[1-9][0-9]*$",
@@ -425,6 +456,14 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
             {
                 "required": ["operation", "entity_types", "include_archived"],
                 "properties": {"operation": {"const": "inventory_linear"}},
+            },
+            {
+                "required": ["operation", "entity_type", "selector", "approval"],
+                "properties": {
+                    "operation": {
+                        "enum": ["archive_linear_entity", "delete_linear_entity"]
+                    }
+                },
             },
             {
                 "required": ["operation", "identifier", "state"],
@@ -1036,6 +1075,50 @@ def _public_target(result: dict[str, Any]) -> tuple[dict[str, Any], dict[str, An
     after = result.get("after")
     if operation in {"search_linear", "inventory_linear"}:
         return _public_workspace_read(result)
+    if operation in {"archive_linear_entity", "delete_linear_entity"}:
+        target = result.get("target")
+        if (
+            not isinstance(target, dict)
+            or set(target) != {"type", "selector"}
+            or not isinstance(target.get("selector"), dict)
+            or not isinstance(after, dict)
+        ):
+            raise RouteError("verified archive/delete result lacks exact public facts")
+        entity_type = target.get("type")
+        selector = target["selector"]
+        if entity_type == "issue":
+            valid_selector = (
+                set(selector) == {"identifier"}
+                and isinstance(selector.get("identifier"), str)
+                and PUBLIC_ISSUE_IDENTIFIER.fullmatch(selector["identifier"]) is not None
+            )
+            public_selector = dict(selector) if valid_selector else None
+        elif entity_type in {"project", "initiative"}:
+            valid_selector = set(selector) == {"name"}
+            public_selector = (
+                {"name": _public_text(selector.get("name"), f"{entity_type} selector")}
+                if valid_selector
+                else None
+            )
+        elif entity_type == "milestone":
+            valid_selector = set(selector) == {"project", "name"}
+            public_selector = (
+                {
+                    "project": _public_text(selector.get("project"), "milestone project selector"),
+                    "name": _public_text(selector.get("name"), "milestone selector"),
+                }
+                if valid_selector
+                else None
+            )
+        else:
+            public_selector = None
+        if public_selector is None:
+            raise RouteError("verified archive/delete result has an invalid public selector")
+        if operation == "archive_linear_entity" and after.get("archived") is not True:
+            raise RouteError("verified archive result is not archived")
+        if operation == "delete_linear_entity" and after != {"present": False}:
+            raise RouteError("verified delete result is not absent")
+        return {"type": entity_type, "selector": public_selector}, None
     if operation in {"create_issue_relation", "remove_issue_relation"}:
         target = result.get("target")
         expected_fields = {
@@ -1456,6 +1539,11 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
                 {"operation", "query", "entity_types", "include_archived"}
             )
             and ((args.get("operation") == "search_linear") == ("query" in args))
+        ):
+            request = dict(args)
+        elif (
+            args.get("operation") in {"archive_linear_entity", "delete_linear_entity"}
+            and set(args) == {"operation", "entity_type", "selector", "approval"}
         ):
             request = dict(args)
         elif (

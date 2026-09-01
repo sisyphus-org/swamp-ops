@@ -1,7 +1,7 @@
 ---
 name: linear-source-request-routing
 description: Route Linear reads/writes through Project Manager.
-version: 1.0.0
+version: 1.2.0
 author: Alexey Petrov, Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -30,8 +30,9 @@ Use the typed Project Manager lane for every Linear read, creation, or mutation.
 - Search the same explicit core subset with an exact non-empty `query`; matching is deterministic Unicode casefold substring matching over issue identifiers/titles and entity names.
 - Attach a currently top-level issue to one exact `SIS-N` parent in standard mode. Replace an existing parent or clear it only when the owner supplies the exact fixed Swamp attestation reference as `approval` on a parent-only `update_issue`.
 - Create one exact `blocks`, `blocked_by`, or `related` issue relation in standard mode. Remove one exact existing relation with `remove_issue_relation`, or replace one exact old relation with one exact new relation using `replace_issue_relation`, only with the existing fixed `approval` reference. Supply endpoint identifiers/types only—never relation IDs.
+- With the same exact approval reference, archive one exact issue (`{identifier:SIS-N}`), unique SIS-scoped project (`{name}`), or unique initiative (`{name}`); delete/trash one exact issue, project, project milestone (`{project,name}`), or initiative. Nonempty impact is permitted only when the owner-approved before hash binds the deterministic complete affected-entity inventory/counts and the immediate live re-plan is identical. Milestone archive is the only core matrix cell unavailable because the authenticated schema exposes no such mutation.
 
-Do not use this path for fuzzy/missing mutation targets, server-side/raw search passthrough, bulk operations, arbitrary terminal names, nonterminal owner approval, initiative unlink, archive/issue deletion, bulk relation mutation, initiative reparenting, arbitrary teams, other structural changes, or per-task Telegram topics. Owner approval authorizes only the exact terminal state, parent, or single-relation intent it binds.
+Do not use this path for fuzzy/missing mutation targets, server-side/raw search passthrough, bulk operations, arbitrary terminal names, nonterminal owner approval, standalone initiative unlink, account/team destruction, milestone archive, permanent issue deletion, caller-selected cascade, initiative reparenting, arbitrary teams, other structural changes, or per-task Telegram topics. Owner approval authorizes only the exact intent and complete before/impact state.
 
 ## Procedure
 
@@ -51,7 +52,8 @@ Do not use this path for fuzzy/missing mutation targets, server-side/raw search 
    - inventory: `operation=inventory_linear`, explicit non-empty unique `entity_types`, and explicit `include_archived`;
    - search: `operation=search_linear`, exact non-empty `query`, explicit non-empty unique `entity_types`, and explicit `include_archived`.
    - relation removal: `operation=remove_issue_relation`, exact `identifier`, exact `related_identifier`, exact `relation_type`, and the existing fixed `approval` object;
-   - relation replacement: `operation=replace_issue_relation`, exact target `identifier`, exact `old_related_identifier`/`old_relation_type`, exact `new_related_identifier`/`new_relation_type`, and the existing fixed `approval` object.
+   - relation replacement: `operation=replace_issue_relation`, exact target `identifier`, exact `old_related_identifier`/`old_relation_type`, exact `new_related_identifier`/`new_relation_type`, and the existing fixed `approval` object;
+   - archive/delete: `operation=archive_linear_entity` or `delete_linear_entity`, exact singular `entity_type`, exact typed `selector`, and the existing fixed `approval`. The only delete selector is milestone `{project,name}`; do not translate trash-style issue/project/initiative delete requests into archive.
 3. Do not call Linear MCP, GraphQL, `terminal`, a direct read client, Kanban inspection commands, or another Linear tool from the source profile.
 4. After `queued`, reply only that the requested action is being handled, then stop. Do not inspect the task, worker, protocol, or board while it runs.
 5. After `completed`, report only the user-visible outcome: what changed or was reused, the final issue identifier/title/state when relevant, and the canonical Linear URL. Do not narrate routing or verification machinery.

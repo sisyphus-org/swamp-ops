@@ -99,6 +99,36 @@ class SmokeTests(unittest.TestCase):
         serialized = json.dumps(result).lower()
         for forbidden in ("token", "description", "url", "idempotency", "command_id"):
             self.assertNotIn(forbidden, serialized)
+    def test_destruction_preflight_smoke_is_schema_and_impact_read_only(self):
+        test = self
+        class Client:
+            def execute(self, query, variables=None):
+                test.assertIn("__type", query)
+                test.assertIn("includeDeprecated: true", query)
+                return {"__type": {"fields": [
+                    {"name": "issueArchive"}, {"name": "projectArchive"},
+                    {"name": "initiativeArchive"}, {"name": "issueDelete"},
+                    {"name": "projectDelete"}, {"name": "projectMilestoneDelete"},
+                    {"name": "initiativeDelete"},
+                ]}}
+            def list_linear_entities(self, entity_type, *, include_archived):
+                test.assertEqual((entity_type, include_archived), ("issues", True))
+                return [{"id": "internal", "identifier": "SIS-77", "title": "T", "description": "D", "archivedAt": None, "team": {"key": "SIS"}}]
+            def list_child_issues(self, identifier):
+                test.assertEqual(identifier, "SIS-77")
+                return []
+        result = smoke.run_destruction_preflight_smoke(
+            operation="archive_linear_entity", entity_type="issue",
+            selector={"identifier": "SIS-77"},
+            environ={"HERMES_PROFILE": "project-manager", "LINEAR_TOKEN": "fixture"},
+            client_factory=lambda token: Client() if token == "fixture" else None,
+        )
+        self.assertEqual(result["mutation"], "issueArchive")
+        self.assertEqual(result["impactCounts"], {"children": 0})
+        self.assertTrue(result["readOnly"])
+        self.assertRegex(result["beforeStateSha256"], r"^[0-9a-f]{64}$")
+        self.assertNotIn("internal", json.dumps(result))
+
     def test_relation_inventory_smoke_hashes_exact_inventory_without_exposing_ids(self):
         class Client:
             def get_issue(self, identifier):

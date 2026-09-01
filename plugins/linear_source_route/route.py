@@ -265,6 +265,38 @@ def _validate_project_management_request(request: dict[str, Any]) -> dict[str, A
     return {key: value for key, value in request.items() if key != "operation"}
 
 
+def _validate_destructive_request(request: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    if set(request) != {"operation", "entity_type", "selector", "approval"}:
+        raise RouteError("archive/delete request must contain exact typed selector and approval")
+    operation = request.get("operation")
+    entity_type = request.get("entity_type")
+    selector = request.get("selector")
+    safe_matrix = {
+        ("archive_linear_entity", "issue"),
+        ("archive_linear_entity", "project"),
+        ("archive_linear_entity", "initiative"),
+        ("delete_linear_entity", "issue"),
+        ("delete_linear_entity", "project"),
+        ("delete_linear_entity", "milestone"),
+        ("delete_linear_entity", "initiative"),
+    }
+    if (operation, entity_type) not in safe_matrix or not isinstance(selector, dict):
+        raise RouteError("archive/delete combination is outside the safe matrix")
+    if entity_type == "issue":
+        if set(selector) != {"identifier"} or not isinstance(selector.get("identifier"), str) or re.fullmatch(r"SIS-[1-9][0-9]*", selector["identifier"]) is None:
+            raise RouteError("issue selector must be exactly one SIS-N")
+    elif entity_type in {"project", "initiative"}:
+        if set(selector) != {"name"}:
+            raise RouteError(f"{entity_type} selector must contain exactly name")
+        _validate_clean_text(selector.get("name"), "selector.name", maximum=200, required=True)
+    else:
+        if set(selector) != {"project", "name"}:
+            raise RouteError("milestone selector must contain exactly project and name")
+        for field in ("project", "name"):
+            _validate_clean_text(selector.get(field), f"selector.{field}", maximum=200, required=True)
+    return {"type": entity_type, "selector": dict(selector)}, _validate_approval_reference(request["approval"])
+
+
 def _validate_workspace_read_request(request: dict[str, Any]) -> dict[str, Any]:
     """Validate one fixed-scope read without accepting query/API passthrough."""
     operation = request.get("operation")
@@ -716,6 +748,9 @@ def parse_linear_request(
                 "project": request["project"],
                 "initiative": request["initiative"],
             }
+        elif operation in {"archive_linear_entity", "delete_linear_entity"}:
+            target, approval_reference = _validate_destructive_request(request)
+            change = {}
         elif operation in {"create_initiative", "update_initiative"}:
             target = {"type": "workspace", "identifier": "current"}
             change = _validate_initiative_management_request(request)
@@ -895,7 +930,10 @@ def _verified_replay(
     if not isinstance(target, dict):
         raise RouteError("completed replay has an invalid verified target")
     operation = persisted["operation"]
-    if operation == "converge_hierarchy":
+    if operation in {"archive_linear_entity", "delete_linear_entity"}:
+        if target != persisted["target"]:
+            raise RouteError("completed replay target does not match persisted command")
+    elif operation == "converge_hierarchy":
         expected_target = {
             "type": "project",
             "identifier": persisted["change"]["project"]["name"],

@@ -1,13 +1,15 @@
-# Linear owner-approved terminal state, parent, and issue-relation changes
+# Linear owner-approved terminal, relation, archive, and delete changes
 
-This repository exposes four narrowly owner-approved destructive slices only:
+This repository exposes narrowly owner-approved destructive slices only:
 
 1. move one exact `SIS-N` issue through existing `change_state` to exactly `Done`, `Canceled`, or `Duplicate`;
 2. replace or clear the parent of one exact `SIS-N` issue through parent-only `update_issue`;
 3. remove one exact existing issue relation by two exact `SIS-N` endpoints and `relation_type`;
-4. replace/rewire one exact existing issue relation with one exact new endpoint/type relation.
+4. replace/rewire one exact existing issue relation with one exact new endpoint/type relation;
+5. archive one exact issue, SIS-scoped project, or workspace initiative;
+6. delete/trash one exact issue, SIS-scoped project, project milestone, or workspace initiative.
 
-All other terminal names, nonterminal owner approval, archive/delete of issues, bulk targets, initiative unlink, and every other destructive lifecycle operation remain unavailable.
+All other terminal names, nonterminal owner approval, bulk targets, caller-selected cascade flags, arbitrary entity types, and destructive lifecycle operations remain unavailable.
 
 ## Trust boundaries
 
@@ -104,6 +106,23 @@ Standard policy remains blocked for `Done`, `Canceled`, and `Duplicate`. Owner a
 
 Apply uses the existing minimal `IssueUpdateInput {stateId}` mutation only. It writes prepared before/after state hashes before the API call, immediately reads the exact issue back, verifies state ID/name/type and every unmanaged field, and only then records completion. Crash after the write recovers through `execute_claimed_task` and the durable approval lease as one verified no-op; it never issues a second state mutation. Literal completed replay uses the same evidence and does not re-verify or re-consume approval.
 
+## Archive/delete matrix and behavior
+
+The exact supported matrix is deliberately asymmetric:
+
+| operation | issue | project | milestone | initiative |
+|---|---:|---:|---:|---:|
+| `archive_linear_entity` | `issueArchive` | deprecated but live authenticated `projectArchive` | unsupported: authenticated schema exposes no milestone archive mutation | `initiativeArchive` |
+| `delete_linear_entity` | `issueDelete(permanentlyDelete:false)` trash | `projectDelete` trash | `projectMilestoneDelete` | `initiativeDelete` trash |
+
+Selectors are public names only: issue `{identifier: SIS-N}`; project `{name}` with exact unique workspace name and SIS team membership; milestone `{project,name}` with both exact and the project SIS-scoped; initiative `{name}` unique in the workspace. Raw IDs, account/team entities, arbitrary entities, bulk selectors, and cascade flags are not accepted.
+
+Preflight reads the exact entity snapshot plus complete applicable impact: recursive issue children and relations; project issues, milestones, and initiative links; milestone issues; initiative projects. It canonicalizes and sorts affected entities, includes deterministic counts and affected public snapshots in the plan, and binds all of it into the approval before-state hash. Nonempty impact never blocks after the owner approves that exact snapshot. Apply still performs only the one fixed lifecycle mutation—never a caller-selected cascade or bulk document.
+
+Archive read-back requires absence from normal inventory, exactly one `includeArchived:true` match with non-null `archivedAt`, unchanged unmanaged entity fields, and unchanged affected entities/links. Delete follows Linear's documented semantics: issue/project/initiative deletes are recoverable trash (30-day grace period), not claims of immediate physical erasure; milestone delete is the fixed delete mutation. Every delete must disappear from normal and archived-inclusive scoped inventory, return null from the fixed direct lookup, and match mutation payload evidence (`entity:null` or exact trusted `entityId`). Every impacted child/issue/milestone/project/link is re-read: child parents, issue project/milestone links, project milestones, initiative links, and issue relations may change only as defined by the deleted container; unrelated drift fails closed. Hash-only prepared/completed recovery remains bound to approval, intent, full command, before/impact hashes, and expected after hash.
+
+The read-only live smoke `inventory_entity_destruction` introspects the current fixed mutation name and executes only exact snapshot/impact preflight. It emits selector, impact counts, and a before-state SHA-256, never internal entity IDs or mutation calls.
+
 ## Deliberately unavailable
 
-Arbitrary terminal names, nonterminal owner approval, archive, issue deletion, bulk relation operations, initiative unlink, arbitrary GraphQL, arbitrary relation IDs, and all other destructive project/initiative/issue lifecycle operations remain rejected before mutation.
+Arbitrary terminal names, nonterminal owner approval, account/team archive or delete, milestone archive, bulk archive/delete, caller-selected cascade, permanent issue deletion, initiative unlink as a standalone operation, arbitrary GraphQL, arbitrary relation IDs, and all other destructive lifecycle operations remain rejected before mutation.

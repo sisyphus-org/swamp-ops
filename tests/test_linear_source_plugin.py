@@ -626,6 +626,8 @@ class PluginTests(unittest.TestCase):
                 "query",
                 "entity_types",
                 "include_archived",
+                "entity_type",
+                "selector",
                 "identifier",
                 "related_identifier",
                 "old_related_identifier",
@@ -726,7 +728,7 @@ class PluginTests(unittest.TestCase):
             create_branch["properties"]["parent_identifier"],
             {"type": "string", "pattern": "^SIS-[1-9][0-9]*$"},
         )
-        self.assertEqual(len(parameters["oneOf"]), 21)
+        self.assertEqual(len(parameters["oneOf"]), 22)
         self.assertEqual(
             parameters["properties"]["operation"]["enum"],
             [
@@ -750,6 +752,8 @@ class PluginTests(unittest.TestCase):
                 "link_project_to_initiative",
                 "search_linear",
                 "inventory_linear",
+                "archive_linear_entity",
+                "delete_linear_entity",
             ],
         )
         self.assertEqual(
@@ -758,6 +762,7 @@ class PluginTests(unittest.TestCase):
                 None,
                 "search_linear",
                 "inventory_linear",
+                None,
                 "change_state",
                 "update_issue",
                 "inventory_sub_issues",

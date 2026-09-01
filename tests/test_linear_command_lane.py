@@ -1335,7 +1335,7 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(
             client.list_initiative_projects("initiative")[0]["id"], "project"
         )
-        self.assertEqual(calls[1][1], {"initiativeId": "initiative"})
+        self.assertEqual(calls[1][1], {"initiativeId": "initiative", "after": None})
 
     def test_client_issue_move_emits_only_exact_structural_ids(self):
         client = self.StubClient()

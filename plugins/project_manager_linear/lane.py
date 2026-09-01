@@ -45,6 +45,8 @@ OPERATIONS = {
     "link_project_to_initiative",
     "search_linear",
     "inventory_linear",
+    "archive_linear_entity",
+    "delete_linear_entity",
 }
 READ_OPERATIONS = {"read_issue", "inventory_sub_issues", "search_linear", "inventory_linear"}
 LINEAR_ENTITY_TYPES = ("issues", "projects", "milestones", "initiatives")
@@ -68,7 +70,7 @@ COMMAND_ROOT = Path(__file__).parents[2] / "commands" / "linear"
 ISSUE_QUERY = """
 query LaneIssue($id: String!) {
   issue(id: $id) {
-    id identifier title url description priority dueDate estimate
+    id identifier title url description priority dueDate estimate archivedAt
     state { id name type }
     assignee { id name email }
     labels { nodes { id name } }
@@ -187,9 +189,11 @@ WORKSPACE_ISSUES_QUERY = """
 query LaneWorkspaceIssues($after: String, $includeArchived: Boolean!) {
   issues(first: 100, after: $after, includeArchived: $includeArchived) {
     nodes {
-      id identifier title archivedAt
-      state { name }
-      team { key }
+      id identifier title url description priority dueDate estimate archivedAt
+      state { name type }
+      assignee { name }
+      labels { nodes { name } }
+      team { id key }
       parent { identifier }
       project { name }
       projectMilestone { name }
@@ -201,7 +205,7 @@ query LaneWorkspaceIssues($after: String, $includeArchived: Boolean!) {
 WORKSPACE_PROJECTS_QUERY = """
 query LaneWorkspaceProjects($after: String, $includeArchived: Boolean!) {
   projects(first: 100, after: $after, includeArchived: $includeArchived) {
-    nodes { id name archivedAt teams { nodes { key } } }
+    nodes { id name description targetDate archivedAt teams { nodes { id key } } }
     pageInfo { hasNextPage endCursor }
   }
 }
@@ -209,7 +213,7 @@ query LaneWorkspaceProjects($after: String, $includeArchived: Boolean!) {
 WORKSPACE_MILESTONES_QUERY = """
 query LaneWorkspaceMilestones($after: String, $includeArchived: Boolean!) {
   projectMilestones(first: 100, after: $after, includeArchived: $includeArchived) {
-    nodes { id name archivedAt project { name teams { nodes { key } } } }
+    nodes { id name description targetDate archivedAt project { id name teams { nodes { key } } } }
     pageInfo { hasNextPage endCursor }
   }
 }
@@ -217,7 +221,7 @@ query LaneWorkspaceMilestones($after: String, $includeArchived: Boolean!) {
 WORKSPACE_INITIATIVES_QUERY = """
 query LaneWorkspaceInitiatives($after: String, $includeArchived: Boolean!) {
   initiatives(first: 100, after: $after, includeArchived: $includeArchived) {
-    nodes { id name archivedAt }
+    nodes { id name description targetDate archivedAt }
     pageInfo { hasNextPage endCursor }
   }
 }
@@ -258,27 +262,46 @@ query LaneTeamProjects($teamId: String!) {
 }
 """
 PROJECT_MILESTONES_QUERY = """
-query LaneProjectMilestones($projectId: String!) {
+query LaneProjectMilestones($projectId: String!, $after: String) {
   project(id: $projectId) {
-    projectMilestones(first: 100) {
-      nodes { id name description targetDate project { id } }
-      pageInfo { hasNextPage }
+    projectMilestones(first: 100, after: $after, includeArchived: true) {
+      nodes { id name description targetDate archivedAt project { id name teams { nodes { id key } } } }
+      pageInfo { hasNextPage endCursor }
     }
   }
 }
 """
 PROJECT_ISSUES_QUERY = """
-query LaneProjectIssues($projectId: ID!) {
-  issues(first: 100, filter: { project: { id: { eq: $projectId } } }) {
+query LaneProjectIssues($projectId: ID!, $after: String) {
+  issues(first: 100, after: $after, includeArchived: true, filter: { project: { id: { eq: $projectId } } }) {
     nodes {
-      id identifier title url description priority
+      id identifier title url description priority dueDate estimate archivedAt
+      state { id name type }
+      assignee { id name email }
+      labels { nodes { id name } }
       team { id key }
-      project { id }
-      projectMilestone { id }
-      state { id name }
       parent { id identifier }
+      project { id name }
+      projectMilestone { id name }
     }
-    pageInfo { hasNextPage }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+"""
+MILESTONE_ISSUES_QUERY = """
+query LaneMilestoneIssues($milestoneId: ID!, $after: String) {
+  issues(first: 100, after: $after, includeArchived: true, filter: { projectMilestone: { id: { eq: $milestoneId } } }) {
+    nodes {
+      id identifier title url description priority dueDate estimate archivedAt
+      state { id name type }
+      assignee { id name email }
+      labels { nodes { id name } }
+      team { id key }
+      parent { id identifier }
+      project { id name }
+      projectMilestone { id name }
+    }
+    pageInfo { hasNextPage endCursor }
   }
 }
 """
@@ -329,11 +352,11 @@ query LaneInitiatives {
 }
 """
 INITIATIVE_PROJECTS_QUERY = """
-query LaneInitiativeProjects($initiativeId: String!) {
+query LaneInitiativeProjects($initiativeId: String!, $after: String) {
   initiative(id: $initiativeId) {
-    projects(first: 100, includeArchived: false) {
-      nodes { id name teams { nodes { id } } }
-      pageInfo { hasNextPage }
+    projects(first: 100, after: $after, includeArchived: true) {
+      nodes { id name description targetDate archivedAt teams { nodes { id key } } }
+      pageInfo { hasNextPage endCursor }
     }
   }
 }
@@ -346,6 +369,69 @@ mutation LaneCreateInitiative($input: InitiativeCreateInput!) {
 INITIATIVE_UPDATE = """
 mutation LaneUpdateInitiative($id: String!, $input: InitiativeUpdateInput!) {
   initiativeUpdate(id: $id, input: $input) { success }
+}
+"""
+ISSUE_ARCHIVE = """
+mutation LaneArchiveIssue($id: String!) { issueArchive(id: $id) { success } }
+"""
+INITIATIVE_ARCHIVE = """
+mutation LaneArchiveInitiative($id: String!) { initiativeArchive(id: $id) { success } }
+"""
+PROJECT_ARCHIVE = """
+mutation LaneArchiveProject($id: String!) { projectArchive(id: $id) { success entity { id archivedAt } } }
+"""
+ISSUE_DELETE = """
+mutation LaneDeleteIssue($id: String!) {
+  issueDelete(id: $id, permanentlyDelete: false) { success entity { id } }
+}
+"""
+PROJECT_DELETE = """
+mutation LaneDeleteProject($id: String!) {
+  projectDelete(id: $id) { success entity { id } }
+}
+"""
+PROJECT_MILESTONE_DELETE = """
+mutation LaneDeleteProjectMilestone($id: String!) {
+  projectMilestoneDelete(id: $id) { success entityId }
+}
+"""
+INITIATIVE_DELETE = """
+mutation LaneDeleteInitiative($id: String!) {
+  initiativeDelete(id: $id) { success entityId }
+}
+"""
+CORE_ENTITY_LOOKUP_QUERIES = {
+    "issue": ISSUE_QUERY,
+    "project": """
+query LaneProjectLookup($id: String!) {
+  project(id: $id) { id name description targetDate archivedAt teams { nodes { id key } } }
+}
+""",
+    "milestone": """
+query LaneMilestoneLookup($id: String!) {
+  projectMilestone(id: $id) {
+    id name description targetDate archivedAt project { id name teams { nodes { id key } } }
+  }
+}
+""",
+    "initiative": """
+query LaneInitiativeLookup($id: String!) {
+  initiative(id: $id) { id name description targetDate archivedAt }
+}
+""",
+}
+CORE_ENTITY_LOOKUP_FIELDS = {
+    "issue": "issue", "project": "project",
+    "milestone": "projectMilestone", "initiative": "initiative",
+}
+PROJECT_INITIATIVES_QUERY = """
+query LaneProjectInitiatives($projectId: String!, $after: String) {
+  project(id: $projectId) {
+    initiatives(first: 100, after: $after, includeArchived: true) {
+      nodes { id name description targetDate archivedAt }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
 }
 """
 INITIATIVE_PROJECT_CREATE = """
@@ -430,6 +516,12 @@ def _load_initiative_management() -> Any:
     )
 
 
+def _load_entity_destruction() -> Any:
+    return _load_bundled_module(
+        "entity_destruction.py", "project_manager_linear_entity_destruction"
+    )
+
+
 _VALIDATION = _load_validation()
 _COMPARISON = _load_comparison()
 SAFE_STATES = _VALIDATION.SAFE_STATES
@@ -483,6 +575,14 @@ class LinearClient:
     def get_issue(self, identifier: str) -> dict[str, Any] | None:
         """Resolve one issue by its exact identifier."""
         return self.execute(ISSUE_QUERY, {"id": identifier}).get("issue")
+
+    def get_linear_entity(self, entity_type: str, entity_id: str) -> dict[str, Any] | None:
+        """Read one core entity by trusted internal ID through a fixed document."""
+        if entity_type not in CORE_ENTITY_LOOKUP_QUERIES or not isinstance(entity_id, str) or not entity_id:
+            raise ContractError("core entity direct lookup is invalid")
+        return self.execute(
+            CORE_ENTITY_LOOKUP_QUERIES[entity_type], {"id": entity_id}
+        ).get(CORE_ENTITY_LOOKUP_FIELDS[entity_type])
 
     def list_states(self, team_id: str) -> list[dict[str, Any]]:
         """Return all supported workflow states or fail on pagination."""
@@ -734,15 +834,29 @@ class LinearClient:
         return self._bounded_connection(team.get("projects"), "SIS team projects")
 
     def list_project_milestones(self, project_id: str) -> list[dict[str, Any]]:
-        project = self.execute(PROJECT_MILESTONES_QUERY, {"projectId": project_id}).get("project")
-        if not isinstance(project, dict):
-            raise ContractError("exact preflighted project disappeared")
-        return self._bounded_connection(project.get("projectMilestones"), "project milestones")
+        def fetch(after: str | None) -> Any:
+            project = self.execute(
+                PROJECT_MILESTONES_QUERY, {"projectId": project_id, "after": after}
+            ).get("project")
+            if not isinstance(project, dict):
+                raise ContractError("exact preflighted project disappeared")
+            return project.get("projectMilestones")
+        return self._cursor_paginate(fetch, "project milestones")
 
     def list_project_issues(self, project_id: str) -> list[dict[str, Any]]:
-        return self._bounded_connection(
-            self.execute(PROJECT_ISSUES_QUERY, {"projectId": project_id}).get("issues"),
+        return self._cursor_paginate(
+            lambda after: self.execute(
+                PROJECT_ISSUES_QUERY, {"projectId": project_id, "after": after}
+            ).get("issues"),
             "project issues",
+        )
+
+    def list_milestone_issues(self, milestone_id: str) -> list[dict[str, Any]]:
+        return self._cursor_paginate(
+            lambda after: self.execute(
+                MILESTONE_ISSUES_QUERY, {"milestoneId": milestone_id, "after": after}
+            ).get("issues"),
+            "milestone issues",
         )
 
     def list_team_issues_by_title(
@@ -824,14 +938,25 @@ class LinearClient:
         )
 
     def list_initiative_projects(self, initiative_id: str) -> list[dict[str, Any]]:
-        initiative = self.execute(
-            INITIATIVE_PROJECTS_QUERY, {"initiativeId": initiative_id}
-        ).get("initiative")
-        if not isinstance(initiative, dict):
-            raise ContractError("exact preflighted initiative disappeared")
-        return self._bounded_connection(
-            initiative.get("projects"), "initiative projects"
-        )
+        def fetch(after: str | None) -> Any:
+            initiative = self.execute(
+                INITIATIVE_PROJECTS_QUERY,
+                {"initiativeId": initiative_id, "after": after},
+            ).get("initiative")
+            if not isinstance(initiative, dict):
+                raise ContractError("exact preflighted initiative disappeared")
+            return initiative.get("projects")
+        return self._cursor_paginate(fetch, "initiative projects")
+
+    def list_project_initiatives(self, project_id: str) -> list[dict[str, Any]]:
+        def fetch(after: str | None) -> Any:
+            project = self.execute(
+                PROJECT_INITIATIVES_QUERY, {"projectId": project_id, "after": after}
+            ).get("project")
+            if not isinstance(project, dict):
+                raise ContractError("exact impacted project disappeared")
+            return project.get("initiatives")
+        return self._cursor_paginate(fetch, "project initiatives")
 
     def create_initiative(
         self, *, initiative_id: str, name: str, **optional: Any
@@ -863,6 +988,37 @@ class LinearClient:
         )["initiativeUpdate"]
         if result.get("success") is not True:
             raise ContractError("Linear initiative update did not succeed")
+
+    def archive_linear_entity(self, entity_type: str, entity_id: str) -> None:
+        documents = {
+            "issue": (ISSUE_ARCHIVE, "issueArchive"),
+            "project": (PROJECT_ARCHIVE, "projectArchive"),
+            "initiative": (INITIATIVE_ARCHIVE, "initiativeArchive"),
+        }
+        if entity_type not in documents:
+            raise ContractError("unsupported Linear entity archive mutation")
+        document, field = documents[entity_type]
+        result = self.execute(document, {"id": entity_id})[field]
+        if result.get("success") is not True:
+            raise ContractError(f"Linear {entity_type} archive did not succeed")
+
+    def delete_linear_entity(self, entity_type: str, entity_id: str) -> None:
+        documents = {
+            "issue": (ISSUE_DELETE, "issueDelete", "entity"),
+            "project": (PROJECT_DELETE, "projectDelete", "entity"),
+            "milestone": (PROJECT_MILESTONE_DELETE, "projectMilestoneDelete", "entityId"),
+            "initiative": (INITIATIVE_DELETE, "initiativeDelete", "entityId"),
+        }
+        if entity_type not in documents:
+            raise ContractError("unsupported Linear entity delete mutation")
+        document, field, evidence_field = documents[entity_type]
+        result = self.execute(document, {"id": entity_id})[field]
+        if result.get("success") is not True:
+            raise ContractError(f"Linear {entity_type} delete did not succeed")
+        if evidence_field == "entity" and result.get("entity") is not None:
+            raise ContractError(f"Linear {entity_type} delete returned a live entity")
+        if evidence_field == "entityId" and result.get("entityId") != entity_id:
+            raise ContractError(f"Linear {entity_type} delete identity did not match")
 
     def create_initiative_project_link(
         self, *, link_id: str, initiative_id: str, project_id: str
@@ -1031,9 +1187,17 @@ def validate_command(raw: Any) -> dict[str, Any]:
     if operation not in OPERATIONS:
         raise ContractError("operation is not allowed")
     target = raw["target"]
-    if not isinstance(target, dict) or set(target) != {"type", "identifier"}:
+    destructive_operation = operation in {
+        "archive_linear_entity",
+        "delete_linear_entity",
+    }
+    if destructive_operation:
+        _load_entity_destruction().validate_target(target, operation, ContractError)
+    elif not isinstance(target, dict) or set(target) != {"type", "identifier"}:
         raise ContractError("target must contain exactly type and identifier")
-    if operation in {
+    if destructive_operation:
+        pass
+    elif operation in {
         "create_issue",
         "converge_hierarchy",
         "create_standalone_issue",
@@ -1063,7 +1227,10 @@ def validate_command(raw: Any) -> dict[str, Any]:
     change = raw["change"]
     if not isinstance(change, dict):
         raise ContractError("change must be an object")
-    if operation in {"search_linear", "inventory_linear"}:
+    if destructive_operation:
+        if change:
+            raise ContractError(f"{operation} change must be empty")
+    elif operation in {"search_linear", "inventory_linear"}:
         expected = {"entity_types", "include_archived"}
         if operation == "search_linear":
             expected.add("query")
@@ -1357,7 +1524,7 @@ def validate_command(raw: Any) -> dict[str, Any]:
         approval.validate_policy(raw["policy"])
     except approval.ApprovalError as exc:
         raise ContractError(str(exc)) from exc
-    owner_approvable = (
+    owner_approvable = destructive_operation or (
         operation == "update_issue" and set(change) == {"parent_identifier"}
     ) or operation in {"remove_issue_relation", "replace_issue_relation"} or (
         operation == "change_state" and change.get("state") in OWNER_CONTROLLED_STATES
@@ -1369,6 +1536,8 @@ def validate_command(raw: Any) -> dict[str, Any]:
     if operation in {"remove_issue_relation", "replace_issue_relation"} and raw[
         "policy"
     ].get("mode") != "owner_approved":
+        raise ContractError(f"{operation} requires owner_approved policy")
+    if destructive_operation and raw["policy"].get("mode") != "owner_approved":
         raise ContractError(f"{operation} requires owner_approved policy")
     if (
         operation == "change_state"
@@ -1935,6 +2104,19 @@ def execute_command(
 
     if command["operation"] in {"search_linear", "inventory_linear"}:
         return _workspace_read_result(client, command, mode=mode)
+
+    if command["operation"] in {"archive_linear_entity", "delete_linear_entity"}:
+        return finish(
+            _load_entity_destruction().execute(
+                client,
+                command,
+                mode=mode,
+                journal_path=journal_path,
+                key_hash=key_hash,
+                request_hash=request_hash,
+                error_cls=ContractError,
+            )
+        )
 
     if command["operation"] == "create_issue":
         change = command["change"]

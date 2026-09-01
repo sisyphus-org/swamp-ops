@@ -1,7 +1,8 @@
 name: project-manager-linear
-version: 1.0.0
+version: 1.2.0
 description: >-
-  Deterministic PM Linear lane with fixed owner-approved terminal, parent, and relation mutations.
+  Deterministic PM Linear lane with fixed owner-approved terminal, parent,
+  relation and complete owner-approved core archive/delete mutations.
 author: sisyphus-org
 kind: backend
 provides_tools:

@@ -90,9 +90,49 @@ def validate_intent(value: Any) -> dict[str, Any]:
         "update_issue",
         "remove_issue_relation",
         "replace_issue_relation",
+        "archive_linear_entity",
+        "delete_linear_entity",
     }:
         raise ContractError("intent operation is not owner-approvable")
     target = value.get("target")
+    change = value.get("change")
+    if operation in {"archive_linear_entity", "delete_linear_entity"}:
+        if not isinstance(target, dict) or set(target) != {"type", "selector"}:
+            raise ContractError("archive/delete target must contain exactly type and selector")
+        entity_type = target.get("type")
+        selector = target.get("selector")
+        safe_matrix = {
+            ("archive_linear_entity", "issue"),
+            ("archive_linear_entity", "project"),
+            ("archive_linear_entity", "initiative"),
+            ("delete_linear_entity", "issue"),
+            ("delete_linear_entity", "project"),
+            ("delete_linear_entity", "milestone"),
+            ("delete_linear_entity", "initiative"),
+        }
+        if (operation, entity_type) not in safe_matrix or not isinstance(selector, dict):
+            raise ContractError("archive/delete combination is outside the safe matrix")
+        if entity_type == "issue":
+            valid_selector = set(selector) == {"identifier"} and isinstance(
+                selector.get("identifier"), str
+            ) and ISSUE_IDENTIFIER.fullmatch(selector["identifier"]) is not None
+        elif entity_type in {"project", "initiative"}:
+            valid_selector = set(selector) == {"name"} and isinstance(
+                selector.get("name"), str
+            ) and 0 < len(selector["name"].strip()) <= 200
+        else:
+            valid_selector = set(selector) == {"project", "name"} and all(
+                isinstance(selector.get(field), str)
+                and 0 < len(selector[field].strip()) <= 200
+                for field in ("project", "name")
+            )
+        if not valid_selector or any(
+            ord(char) < 32 for item in selector.values() for char in item
+        ):
+            raise ContractError("archive/delete exact selector is invalid")
+        if change != {}:
+            raise ContractError("archive/delete intent change must be empty")
+        return value
     if (
         not isinstance(target, dict)
         or set(target) != {"type", "identifier"}

@@ -314,9 +314,11 @@ def execute_pm_command(
             }
             approved_target = approved_plan_binding["target"]
             operation = expected_intent["operation"]
-            target_identifier = expected_intent["target"]["identifier"]
+            target_identifier = expected_intent["target"].get("identifier")
             change = expected_intent["change"]
-            if operation == "remove_issue_relation":
+            if operation in {"archive_linear_entity", "delete_linear_entity"}:
+                approved_target_matches = approved_target == expected_intent["target"]
+            elif operation == "remove_issue_relation":
                 approved_target_matches = approved_target == {
                     "type": "issue_relation",
                     "identifier": target_identifier,
@@ -465,6 +467,10 @@ def human_summary(result: dict[str, Any]) -> str:
         lead = "Инициатива Linear обновлена."
     elif operation == "link_project_to_initiative":
         lead = "Проект Linear добавлен в инициативу."
+    elif operation == "archive_linear_entity":
+        lead = "Объект Linear архивирован."
+    elif operation == "delete_linear_entity":
+        lead = "Объект Linear удалён в соответствии с семантикой Linear."
     elif operation == "change_state":
         lead = "Статус Linear изменён."
     elif operation == "update_issue":

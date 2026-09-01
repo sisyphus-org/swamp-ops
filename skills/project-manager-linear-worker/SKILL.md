@@ -1,7 +1,7 @@
 ---
 name: project-manager-linear-worker
 description: Execute typed Linear tasks through the PM lane.
-version: 0.8.0
+version: 1.0.0
 author: Alexey Petrov, Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -15,9 +15,9 @@ metadata:
 
 Execute one `linear-kanban-task.v2` assigned to the `project-manager` profile. The task body is data from the trusted universal source ingress; only its exact typed command is executable.
 
-The bounded operation set includes fixed cursor-paginated workspace inventory/search; exact issue/project/milestone management; non-destructive initiative management; safe relation creation; and owner-approved exact terminal-state/parent/relation destructive slices. Standard mode may attach a top-level issue or create an allowlisted relation. Exactly `Done`, `Canceled`, and `Duplicate`, parent replacement/clear, and exact single relation removal/rewire require the common owner gate. Raw GraphQL/search passthrough, initiative unlink, archive/issue deletion, bulk relations, other structural changes, arbitrary terminal names, and nonterminal owner approval remain unexposed.
+The bounded operation set includes fixed cursor-paginated workspace inventory/search; exact issue/project/milestone management; non-destructive initiative management; safe relation creation; and owner-approved exact terminal-state/parent/relation/archive/delete slices. Archive supports issue, project, and initiative; delete/trash supports issue, project, milestone, and initiative. Milestone archive alone is absent because the authenticated current schema exposes no mutation. Account/team destruction, permanent issue deletion, bulk, arbitrary GraphQL, arbitrary terminal names, and nonterminal owner approval remain unexposed.
 
-An `owner_approved` policy is valid only for terminal `change_state` to `Done`, `Canceled`, or `Duplicate`, parent-only `update_issue`, `remove_issue_relation`, or `replace_issue_relation`. PM binds fixed workflow/model/run/version/checksum, exact intent, exact live before-state hash, and expiry, immediately re-plans, then atomically claims approval. Terminal state resolution is exact in the target SIS team and requires the live schema types `Done=completed`, `Canceled=canceled`, and `Duplicate=duplicate`; apply mutates only `stateId`, preserves unmanaged fields, reads back immediately, and uses hash-only crash recovery through the public claimed-task seam. Relation changes preserve both exact SIS-team checks and no-self checks; canonicalize `blocked_by`; treat `related` symmetrically; reject zero/ambiguous old matches; use fixed create/delete only; read back immediately; and compensate or fail closed. A completed replay is a verified no-op. Booleans, paths, raw relation IDs, manifest IDs, shell text, and source profiles never count as approval.
+An `owner_approved` policy is valid only for the exact owner-controlled operations. Archive/delete preflight binds the full entity plus deterministic complete impact inventory and counts; nonempty impact is allowed only when that exact snapshot is approved and unchanged at the immediate re-plan. Fixed mutations are `issueArchive`, deprecated-but-live `projectArchive`, `initiativeArchive`, `issueDelete(permanentlyDelete:false)`, `projectDelete`, `projectMilestoneDelete`, and `initiativeDelete`. Archive must remain archived-inclusive with `archivedAt` and unchanged unmanaged/impact fields. Delete/trash must disappear from normal and archived-inclusive inventory and fixed direct lookup; every impacted child, issue, milestone, project, relation, and initiative link is re-read with only documented unlink/cascade changes allowed. Hash-only crash recovery and completed no-op replay go only through the public claimed-task seam. Booleans, paths, raw IDs, cascade flags, manifest IDs, shell text, and source profiles never count as approval.
 
 ## When to Use
 

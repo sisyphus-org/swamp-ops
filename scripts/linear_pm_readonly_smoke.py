@@ -130,6 +130,89 @@ def run_smoke(
     }
 
 
+DESTRUCTION_SCHEMA_QUERY = """
+query LaneDestructionSchema {
+  __type(name: "Mutation") { fields(includeDeprecated: true) { name isDeprecated deprecationReason } }
+}
+"""
+DESTRUCTION_MUTATIONS = {
+    ("archive_linear_entity", "issue"): "issueArchive",
+    ("archive_linear_entity", "project"): "projectArchive",
+    ("archive_linear_entity", "initiative"): "initiativeArchive",
+    ("delete_linear_entity", "issue"): "issueDelete",
+    ("delete_linear_entity", "project"): "projectDelete",
+    ("delete_linear_entity", "milestone"): "projectMilestoneDelete",
+    ("delete_linear_entity", "initiative"): "initiativeDelete",
+}
+
+
+def run_destruction_preflight_smoke(
+    *,
+    operation: str,
+    entity_type: str,
+    selector: dict[str, str],
+    environ: Mapping[str, str] = os.environ,
+    lane: Any = bundled_lane,
+    client_factory: Any | None = None,
+) -> dict[str, Any]:
+    """Read current mutation schema and exact impact without applying a mutation."""
+    if environ.get("HERMES_PROFILE") != "project-manager":
+        raise RuntimeError("live Linear read smoke requires project-manager profile")
+    token = str(environ.get("LINEAR_TOKEN") or "").strip()
+    if not token:
+        raise RuntimeError("project-manager LINEAR_TOKEN is missing")
+    mutation = DESTRUCTION_MUTATIONS.get((operation, entity_type))
+    if mutation is None:
+        raise ValueError("archive/delete combination is outside the safe matrix")
+    client = (client_factory or lane.LinearClient)(token)
+    schema = client.execute(DESTRUCTION_SCHEMA_QUERY).get("__type")
+    fields = schema.get("fields") if isinstance(schema, dict) else None
+    names = {
+        item.get("name")
+        for item in fields
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    } if isinstance(fields, list) else set()
+    required_mutations = set(DESTRUCTION_MUTATIONS.values())
+    missing = sorted(required_mutations - names)
+    if missing:
+        raise RuntimeError("required fixed Linear mutations are unavailable: " + ", ".join(missing))
+    target = {"type": entity_type, "selector": dict(selector)}
+    destruction = lane._load_entity_destruction()
+    destruction.validate_target(target, operation, lane.ContractError)
+    inventory = destruction._inventory(client, entity_type)
+    matches = [
+        node
+        for node in inventory
+        if destruction._matches(node, entity_type, selector)
+        and node.get("archivedAt") is None
+    ]
+    if len(matches) != 1:
+        raise RuntimeError("destruction preflight target was missing or ambiguous")
+    impact = destruction._impact(client, entity_type, matches[0])
+    if not isinstance(impact, dict) or any(not isinstance(items, list) for items in impact.values()):
+        raise RuntimeError("destruction preflight did not return an exact impact inventory")
+    before = {
+        "entity": destruction._scrub(matches[0]),
+        "archived": False,
+        "impact": destruction._scrub(impact),
+    }
+    digest = hashlib.sha256(
+        json.dumps(before, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return {
+        "result": "pass",
+        "readOnly": True,
+        "operation": operation,
+        "entityType": entity_type,
+        "selector": dict(selector),
+        "mutation": mutation,
+        "schemaMutations": sorted(required_mutations),
+        "impactCounts": {key: len(items) for key, items in impact.items()},
+        "beforeStateSha256": digest,
+        "verified": True,
+    }
+
+
 def run_relation_inventory_smoke(
     *,
     identifier: str,
@@ -285,6 +368,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "inventory_linear",
             "inventory_issue_relations",
             "inventory_team_states",
+            "inventory_entity_destruction",
         ),
     )
     parser.add_argument(
@@ -296,12 +380,40 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--query")
     parser.add_argument("--identifier")
+    parser.add_argument(
+        "--destructive-operation",
+        choices=("archive_linear_entity", "delete_linear_entity"),
+    )
+    parser.add_argument(
+        "--entity-kind", choices=("issue", "project", "milestone", "initiative")
+    )
+    parser.add_argument("--name")
+    parser.add_argument("--project")
     archive = parser.add_mutually_exclusive_group(required=False)
     archive.add_argument("--include-archived", action="store_true")
     archive.add_argument("--exclude-archived", action="store_true")
     args = parser.parse_args(argv)
     if not args.live:
         parser.error("--live is required")
+    if args.operation == "inventory_entity_destruction":
+        if (
+            args.destructive_operation is None
+            or args.entity_kind is None
+            or args.entity_types
+            or args.query is not None
+            or args.include_archived
+            or args.exclude_archived
+        ):
+            parser.error("destruction inventory requires exact operation/entity selector only")
+        if args.entity_kind == "issue":
+            valid = args.identifier is not None and args.name is None and args.project is None
+        elif args.entity_kind in {"project", "initiative"}:
+            valid = args.identifier is None and args.name is not None and args.project is None
+        else:
+            valid = args.identifier is None and args.name is not None and args.project is not None
+        if not valid:
+            parser.error("destruction inventory selector does not match entity kind")
+        return args
     if args.operation == "inventory_issue_relations":
         if (
             args.identifier is None
@@ -334,7 +446,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
-        if args.operation == "inventory_issue_relations":
+        if args.operation == "inventory_entity_destruction":
+            selector = (
+                {"identifier": args.identifier}
+                if args.entity_kind == "issue"
+                else (
+                    {"project": args.project, "name": args.name}
+                    if args.entity_kind == "milestone"
+                    else {"name": args.name}
+                )
+            )
+            result = run_destruction_preflight_smoke(
+                operation=args.destructive_operation,
+                entity_type=args.entity_kind,
+                selector=selector,
+            )
+        elif args.operation == "inventory_issue_relations":
             result = run_relation_inventory_smoke(identifier=args.identifier)
         elif args.operation == "inventory_team_states":
             result = run_team_state_inventory_smoke()
