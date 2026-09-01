@@ -8,6 +8,11 @@ from types import SimpleNamespace
 
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "kanban_dispatcher_audit.py"
+WORKFLOW = (
+    Path(__file__).parents[1]
+    / "workflows"
+    / "workflow-kanban-dispatcher-audit.yaml"
+)
 SPEC = importlib.util.spec_from_file_location("kanban_dispatcher_audit", SCRIPT)
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError(f"cannot import audit script: {SCRIPT}")
@@ -95,6 +100,14 @@ class DispatcherConfigTests(unittest.TestCase):
             )
             self.assertEqual(report["result"], "pass")
             self.assertTrue(report["readOnly"])
+
+    def test_workflow_uses_repository_relative_working_directory(self):
+        workflow = WORKFLOW.read_text()
+        self.assertIn("workingDir: .", workflow)
+        self.assertNotIn(
+            "workingDir: /Users/hermes/workspaces/swamp-ops",
+            workflow,
+        )
 
     def test_main_exit_status_tracks_report_result(self):
         for result, expected in (("pass", 0), ("drift", 1)):

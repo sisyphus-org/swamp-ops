@@ -20,7 +20,7 @@ jobs:
           methodName: execute
           inputs:
             run: /Users/hermes/.hermes/hermes-agent/venv/bin/python scripts/kanban_dispatcher_audit.py
-            workingDir: /Users/hermes/workspaces/swamp-ops
+            workingDir: .
             timeout: 60000
             ignoreExitCode: false
         dependsOn: []
