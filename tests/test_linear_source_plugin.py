@@ -230,6 +230,29 @@ class FakeKanban:
 
 
 class AdapterTests(unittest.TestCase):
+    def test_tool_schema_exposes_terminal_state_without_approval(self):
+        schema = LINEAR_SOURCE_REQUEST_SCHEMA["parameters"]
+        request = {
+            "operation": "change_state",
+            "identifier": "SIS-102",
+            "state": "Done",
+        }
+        jsonschema.validate(request, schema)
+        with self.assertRaises(jsonschema.ValidationError):
+            jsonschema.validate(
+                {**request, "approval": {
+                    "workflow": "linear-destructive-owner-approval-attest",
+                    "model": "linear-destructive-owner-approval-attest",
+                    "run_id": "55555555-5555-4555-8555-555555555555",
+                    "artifact_version": 7,
+                    "checksum": "a" * 64,
+                    "intent_hash": "b" * 64,
+                    "before_state_hash": "c" * 64,
+                    "expires_at": "2026-09-01T13:00:00Z",
+                }},
+                schema,
+            )
+
     def test_tool_schema_exposes_exact_workspace_read_shapes(self):
         parameters = LINEAR_SOURCE_REQUEST_SCHEMA["parameters"]
         self.assertEqual(
@@ -1673,16 +1696,6 @@ class PluginTests(unittest.TestCase):
                 "operation": "change_state",
                 "identifier": "SIS-68",
                 "state": "Done",
-                "approval": {
-                    "workflow": "linear-destructive-owner-approval-attest",
-                    "model": "linear-destructive-owner-approval-attest",
-                    "run_id": "55555555-5555-4555-8555-555555555555",
-                    "artifact_version": 7,
-                    "checksum": "a" * 64,
-                    "intent_hash": "b" * 64,
-                    "before_state_hash": "c" * 64,
-                    "expires_at": "2026-09-01T13:00:00Z",
-                },
             },
             {
                 "operation": "create_issue",

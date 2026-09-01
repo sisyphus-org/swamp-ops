@@ -46,7 +46,7 @@ OWNER_OPERATIONS = {
     "archive_linear_entity",
     "delete_linear_entity",
 }
-OWNER_STATES = {"Done", "Canceled", "Duplicate"}
+
 
 
 class PartialFailure(RuntimeError):
@@ -75,11 +75,6 @@ def requires_owner(item: dict[str, Any]) -> bool:
     change = item.get("change")
     return bool(
         operation in OWNER_OPERATIONS
-        or (
-            operation == "change_state"
-            and isinstance(change, dict)
-            and change.get("state") in OWNER_STATES
-        )
         or (
             operation == "update_issue"
             and isinstance(change, dict)

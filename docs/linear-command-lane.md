@@ -20,7 +20,7 @@ Required envelope:
 }
 ```
 
-`{"mode":"standard"}` remains the default. The existing exact fixed-shape `owner_approved` attestation reference documented in [linear-owner-approval.md](linear-owner-approval.md) is accepted only for `change_state` to exactly `Done`, `Canceled`, or `Duplicate`; parent-only `update_issue`; exact issue-relation removal/replacement; the supported core lifecycle matrix; and a `bulk_linear_operations` parent containing at least one such owner-controlled child. Owner-controlled children always reject standard policy.
+`{"mode":"standard"}` remains the default and is used for every exact workflow-state transition. The existing exact fixed-shape `owner_approved` attestation reference documented in [linear-owner-approval.md](linear-owner-approval.md) is accepted only for parent-only `update_issue`, exact issue-relation removal/replacement, the supported core lifecycle matrix, and a `bulk_linear_operations` parent containing at least one such owner-controlled child. Owner-controlled children always reject standard policy.
 
 The validator rejects unknown fields, arbitrary GraphQL or MCP method names, URLs, fuzzy identifiers, arrays/bulk targets, unsupported operations and unbounded payloads. After exact issue resolution, the execution lane additionally rejects targets whose resolved team is not `SIS`. `idempotency_key` is 8–200 characters, starts with an alphanumeric character, and thereafter uses only `A-Za-z0-9:._/-`.
 
@@ -33,7 +33,7 @@ The lane accepts only `linear-command.v2` and emits/accepts only `linear-result.
 - `read_issue`: `change` must be empty.
 - `inventory_linear`: workspace target only; requires an explicit non-empty unique ordered subset of `issues`, `projects`, `milestones`, and `initiatives`, plus an explicit `include_archived` boolean.
 - `search_linear`: the same complete inventory scope plus an exact non-empty query. PM exhausts fixed 100-node cursor pages with cursor and duplicate validation, then applies deterministic Python Unicode `casefold()` substring matching to issue identifiers/titles and entity names. There is no 100-item total cap and no server-side/raw query passthrough.
-- `change_state`: `change` must contain only `state`; standard exact allowlist is `Backlog`, `Todo`, `Research`, `In Progress`, `In Review`. Exact `Done`, `Canceled`, and `Duplicate` require owner approval and resolve uniquely in the target SIS team with live semantic types `completed`, `canceled`, and `duplicate` respectively.
+- `change_state`: `change` must contain only `state`; standard exact allowlist is `Backlog`, `Todo`, `Research`, `In Progress`, `In Review`, `Done`, `Canceled`, and `Duplicate`. Every destination is reachable from every current state. Terminal destinations resolve uniquely in the target SIS team with live semantic types `completed`, `canceled`, and `duplicate` respectively.
 - `update_issue`: `change` is a non-empty subset of title, literal `description` or `description_transform=remove_links`, safe `state`, `High|Medium|Low` priority, assignee, exact labels, due date, estimate, parent, and project/milestone scope for one exact `SIS-N`. Literal description and transform are mutually exclusive. `remove_links` reads the live description, preserves visible Markdown labels and remaining text, removes HTTP(S) destinations, then applies all requested fields in one mutation with exact read-back; literal replay is a verified no-op.
 - `create_issue_relation`: safely creates one exact `blocks`, `blocked_by`, or symmetric `related` relation between same-team non-self `SIS-N` issues.
 - `remove_issue_relation`: owner-approved only; resolves exactly one existing relation from exact endpoint identifiers/type and deletes it with immediate full-inventory read-back. Zero or ambiguous matches fail closed.
@@ -52,7 +52,7 @@ The lane accepts only `linear-command.v2` and emits/accepts only `linear-result.
 - `archive_linear_entity`: owner-approved only for issue, project, or initiative; milestone archive is unsupported.
 - `delete_linear_entity`: owner-approved only for issue, project, project-scoped milestone, or initiative. Issue deletion is non-permanent trash semantics. Every lifecycle plan binds the exact entity and complete impact inventory, and apply immediately re-plans before any write.
 
-Arbitrary terminal names, nonterminal owner approval, arbitrary/raw search, initiative unlink/reparenting/status/owner/labels, milestone archive, permanent issue deletion, and unrestricted structure changes remain unavailable. Owner approval enables only the three exact terminal states, exact issue-parent replacement/clear, exact single relation removal/rewire, the supported lifecycle matrix above, and an ordered bulk parent containing those exact shapes; see [linear-owner-approval.md](linear-owner-approval.md).
+Arbitrary state names, owner approval on state transitions, arbitrary/raw search, initiative unlink/reparenting/status/owner/labels, milestone archive, permanent issue deletion, and unrestricted structure changes remain unavailable. Owner approval enables exact issue-parent replacement/clear, exact single relation removal/rewire, the supported lifecycle matrix above, and an ordered bulk parent containing those exact shapes; see [linear-owner-approval.md](linear-owner-approval.md).
 
 ### Read-only credential boundary
 
@@ -148,7 +148,7 @@ The normal journal is `$HERMES_HOME/linear-command-lane/journal.json`. It stores
 ## Idempotency and recovery
 
 - A mutation apply requires the hash-only journal. A journal-wide advisory file lock serializes the complete local read/check/mutate/read-back/journal sequence across processes, preventing concurrent same-key comments and lost journal updates.
-- State changes read current state first. Already-converged state is a verified no-op. Owner-terminal apply writes prepared/completed before/after hashes, mutates only `stateId`, immediately verifies state ID/name/type plus every unmanaged issue field, and recovers a post-write crash through the public durable claimed-task seam without a second mutation.
+- State changes read current state first. Already-converged state is a verified no-op. Apply mutates only `stateId`, immediately verifies state ID/name/type plus every unmanaged issue field, and a post-write replay converges as a verified no-op without a second mutation.
 - Comments use a deterministic Linear UUID derived from the hashed idempotency key. Preflight resolves that ID only inside the exact issue's bounded comment list because Linear returns an error, not `null`, when `comment(id:)` targets a missing entity. Post-create read-back uses the exact ID and body. Replay is a verified no-op; the same key with a different request fails closed without exposing metadata in the comment.
 - Issue creation uses a separate deterministic Linear UUID derived from the same hashed key. Preflight searches that ID only in the exact parent's bounded child list because Linear errors rather than returning `null` for a missing `issue(id:)`; post-create read-back verifies the exact ID, parent, title, description, state and priority. Replay after a post-create crash converges without a duplicate issue or visible metadata in the description.
 - Child, hierarchy, standalone, and issue-tree paths share one comparison module. Mutation text is never rewritten. Read-back accepts exact bytes or only Linear's confirmed deterministic transformation of every unambiguous plain HTTP(S) URL to `[url](<url>)`; Markdown/code/emphasis, punctuation ambiguity, partial conversion, changed labels, or whitespace drift remain mismatches.
@@ -172,4 +172,4 @@ The 2026-08-28 live SIS-59 run predates the SIS-77 protocol-version cutover and 
 - replay returned `no_op`; Linear read-back showed exactly one clean user-authored comment;
 - a real state plan recorded `In Progress → In Review`, apply returned `applied` with exact read-back, and immediate replay returned verified `no_op`.
 
-Closure to `Done` is available only through the exact owner-approved terminal-state contract; standard policy remains blocked.
+Closure to `Done`, reopening from it, and all other supported workflow-state transitions use the normal exact standard-policy route.

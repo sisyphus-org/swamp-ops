@@ -52,8 +52,8 @@ OPERATIONS = {
 READ_OPERATIONS = {"read_issue", "inventory_sub_issues", "search_linear", "inventory_linear"}
 LINEAR_ENTITY_TYPES = ("issues", "projects", "milestones", "initiatives")
 MAX_SEARCH_QUERY = 500
-OWNER_CONTROLLED_STATES = {"Done", "Canceled", "Duplicate"}
-OWNER_CONTROLLED_STATE_TYPES = {
+TERMINAL_STATES = {"Done", "Canceled", "Duplicate"}
+TERMINAL_STATE_TYPES = {
     "Done": "completed",
     "Canceled": "canceled",
     "Duplicate": "duplicate",
@@ -1461,7 +1461,7 @@ def validate_command(raw: Any) -> dict[str, Any]:
         if set(change) != {"state"} or not isinstance(change.get("state"), str):
             raise ContractError("change_state supports exactly one state field")
         state = change["state"]
-        if state not in SAFE_STATES and state not in OWNER_CONTROLLED_STATES:
+        if state not in SAFE_STATES and state not in TERMINAL_STATES:
             raise ContractError("requested state is not in the exact safe-state allowlist")
     elif operation == "update_issue":
         allowed = {
@@ -1508,8 +1508,8 @@ def validate_command(raw: Any) -> dict[str, Any]:
         ):
             raise ContractError("update_issue description_transform is not allowed")
         if "state" in change:
-            if change["state"] in OWNER_CONTROLLED_STATES:
-                raise ContractError("update_issue state is owner-controlled")
+            if change["state"] in TERMINAL_STATES:
+                raise ContractError("update_issue terminal state must use change_state")
             if change["state"] not in SAFE_STATES:
                 raise ContractError("update_issue state is not in the safe-state allowlist")
         if "priority" in change and change["priority"] not in PRIORITIES:
@@ -1727,9 +1727,7 @@ def validate_command(raw: Any) -> dict[str, Any]:
         raise ContractError(str(exc)) from exc
     owner_approvable = operation == "bulk_linear_operations" or destructive_operation or (
         operation == "update_issue" and set(change) == {"parent_identifier"}
-    ) or operation in {"remove_issue_relation", "replace_issue_relation"} or (
-        operation == "change_state" and change.get("state") in OWNER_CONTROLLED_STATES
-    )
+    ) or operation in {"remove_issue_relation", "replace_issue_relation"}
     if raw["policy"].get("mode") == "owner_approved" and not owner_approvable:
         raise ContractError(
             "owner_approved policy is not allowed for this exact operation"
@@ -1740,14 +1738,6 @@ def validate_command(raw: Any) -> dict[str, Any]:
         raise ContractError(f"{operation} requires owner_approved policy")
     if destructive_operation and raw["policy"].get("mode") != "owner_approved":
         raise ContractError(f"{operation} requires owner_approved policy")
-    if (
-        operation == "change_state"
-        and change.get("state") in OWNER_CONTROLLED_STATES
-        and raw["policy"].get("mode") != "owner_approved"
-    ):
-        raise ContractError(
-            f"owner approval required: terminal issue state {change['state']}"
-        )
     return raw
 
 
@@ -4193,8 +4183,8 @@ def execute_command(
             or not resolved_state["id"].strip()
             or not isinstance(resolved_state.get("type"), str)
             or (
-                requested in OWNER_CONTROLLED_STATE_TYPES
-                and resolved_state["type"] != OWNER_CONTROLLED_STATE_TYPES[requested]
+                requested in TERMINAL_STATE_TYPES
+                and resolved_state["type"] != TERMINAL_STATE_TYPES[requested]
             )
         ):
             raise ContractError(
@@ -4215,114 +4205,8 @@ def execute_command(
 
         state_before = state_transition_snapshot(issue)
         after = {**state_before, "state": requested}
-        owner_terminal = (
-            requested in OWNER_CONTROLLED_STATES
-            and command["policy"].get("mode") == "owner_approved"
-        )
-        recovery_path = (
-            journal_path.with_name(journal_path.name + ".owner-states")
-            if owner_terminal and journal_path is not None
-            else None
-        )
-        recovery_entries = (
-            load_relation_recovery_journal(recovery_path)
-            if recovery_path is not None
-            else {}
-        )
-        recovery = recovery_entries.get(key_hash)
-
-        def terminal_state_hash(value: dict[str, Any]) -> str:
-            return hashlib.sha256(
-                json.dumps(
-                    value,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-            ).hexdigest()
-
-        before_hash = terminal_state_hash(state_before)
-        after_hash = terminal_state_hash(after)
-        exact_binding: dict[str, str] | None = None
-        if owner_terminal:
-            reference = command["policy"]["approval"]
-            exact_binding = {
-                "approval_checksum": reference["checksum"],
-                "intent_hash": reference["intent_hash"],
-                "command_hash": hashlib.sha256(
-                    json.dumps(
-                        command,
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ).encode("utf-8")
-                ).hexdigest(),
-            }
-            if recovery is not None and (
-                recovery["request_hash"] != request_hash
-                or any(
-                    recovery[field] != value
-                    for field, value in exact_binding.items()
-                )
-            ):
-                raise ContractError("owner-approved state recovery request conflict")
-
-        def terminal_recovery_evidence(entry: dict[str, str]) -> dict[str, str]:
-            if exact_binding is None:
-                raise ContractError("owner-approved state recovery binding is missing")
-            return {
-                "schema_version": "linear-owner-recovery.v1",
-                **exact_binding,
-                "before_state_hash": entry["before_state_hash"],
-                "after_state_hash": entry["after_state_hash"],
-                "phase": entry["phase"],
-            }
-
-        def record_terminal_recovery(phase: str) -> dict[str, str] | None:
-            if recovery_path is None or mode != "apply":
-                return None
-            if exact_binding is None:
-                raise ContractError("owner-approved state recovery binding is missing")
-            entry = {
-                "request_hash": request_hash,
-                **exact_binding,
-                "before_state_hash": (
-                    recovery["before_state_hash"] if recovery is not None else before_hash
-                ),
-                "after_state_hash": (
-                    recovery["after_state_hash"] if recovery is not None else after_hash
-                ),
-                "phase": phase,
-            }
-            recovery_entries[key_hash] = entry
-            write_relation_recovery_journal(recovery_path, recovery_entries)
-            return entry
-
-        if recovery is not None:
-            if before_hash == recovery["after_state_hash"]:
-                completed = (
-                    record_terminal_recovery("completed")
-                    if mode == "apply"
-                    else recovery
-                )
-                if completed is None:
-                    raise ContractError("owner-approved state recovery evidence is missing")
-                return {
-                    **base,
-                    "result": "no_op",
-                    "before": state_before,
-                    "after": state_before,
-                    "plan": [],
-                    "no_op": True,
-                    "verified": True,
-                    "recovered": True,
-                    "recovery_evidence": terminal_recovery_evidence(completed),
-                }
-            if before_hash != recovery["before_state_hash"]:
-                raise ContractError("owner-approved state recovery state drifted")
         if state_before["state"] == requested:
-            completed = record_terminal_recovery("completed")
-            result = {
+            return finish({
                 **base,
                 "result": "no_op",
                 "before": state_before,
@@ -4330,10 +4214,7 @@ def execute_command(
                 "plan": [],
                 "no_op": True,
                 "verified": True,
-            }
-            if completed is not None:
-                result["recovery_evidence"] = terminal_recovery_evidence(completed)
-            return finish(result)
+            })
         plan = [
             {
                 "action": "change_state",
@@ -4351,7 +4232,6 @@ def execute_command(
                 "no_op": False,
                 "verified": False,
             }
-        record_terminal_recovery("prepared")
         client.update_issue_state(issue["id"], resolved_state["id"])
         verified_issue = client.get_issue(identifier)
         verified_state = (
@@ -4375,8 +4255,7 @@ def execute_command(
             if field != "state"
         ) or any(field not in issue for field in verified_issue if field != "state"):
             raise ContractError("state read-back changed unmanaged fields")
-        completed = record_terminal_recovery("completed")
-        result = {
+        return finish({
             **base,
             "result": "applied",
             "before": state_before,
@@ -4384,10 +4263,7 @@ def execute_command(
             "plan": plan,
             "no_op": False,
             "verified": True,
-        }
-        if completed is not None:
-            result["recovery_evidence"] = terminal_recovery_evidence(completed)
-        return finish(result)
+        })
     if command["operation"] == "add_comment":
         body = command["change"]["body"]
         body_hash = hashlib.sha256(body.encode()).hexdigest()

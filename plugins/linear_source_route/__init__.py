@@ -518,27 +518,7 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                             {"required": ["issue_number"]},
                         ]
                     },
-                    {
-                        "oneOf": [
-                            {
-                                "properties": {
-                                    "state": {
-                                        "enum": [
-                                            "Backlog", "Todo", "Research",
-                                            "In Progress", "In Review",
-                                        ]
-                                    }
-                                },
-                                "not": {"required": ["approval"]},
-                            },
-                            {
-                                "required": ["approval"],
-                                "properties": {
-                                    "state": {"enum": ["Done", "Canceled", "Duplicate"]}
-                                },
-                            },
-                        ]
-                    },
+                    {"not": {"required": ["approval"]}},
                 ],
             },
             {
@@ -1658,7 +1638,7 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
             and "state" in args
             and bool(set(args) & {"identifier", "issue_number"})
             and set(args).issubset(
-                {"operation", "identifier", "issue_number", "state", "approval"}
+                {"operation", "identifier", "issue_number", "state"}
             )
         ):
             request = dict(args)

@@ -1,7 +1,7 @@
 ---
 name: linear-source-request-routing
 description: Route Linear reads/writes through broker and Project Manager.
-version: 1.3.1
+version: 1.3.2
 author: Alexey Petrov, Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -18,7 +18,7 @@ Use the typed Project Manager lane for every Linear read, creation, or mutation.
 ## Supported requests
 
 - Add one bounded comment to an exact uppercase `SIS-N` issue.
-- Change one exact `SIS-N` issue, or one positive issue number in the single `SIS` team, to `Backlog`, `Todo`, `Research`, `In Progress`, or `In Review` under standard policy, or to exactly `Done`, `Canceled`, or `Duplicate` with the fixed owner approval reference.
+- Change one exact `SIS-N` issue, or one positive issue number in the single `SIS` team, from any current state to any of `Backlog`, `Todo`, `Research`, `In Progress`, `In Review`, `Done`, `Canceled`, or `Duplicate` under standard policy.
 - Update one exact `SIS-N` issue, or one positive issue number in the single `SIS` team, with any non-empty bounded managed-field subset, including deterministic link removal.
 - Create one bounded issue in the `SIS` team under one exact uppercase `SIS-N` parent, with bounded title/description, safe state, and High/Medium/Low priority.
 - Converge one bounded create-only `SIS` hierarchy: one exact project, one milestone, and one top-level issue, with optional descriptions and a safe issue state.
@@ -33,7 +33,7 @@ Use the typed Project Manager lane for every Linear read, creation, or mutation.
 - With the same exact approval reference, archive one exact issue (`{identifier:SIS-N}`), unique SIS-scoped project (`{name}`), or unique initiative (`{name}`); delete/trash one exact issue, project, project milestone (`{project,name}`), or initiative. Nonempty impact is permitted only when the owner-approved before hash binds the deterministic complete affected-entity inventory/counts and the immediate live re-plan is identical. Milestone archive is the only core matrix cell unavailable because the authenticated schema exposes no such mutation.
 - Route `bulk_linear_operations` with an ordered 1–50 `items` list. Each item is exactly `{operation,target,change}` in an already-supported mutating lane shape. Never add child approval/policy/IDs. Supply no parent approval when every child is standard-safe; if any child is owner-controlled, supply exactly one parent `approval` binding the full ordered intent and aggregate preflight.
 
-Do not use this path for fuzzy/missing mutation targets, server-side/raw search passthrough, nested/unbounded bulk or bulk selectors, arbitrary terminal names, nonterminal owner approval, standalone initiative unlink, account/team destruction, milestone archive, permanent issue deletion, caller-selected cascade, initiative reparenting, arbitrary teams, other structural changes, or per-task Telegram topics. Owner approval authorizes only the exact ordered intent and complete aggregate before/impact state.
+Do not use this path for fuzzy/missing mutation targets, server-side/raw search passthrough, nested/unbounded bulk or bulk selectors, arbitrary state names, owner approval on a state transition, standalone initiative unlink, account/team destruction, milestone archive, permanent issue deletion, caller-selected cascade, initiative reparenting, arbitrary teams, other structural changes, or per-task Telegram topics. Owner approval authorizes only the exact ordered intent and complete aggregate before/impact state.
 
 ## Semantic resolution and composed outcomes
 
@@ -77,7 +77,7 @@ If authoritative mutation-scoped provenance identifies one exact compatible resu
    - ask only when there is no task number, more than one plausible task number, or the number belongs to unrelated prose rather than a task reference.
 2. Call `linear_source_request` once with the matching bounded shape:
    - comment: `request=<exact supported comment text>`;
-   - state: `operation=change_state`, exactly one of exact `identifier` or positive `issue_number`, and exact `state`; for exactly `Done`, `Canceled`, or `Duplicate`, also supply the existing exact fixed `approval` object. Never attach approval to a nonterminal state;
+   - state: `operation=change_state`, exactly one of exact `identifier` or positive `issue_number`, and one exact supported `state`. Never attach approval to a state transition;
    - issue fields: `operation=update_issue`, exactly one of exact `identifier` or positive `issue_number`, and a bounded managed-field subset. A standard top-level parent attach uses exact `parent_identifier`. Parent replacement or clear must contain only `parent_identifier` (exact `SIS-N` or `null`) plus the exact fixed `approval` reference;
    - when the owner says to remove links from the description, use `description_transform=remove_links`; this preserves visible text (including Markdown labels) and removes HTTP(S) destinations. Do not ask whether to clear the whole description unless the owner explicitly asked to clear it;
    - create: `operation=create_issue`, bounded `title`, `description`, exact `parent_identifier`, safe `state`, and bounded `priority`.

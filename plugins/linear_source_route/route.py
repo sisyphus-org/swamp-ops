@@ -30,7 +30,7 @@ CREDENTIAL_SHAPES = (
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
 )
 SAFE_STATES = {"Backlog", "Todo", "Research", "In Progress", "In Review"}
-OWNER_CONTROLLED_STATES = {"Done", "Canceled", "Duplicate"}
+TERMINAL_STATES = {"Done", "Canceled", "Duplicate"}
 RESERVED_MARKER = "<!-- linear-command"
 MAX_HIERARCHY_BYTES = 24_576
 MAX_ISSUE_TREE_BYTES = 65_536
@@ -484,7 +484,7 @@ def _validate_canonical_bulk_item(item: dict[str, Any], index: int) -> None:
             raise RouteError(f"bulk item {index} has an invalid lifecycle selector")
         return
     if operation == "change_state":
-        if set(change) != {"state"} or change.get("state") not in SAFE_STATES | OWNER_CONTROLLED_STATES:
+        if set(change) != {"state"} or change.get("state") not in SAFE_STATES | TERMINAL_STATES:
             raise RouteError(f"bulk item {index} has an invalid state change")
     elif operation == "update_issue":
         reconstructed = {"operation": operation, "identifier": target["identifier"], **change}
@@ -670,8 +670,8 @@ def _validate_bulk_request(
         semantic.add(digest)
         targets.add(target_digest)
         owner_required = owner_required or operation in BULK_OWNER_OPERATIONS or (
-            operation == "change_state" and change.get("state") in OWNER_CONTROLLED_STATES
-        ) or (operation == "update_issue" and set(change) == {"parent_identifier"})
+            operation == "update_issue" and set(change) == {"parent_identifier"}
+        )
         validated.append(dict(item))
     approval = (
         _validate_approval_reference(request["approval"])
@@ -738,14 +738,10 @@ def parse_linear_request(
             identifier = _issue_identifier(request)
             target_field = "identifier" if "identifier" in request else "issue_number"
             expected_fields = {"operation", target_field, "state"}
-            if state in OWNER_CONTROLLED_STATES:
-                expected_fields.add("approval")
             if set(request) != expected_fields:
                 raise RouteError("structured state request has invalid fields")
-            if state not in SAFE_STATES and state not in OWNER_CONTROLLED_STATES:
+            if state not in SAFE_STATES and state not in TERMINAL_STATES:
                 raise RouteError("state is not in the safe-state allowlist")
-            if state in OWNER_CONTROLLED_STATES:
-                approval_reference = _validate_approval_reference(request["approval"])
             target = {"type": "issue", "identifier": identifier}
             change = {"state": state}
         elif operation == "update_issue":
