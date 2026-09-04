@@ -1,0 +1,59 @@
+id: 87f743cb-71dc-40e4-a0df-93a204588314
+name: google-calendar-write-apply
+description: Verify exact plan and approval provenance, then create, update, or delete one primary-calendar event with exact read-back.
+tags:
+  domain: hermes-platform
+  integration: google-calendar
+  safety: verified-approval-write
+  owner: personal-assistant
+inputs:
+  type: object
+  properties:
+    planRunId:
+      type: string
+      pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    planArtifactVersion:
+      type: integer
+      minimum: 1
+    planChecksum:
+      type: string
+      pattern: "^[0-9a-f]{64}$"
+    approvalRunId:
+      type: string
+      pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    approvalArtifactVersion:
+      type: integer
+      minimum: 1
+    approvalChecksum:
+      type: string
+      pattern: "^[0-9a-f]{64}$"
+  required: [planRunId, planArtifactVersion, planChecksum, approvalRunId, approvalArtifactVersion, approvalChecksum]
+  additionalProperties: false
+jobs:
+  - name: apply
+    steps:
+      - name: verify-approval-apply-and-read-back
+        task:
+          type: model_method
+          modelIdOrName: google-calendar-write
+          methodName: execute
+          inputs:
+            run: >-
+              /Users/hermes/.hermes/hermes-agent/venv/bin/python scripts/google_calendar_write.py
+              --mode apply
+              --plan-run-id '${{ inputs.planRunId }}'
+              --plan-artifact-version '${{ inputs.planArtifactVersion }}'
+              --plan-checksum '${{ inputs.planChecksum }}'
+              --approval-run-id '${{ inputs.approvalRunId }}'
+              --approval-artifact-version '${{ inputs.approvalArtifactVersion }}'
+              --approval-checksum '${{ inputs.approvalChecksum }}'
+              --profile personal-assistant
+            workingDir: .
+            timeout: 60000
+            ignoreExitCode: false
+        dependsOn: []
+        weight: 1
+        allowFailure: false
+    dependsOn: []
+    weight: 1
+version: 1

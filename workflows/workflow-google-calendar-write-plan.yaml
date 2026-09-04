@@ -1,0 +1,70 @@
+id: 87bb8fb0-a665-4496-8228-d889aac1d473
+name: google-calendar-write-plan
+description: Build a read-only checksum-bound create, update, or delete plan for one Linear-linked primary-calendar block.
+tags:
+  domain: hermes-platform
+  integration: google-calendar
+  safety: read-only-plan
+  owner: personal-assistant
+inputs:
+  type: object
+  properties:
+    operation:
+      type: string
+      enum: [create, update, delete]
+      default: create
+    blockKey:
+      type: string
+      maxLength: 64
+      pattern: "^[a-z0-9]+(-[a-z0-9]+)*$"
+      default: primary
+    summary:
+      type: string
+      maxLength: 200
+      pattern: "^[^'\\r\\n]*$"
+      default: ""
+    start:
+      type: string
+      pattern: "^$|^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(:[0-9]{2})?$"
+      default: ""
+    end:
+      type: string
+      pattern: "^$|^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(:[0-9]{2})?$"
+      default: ""
+    linearUrl:
+      type: string
+      pattern: "^https://linear\\.app/[A-Za-z0-9_-]+/issue/SIS-[1-9][0-9]*/[A-Za-z0-9][A-Za-z0-9_-]*$"
+    details:
+      type: string
+      maxLength: 4000
+      pattern: "^[^'\\r\\n]*$"
+      default: ""
+  required: [operation, blockKey, summary, start, end, linearUrl, details]
+  additionalProperties: false
+jobs:
+  - name: plan
+    steps:
+      - name: build-plan
+        task:
+          type: model_method
+          modelIdOrName: google-calendar-write
+          methodName: execute
+          inputs:
+            run: >-
+              /Users/hermes/.hermes/hermes-agent/venv/bin/python scripts/google_calendar_write.py
+              --mode plan
+              --operation '${{ inputs.operation }}'
+              --block-key '${{ inputs.blockKey }}'
+              --summary '${{ inputs.summary }}'
+              --start '${{ inputs.start }}'
+              --end '${{ inputs.end }}'
+              --linear-url '${{ inputs.linearUrl }}'
+              --details '${{ inputs.details }}'
+              --profile personal-assistant
+            workingDir: .
+            timeout: 60000
+            ignoreExitCode: false
+        dependsOn: []
+        weight: 1
+        allowFailure: false
+version: 1
