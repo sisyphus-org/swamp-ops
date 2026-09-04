@@ -19,6 +19,7 @@ import hashlib
 import json
 import os
 import sys
+import tempfile
 from datetime import datetime, timedelta, date, timezone
 from enum import Enum
 from pathlib import Path
@@ -79,14 +80,14 @@ def _format_dt(dt: Any) -> str:
     if not dt:
         return ""
     if "T" in dt:  # timed
-        val = datetime.fromisoformat(dt.rstrip("Z").replace("Z", "+00:00"))
+        val = datetime.fromisoformat(dt[:-1] + "+00:00" if dt.endswith("Z") else dt)
         return val.astimezone(KYIV).isoformat()
     else:  # date-only (all-day)
         d = date.fromisoformat(dt)
         return d.isoformat()
 
 
-def normalize_event(raw: dict) -> dict:
+def normalize_event(raw: dict, *, include_summary: bool = False) -> dict:
     """Normalize a raw API event into a compact, timezone-safe form.
 
     No PII such as title, location, description, or calendar ID is included
@@ -95,8 +96,8 @@ def normalize_event(raw: dict) -> dict:
     start = raw.get("start", {}) or {}
     end = raw.get("end", {}) or {}
     out: dict[str, Any] = {
-        "id": raw.get("id", ""),
-        "summary": "",
+        "id": raw.get("id", "") if include_summary else "",
+        "summary": raw.get("summary", "") if include_summary else "",
         "start": _format_dt(start.get("dateTime") or start.get("date")),
         "end": _format_dt(end.get("dateTime") or end.get("date")),
         "all_day": "date" in start,
@@ -138,7 +139,10 @@ def list_events_paginated(service, calendar_id: str, time_min: datetime, time_ma
 
 def query_freebusy(service, time_min: datetime, time_max: datetime, calendar_ids: list[str] | None = None) -> dict:
     """Return free/busy info for calendar_ids (defaults to READ_CALENDAR_IDS)."""
-    items = [{"id": cid} for cid in (calendar_ids or list(READ_CALENDAR_IDS))]
+    selected = calendar_ids or list(READ_CALENDAR_IDS)
+    if any(cid not in READ_CALENDAR_IDS for cid in selected):
+        raise PermissionError("free/busy calendar is not in the read allowlist")
+    items = [{"id": cid} for cid in selected]
     body = {
         "timeMin": time_min.isoformat(),
         "timeMax": time_max.isoformat(),
@@ -228,10 +232,7 @@ def run_read(operation: str, window: str, *, service=None, profile: str = "perso
         if primary is None:
             raise RuntimeError("primary calendar not found")
         raw_events = list(list_events_paginated(service, "primary", start, end))
-        events = [normalize_event(e) for e in raw_events]
-        if include_summary:
-            for e in events:
-                e["summary"] = ""  # default redacts summary
+        events = [normalize_event(e, include_summary=include_summary) for e in raw_events]
         result = {
             "operation": "events",
             "status": "ok",
@@ -276,13 +277,25 @@ def _output_path(profile: str = "personal-assistant") -> Path:
 def _write_atomic_payload(result: dict, profile: str = "personal-assistant") -> None:
     """Atomically write the detailed (but redacted) payload to 0600 file."""
     out = _output_path(profile)
-    tmp = out.with_suffix(".tmp")
     redacted = dict(result)
-    # The events payload already excludes titles; keep structure.
-    tmp.write_text(json.dumps(redacted, default=str, indent=2, sort_keys=True))
-    os.chmod(tmp, 0o600)
-    tmp.replace(out)
-    os.chmod(out, 0o600)
+    # The events payload already excludes titles unless include_summary was explicit.
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{out.name}.", suffix=".tmp", dir=out.parent
+    )
+    tmp = Path(tmp_name)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w") as handle:
+            json.dump(redacted, handle, default=str, indent=2, sort_keys=True)
+        tmp.replace(out)
+        os.chmod(out, 0o600)
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def _emit_sanitized_stdout(result: dict) -> None:

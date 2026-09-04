@@ -398,7 +398,11 @@ def main() -> int:
         "telegram": {
             "enabledAtBootstrap": False,
             "preparedForOwnerToken": telegram_prepared,
-            "explicitlyDisabled": args.role in {"broker", "project-manager"},
+            "explicitlyDisabled": args.role in {
+                "broker",
+                "personal-assistant",
+                "project-manager",
+            },
         },
         "telegramAllowlist": {
             "sharedSource": str(SHARED_ENV) if telegram_prepared else None,
