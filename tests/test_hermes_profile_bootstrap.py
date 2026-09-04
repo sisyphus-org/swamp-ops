@@ -241,6 +241,15 @@ class BootstrapContractTests(unittest.TestCase):
             {item["name"] for item in payload["requiredProfileEnv"]},
             {"LINEAR_TOKEN"},
         )
+        self.assertEqual(
+            payload["verificationGates"],
+            [
+                "run config check and a real model response",
+                "run a real Russian STT transcription",
+                "verify profile-local LINEAR_TOKEN presence without exposing its value",
+                "verify a real Project Manager Linear read with exact read-back",
+            ],
+        )
         self.assertFalse(profile_dir.exists())
 
     def test_broker_plan_requires_no_shared_or_profile_secrets(self):

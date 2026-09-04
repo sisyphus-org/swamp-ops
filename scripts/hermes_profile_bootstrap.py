@@ -435,6 +435,13 @@ def main() -> int:
                 "verify preview, same-session approval, apply read-back, replay, and cleanup",
             ]
             if calendar_worker_enabled
+            else [
+                "run config check and a real model response",
+                "run a real Russian STT transcription",
+                "verify profile-local LINEAR_TOKEN presence without exposing its value",
+                "verify a real Project Manager Linear read with exact read-back",
+            ]
+            if linear_enabled
             else []
         ),
         "telegram": {
