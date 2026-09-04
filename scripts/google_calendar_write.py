@@ -494,13 +494,13 @@ def _get_event(service: Any, event_id: str) -> dict[str, Any] | None:
             return None
         raise CalendarWriteError("Calendar event lookup failed") from None
     if isinstance(payload, dict) and payload:
-        if payload.get("status") == "cancelled":
-            return None
         return payload
     raise CalendarWriteError("Calendar event lookup returned malformed payload")
 
 
 def _verify_event(actual: dict[str, Any], expected: dict[str, Any]) -> None:
+    if actual.get("status") == "cancelled":
+        raise CalendarWriteError("Calendar read-back is cancelled")
     for field in ("summary", "description"):
         if actual.get(field) != expected.get(field):
             raise CalendarWriteError(f"Calendar read-back mismatch for {field}")
@@ -604,7 +604,7 @@ def apply_plan(
     existing = _get_event(service, event_id)
 
     if operation == "delete":
-        if existing is None:
+        if existing is None or existing.get("status") == "cancelled":
             return _sanitized_result(
                 operation=operation, identifier=identifier, block_key=block_key, reused=True
             )
@@ -618,7 +618,8 @@ def apply_plan(
             ).execute()
         except Exception:
             pass
-        if _get_event(service, event_id) is not None:
+        remaining = _get_event(service, event_id)
+        if remaining is not None and remaining.get("status") != "cancelled":
             raise CalendarWriteError("Calendar delete outcome is ambiguous and event remains")
         return _sanitized_result(
             operation=operation, identifier=identifier, block_key=block_key, reused=False
@@ -629,7 +630,7 @@ def apply_plan(
     body["id"] = event_id
 
     if operation == "update":
-        if existing is None:
+        if existing is None or existing.get("status") == "cancelled":
             raise CalendarWriteError("Calendar update target does not exist")
         if not _is_exact_linear_link(existing.get("description"), canonical_url):
             raise CalendarWriteError("Calendar target is linked to a different Linear issue")
@@ -656,6 +657,27 @@ def apply_plan(
             reused = True
         return _sanitized_result(
             operation=operation, identifier=identifier, block_key=block_key, reused=reused
+        )
+
+    if existing is not None and existing.get("status") == "cancelled":
+        if not _is_exact_linear_link(existing.get("description"), canonical_url):
+            raise CalendarWriteError("Calendar target is linked to a different Linear issue")
+        restore_body = {**body, "status": "confirmed"}
+        try:
+            service.events().update(
+                calendarId=WRITE_CALENDAR_ID,
+                eventId=event_id,
+                body=restore_body,
+                sendUpdates="none",
+            ).execute()
+        except Exception:
+            pass
+        existing = _get_event(service, event_id)
+        if existing is None:
+            raise CalendarWriteError("Calendar restore outcome is ambiguous and event is absent")
+        _verify_event(existing, expected)
+        return _sanitized_result(
+            operation=operation, identifier=identifier, block_key=block_key, reused=False
         )
 
     reused = existing is not None

@@ -635,9 +635,32 @@ class ApplyTests(unittest.TestCase):
                 self.assertEqual(len(events.update_calls), 1)
                 self.assertGreaterEqual(len(events.get_calls), 2)
 
-    def test_cancelled_google_tombstone_is_verified_absence(self):
-        events = ScriptedEvents(get_script=[{"status": "cancelled"}])
-        self.assertIsNone(gcw._get_event(FakeService(events), self.plan["eventId"]))
+    def test_cancelled_google_tombstone_remains_visible_to_operation_logic(self):
+        tombstone = {**self.plan["event"], "id": self.plan["eventId"], "status": "cancelled"}
+        events = ScriptedEvents(get_script=[tombstone])
+        self.assertEqual(
+            gcw._get_event(FakeService(events), self.plan["eventId"]),
+            tombstone,
+        )
+
+    def test_create_replay_restores_linked_cancelled_tombstone(self):
+        events = FakeEvents()
+        events.created = {
+            **self.plan["event"],
+            "id": self.plan["eventId"],
+            "status": "cancelled",
+        }
+        result = gcw.apply_plan(
+            self.plan,
+            approved_checksum=self.plan["checksum"],
+            service=FakeService(events),
+            authorization=self.authorization,
+        )
+        self.assertEqual(len(events.insert_calls), 0)
+        self.assertEqual(len(events.update_calls), 1)
+        self.assertEqual(events.update_calls[0]["body"]["status"], "confirmed")
+        self.assertEqual(result["status"], "verified")
+        self.assertFalse(result["reused"])
 
     def test_delete_verifies_absence_then_replays_as_no_op(self):
         service = FakeService()
