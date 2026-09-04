@@ -1920,7 +1920,7 @@ def handle_calendar_source_request(args: dict[str, Any], **kwargs: Any) -> str:
             ensure_ascii=False,
             sort_keys=True,
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 - fail closed at the public plugin boundary
         return json.dumps(
             {
                 "status": "rejected",

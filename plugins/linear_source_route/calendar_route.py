@@ -103,13 +103,16 @@ def _write_request(request: dict[str, Any]) -> dict[str, Any]:
         if any((summary, start, end, details)):
             raise CalendarRouteError("delete requires empty event fields")
     else:
+        parsed_boundaries: dict[str, datetime] = {}
         for field, value in (("start", start), ("end", end)):
             if LOCAL_DATETIME.fullmatch(value) is None:
                 raise CalendarRouteError(f"{field} must be a local ISO datetime")
             try:
-                datetime.fromisoformat(value)
+                parsed_boundaries[field] = datetime.fromisoformat(value)
             except ValueError as exc:
                 raise CalendarRouteError(f"{field} must be a valid datetime") from exc
+        if parsed_boundaries["end"] <= parsed_boundaries["start"]:
+            raise CalendarRouteError("end must be after start")
     return dict(request)
 
 

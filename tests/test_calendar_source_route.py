@@ -47,6 +47,22 @@ class CalendarCommandTests(unittest.TestCase):
         self.assertEqual(command["request"], request)
         self.assertEqual(command["source_profile"], "books")
 
+    def test_write_request_rejects_non_positive_interval_before_queueing(self):
+        for end in ("2026-09-07T10:00", "2026-09-07T09:59"):
+            with self.subTest(end=end), self.assertRaisesRegex(
+                calendar_route.CalendarRouteError, "end must be after start"
+            ):
+                calendar_route.parse_calendar_request(
+                    {
+                        "operation": "create", "block_key": "primary",
+                        "summary": "Review SIS-123", "start": "2026-09-07T10:00",
+                        "end": end,
+                        "linear_url": "https://linear.app/sisyphusx/issue/SIS-123/calendar-routing",
+                        "details": "",
+                    },
+                    source_profile="default",
+                )
+
     def test_unbounded_or_credential_shaped_requests_fail_closed(self):
         invalid = (
             {"operation": "events", "window": "custom"},
