@@ -635,6 +635,10 @@ class ApplyTests(unittest.TestCase):
                 self.assertEqual(len(events.update_calls), 1)
                 self.assertGreaterEqual(len(events.get_calls), 2)
 
+    def test_cancelled_google_tombstone_is_verified_absence(self):
+        events = ScriptedEvents(get_script=[{"status": "cancelled"}])
+        self.assertIsNone(gcw._get_event(FakeService(events), self.plan["eventId"]))
+
     def test_delete_verifies_absence_then_replays_as_no_op(self):
         service = FakeService()
         gcw.apply_plan(
@@ -867,6 +871,21 @@ class ApplyTests(unittest.TestCase):
         self.assertEqual(result["status"], "verified")
         self.assertTrue(result["reused"])
         self.assertEqual(len(events.insert_calls), 1)
+
+    def test_provider_kyiv_alias_and_offset_normalization_preserves_exact_instant(self):
+        expected = {
+            "summary": "SIS-84 Calendar E2E",
+            "description": f"Linear: {LINEAR_URL}",
+            "start": {"dateTime": "2026-09-07T10:00:00+03:00", "timeZone": "Europe/Kyiv"},
+            "end": {"dateTime": "2026-09-07T10:30:00+03:00", "timeZone": "Europe/Kyiv"},
+        }
+        observed = {
+            "summary": "SIS-84 Calendar E2E",
+            "description": f"Linear: {LINEAR_URL}",
+            "start": {"dateTime": "2026-09-07T09:00:00+02:00", "timeZone": "Europe/Kiev"},
+            "end": {"dateTime": "2026-09-07T09:30:00+02:00", "timeZone": "Europe/Kiev"},
+        }
+        gcw._verify_event(observed, expected)
 
     def test_each_read_back_field_mismatch_fails_closed(self):
         for field in ("summary", "description", "start", "end"):

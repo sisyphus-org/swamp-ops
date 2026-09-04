@@ -494,13 +494,41 @@ def _get_event(service: Any, event_id: str) -> dict[str, Any] | None:
             return None
         raise CalendarWriteError("Calendar event lookup failed") from None
     if isinstance(payload, dict) and payload:
+        if payload.get("status") == "cancelled":
+            return None
         return payload
     raise CalendarWriteError("Calendar event lookup returned malformed payload")
 
 
 def _verify_event(actual: dict[str, Any], expected: dict[str, Any]) -> None:
-    for field in ("summary", "description", "start", "end"):
+    for field in ("summary", "description"):
         if actual.get(field) != expected.get(field):
+            raise CalendarWriteError(f"Calendar read-back mismatch for {field}")
+    for field in ("start", "end"):
+        observed = actual.get(field)
+        desired = expected.get(field)
+        if observed == desired:
+            continue
+        if (
+            not isinstance(observed, dict)
+            or not isinstance(desired, dict)
+            or set(observed) != {"dateTime", "timeZone"}
+            or set(desired) != {"dateTime", "timeZone"}
+            or desired.get("timeZone") != "Europe/Kyiv"
+            or observed.get("timeZone") not in {"Europe/Kyiv", "Europe/Kiev"}
+        ):
+            raise CalendarWriteError(f"Calendar read-back mismatch for {field}")
+        try:
+            observed_instant = datetime.fromisoformat(observed["dateTime"])
+            desired_instant = datetime.fromisoformat(desired["dateTime"])
+        except (KeyError, TypeError, ValueError):
+            raise CalendarWriteError(f"Calendar read-back mismatch for {field}") from None
+        if (
+            observed_instant.tzinfo is None
+            or desired_instant.tzinfo is None
+            or observed_instant.astimezone(timezone.utc)
+            != desired_instant.astimezone(timezone.utc)
+        ):
             raise CalendarWriteError(f"Calendar read-back mismatch for {field}")
 
 
