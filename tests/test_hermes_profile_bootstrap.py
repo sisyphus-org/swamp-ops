@@ -78,7 +78,7 @@ class BootstrapContractTests(unittest.TestCase):
         self.assertEqual(parsed["plugins"]["enabled"], ["personal-assistant-calendar"])
         self.assertNotIn("LINEAR_TOKEN", rendered)
 
-        profile = "pa-contract-test"
+        profile = "personal-assistant"
         old_argv = sys.argv
         old_root = bootstrap.HERMES_ROOT
         try:
@@ -103,6 +103,24 @@ class BootstrapContractTests(unittest.TestCase):
         self.assertTrue(payload["calendarRouting"]["enabled"])
         self.assertEqual(payload["calendarRouting"]["workerProfile"], "personal-assistant")
         self.assertFalse(payload["calendarRouting"]["directLinearAccessAvailable"])
+
+    def test_personal_assistant_role_rejects_noncanonical_profile_name(self):
+        old_argv = sys.argv
+        old_root = bootstrap.HERMES_ROOT
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                bootstrap.HERMES_ROOT = Path(tmp) / "profiles"
+                sys.argv = [
+                    str(SCRIPT), "--profile", "pa-fixture",
+                    "--role", "personal-assistant", "--mode", "plan",
+                ]
+                with contextlib.redirect_stdout(io.StringIO()) as output:
+                    self.assertEqual(bootstrap.main(), 1)
+                payload = json.loads(output.getvalue())
+        finally:
+            bootstrap.HERMES_ROOT = old_root
+            sys.argv = old_argv
+        self.assertIn("canonical profile name", payload["issues"][0])
 
     def test_general_source_plan_exposes_calendar_route_without_google_credentials(self):
         rendered = bootstrap.render_config(
@@ -408,11 +426,11 @@ class BootstrapContractTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmp:
                 bootstrap.HERMES_ROOT = Path(tmp) / "profiles"
                 sys.argv = [
-                    str(SCRIPT), "--profile", "pa-fixture", "--role", "personal-assistant", "--mode", "apply"
+                    str(SCRIPT), "--profile", "personal-assistant", "--role", "personal-assistant", "--mode", "apply"
                 ]
                 with contextlib.redirect_stdout(io.StringIO()) as output:
                     self.assertEqual(bootstrap.main(), 0)
-                profile = bootstrap.HERMES_ROOT / "pa-fixture"
+                profile = bootstrap.HERMES_ROOT / "personal-assistant"
                 self.assertTrue((profile / "plugins" / "personal_assistant_calendar" / "plugin.yaml").is_file())
                 self.assertTrue((profile / "skills" / "personal-assistant-calendar-worker" / "SKILL.md").is_file())
                 self.assertFalse((profile / ".env").exists())

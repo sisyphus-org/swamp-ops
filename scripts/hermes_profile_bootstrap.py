@@ -294,6 +294,11 @@ def main() -> int:
             [f"profile name '{name}' must match [a-z][a-z0-9-]{{1,30}}"],
             args.mode,
         )
+    if args.role == "personal-assistant" and name != "personal-assistant":
+        return fail(
+            ["personal-assistant role requires canonical profile name 'personal-assistant'"],
+            args.mode,
+        )
 
     try:
         provider, default_model = parse_model(args.model)

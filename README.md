@@ -23,7 +23,7 @@ Role baselines fail closed:
 
 - `general`: universal Linear plus Calendar source-routing plugin/skills enabled, Telegram allowlist-only shared fallback, and no Linear MCP, `LINEAR_TOKEN`, Google client, or Google OAuth injection.
 - `broker`: Telegram explicitly disabled, dispatcher left disabled for the separate cutover slice, and no Linear MCP, Google client, or shared secret helper.
-- `personal-assistant`: headless Calendar worker plugin/skill enabled; existing profile-local Google OAuth is not copied by bootstrap, and Linear MCP/client/credentials are absent.
+- `personal-assistant`: headless Calendar worker plugin/skill enabled; existing profile-local Google OAuth is not copied by bootstrap, and Linear MCP/client/credentials are absent. This role is accepted only for the canonical profile name `personal-assistant`, matching task assignment and runtime attestation paths.
 - `project-manager`: Linear MCP enabled through the profile-local `LINEAR_TOKEN`; Telegram explicitly disabled.
 
 The plan reports role-specific required variables and dedicated Gateway safe roots. Secrets, Telegram tokens, model authentication, LaunchDaemon installation, and gateway service starts remain manual/approval-gated. Profile `.env` files are never created or copied by the workflow.
