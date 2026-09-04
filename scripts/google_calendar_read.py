@@ -96,7 +96,7 @@ def normalize_event(raw: dict, *, include_summary: bool = False) -> dict:
     start = raw.get("start", {}) or {}
     end = raw.get("end", {}) or {}
     out: dict[str, Any] = {
-        "id": raw.get("id", ""),
+        "id": raw.get("id", "") if include_summary else "",
         "summary": raw.get("summary", "") if include_summary else "",
         "start": _format_dt(start.get("dateTime") or start.get("date")),
         "end": _format_dt(end.get("dateTime") or end.get("date")),

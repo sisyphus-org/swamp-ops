@@ -70,7 +70,7 @@ class NormalizeEventTests(unittest.TestCase):
             "status": "confirmed",
         }
         n = gcr.normalize_event(raw)
-        self.assertEqual(n["id"], "evt1")
+        self.assertEqual(n["id"], "")
         self.assertFalse(n["all_day"])
         self.assertFalse(n["recurring"])
         self.assertEqual(n["status"], "confirmed")
@@ -260,6 +260,7 @@ class RunReadTests(unittest.TestCase):
         with mock.patch.object(gcr, "_write_atomic_payload"), mock.patch.object(gcr, "_emit_sanitized_stdout"):
             result = gcr.run_read("events", "today", service=Service(), include_summary=True, live=True)
         self.assertEqual(result["events"][0]["summary"], "Private title")
+        self.assertEqual(result["events"][0]["id"], "evt")
 
 
 class SanitizationTests(unittest.TestCase):
@@ -301,7 +302,10 @@ class SanitizationTests(unittest.TestCase):
                 self.assertEqual(mode, 0o600)
                 data = json.loads(payload_path.read_text())
                 self.assertEqual(data["operation"], "smoke")
-                self.assertFalse(payload_path.with_suffix(".tmp").exists())
+                self.assertEqual(
+                    list(payload_path.parent.glob(f".{payload_path.name}.*.tmp")),
+                    [],
+                )
             finally:
                 del os.environ["HERMES_HOME"]
 

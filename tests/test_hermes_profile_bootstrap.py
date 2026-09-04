@@ -80,10 +80,10 @@ class BootstrapContractTests(unittest.TestCase):
 
         profile = "pa-contract-test"
         old_argv = sys.argv
-        old_root = getattr(bootstrap, "HERMES_ROOT")
+        old_root = bootstrap.HERMES_ROOT
         try:
             with tempfile.TemporaryDirectory() as tmp:
-                setattr(bootstrap, "HERMES_ROOT", Path(tmp))
+                bootstrap.HERMES_ROOT = Path(tmp)  # type: ignore[attr-defined]
                 sys.argv = [
                     str(SCRIPT),
                     "--profile",
@@ -97,7 +97,7 @@ class BootstrapContractTests(unittest.TestCase):
                     self.assertEqual(bootstrap.main(), 0)
                 payload = json.loads(output.getvalue())
         finally:
-            setattr(bootstrap, "HERMES_ROOT", old_root)
+            bootstrap.HERMES_ROOT = old_root  # type: ignore[attr-defined]
             sys.argv = old_argv
         self.assertTrue(payload["telegram"]["explicitlyDisabled"])
 
