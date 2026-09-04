@@ -24,6 +24,9 @@ WORKSPACES_ROOT = Path("/Users/hermes/workspaces")
 REPO_ROOT = Path(__file__).parents[1]
 SOURCE_PLUGIN = REPO_ROOT / "plugins" / "linear_source_route"
 SOURCE_SKILL = REPO_ROOT / "skills" / "linear-source-request-routing"
+CALENDAR_SOURCE_SKILL = REPO_ROOT / "skills" / "calendar-source-request-routing"
+PA_CALENDAR_PLUGIN = REPO_ROOT / "plugins" / "personal_assistant_calendar"
+PA_CALENDAR_SKILL = REPO_ROOT / "skills" / "personal-assistant-calendar-worker"
 HERMES_PYTHON = Path("/Users/hermes/.hermes/hermes-agent/venv/bin/python")
 DEFAULT_MODEL = "openai-codex/gpt-5.6-sol-900k"
 DEFAULT_WORKSPACE = WORKSPACES_ROOT
@@ -157,6 +160,14 @@ gateway:
 
 kanban:
   dispatch_in_gateway: false
+
+plugins:
+  enabled:
+    - personal-assistant-calendar
+  disabled: []
+  entries:
+    personal-assistant-calendar:
+      allow_tool_override: false
 """,
     "project-manager": """\
 gateway:
@@ -298,6 +309,8 @@ def main() -> int:
 
     linear_enabled = args.role == "project-manager"
     source_routing_enabled = args.role == "general"
+    calendar_worker_enabled = args.role == "personal-assistant"
+    calendar_source_enabled = args.role == "general"
     telegram_prepared = args.role == "general"
     profile_linear_present = env_has_key(profile_dir / ".env", "LINEAR_TOKEN")
     shared_telegram_allowlist_present = env_has_key(
@@ -343,7 +356,15 @@ def main() -> int:
             [
                 "restart the new profile Gateway after plugin installation",
                 "restart broker after the source toolset is installed",
-                "require PM read-back, exact-session wake, and literal replay gates",
+                "require PM and PA read-back, exact-session wake, and literal replay gates",
+            ]
+        )
+    if calendar_worker_enabled:
+        owner_steps.extend(
+            [
+                "verify the reviewed Calendar workflow revision before activation",
+                "restart only the Personal Assistant Gateway after plugin installation",
+                "run owner-gated preview, same-session approval, replay, and cleanup proof",
             ]
         )
     planned = {
@@ -383,16 +404,32 @@ def main() -> int:
             ),
             "directLinearMutationAvailable": False if source_routing_enabled else None,
         },
+        "calendarRouting": {
+            "enabled": calendar_source_enabled or calendar_worker_enabled,
+            "sourceToolPlugin": "linear-source-route" if calendar_source_enabled else None,
+            "sourceSkill": "calendar-source-request-routing" if calendar_source_enabled else None,
+            "workerPlugin": "personal-assistant-calendar" if calendar_worker_enabled else None,
+            "workerSkill": "personal-assistant-calendar-worker" if calendar_worker_enabled else None,
+            "workerProfile": "personal-assistant",
+            "dispatcherProfile": "broker",
+            "directGoogleAccessAvailable": calendar_worker_enabled,
+            "directLinearAccessAvailable": False,
+        },
         "verificationGates": (
             [
                 "run config check and a real model response",
                 "run a real Russian STT transcription",
-                "run Plugin Doctor and read back linear-source-route enabled",
+                "run Plugin Doctor and read back linear-source-route enabled with Calendar tool",
                 "restart the source Gateway, then restart broker",
-                "verify PM Linear mutation with exact read-back",
-                "verify exact-session wake and literal replay with no duplicate",
+                "verify specialist read-back, exact-session wake, and literal replay without duplicates",
             ]
             if source_routing_enabled
+            else [
+                "run Plugin Doctor and read back personal-assistant-calendar enabled",
+                "verify Calendar workflow revision and profile-local OAuth without copying credentials",
+                "verify preview, same-session approval, apply read-back, replay, and cleanup",
+            ]
+            if calendar_worker_enabled
             else []
         ),
         "telegram": {
@@ -459,6 +496,19 @@ def main() -> int:
         if source_routing_enabled:
             shutil.copytree(SOURCE_PLUGIN, profile_dir / "plugins" / SOURCE_PLUGIN.name)
             shutil.copytree(SOURCE_SKILL, profile_dir / "skills" / SOURCE_SKILL.name)
+            shutil.copytree(
+                CALENDAR_SOURCE_SKILL,
+                profile_dir / "skills" / CALENDAR_SOURCE_SKILL.name,
+            )
+        if calendar_worker_enabled:
+            shutil.copytree(
+                PA_CALENDAR_PLUGIN,
+                profile_dir / "plugins" / PA_CALENDAR_PLUGIN.name,
+            )
+            shutil.copytree(
+                PA_CALENDAR_SKILL,
+                profile_dir / "skills" / PA_CALENDAR_SKILL.name,
+            )
     except OSError as exc:
         if created:
             shutil.rmtree(profile_dir, ignore_errors=True)

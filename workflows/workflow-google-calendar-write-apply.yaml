@@ -27,7 +27,10 @@ inputs:
     approvalChecksum:
       type: string
       pattern: "^[0-9a-f]{64}$"
-  required: [planRunId, planArtifactVersion, planChecksum, approvalRunId, approvalArtifactVersion, approvalChecksum]
+    beforeStateHash:
+      type: string
+      pattern: "^[0-9a-f]{64}$"
+  required: [planRunId, planArtifactVersion, planChecksum, approvalRunId, approvalArtifactVersion, approvalChecksum, beforeStateHash]
   additionalProperties: false
 jobs:
   - name: apply
@@ -47,6 +50,7 @@ jobs:
               --approval-run-id '${{ inputs.approvalRunId }}'
               --approval-artifact-version '${{ inputs.approvalArtifactVersion }}'
               --approval-checksum '${{ inputs.approvalChecksum }}'
+              --before-state-hash '${{ inputs.beforeStateHash }}'
               --profile personal-assistant
             workingDir: .
             timeout: 60000
@@ -56,4 +60,4 @@ jobs:
         allowFailure: false
     dependsOn: []
     weight: 1
-version: 1
+version: 2

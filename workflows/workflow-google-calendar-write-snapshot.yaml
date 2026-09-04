@@ -1,0 +1,43 @@
+id: 5361b2fd-f61d-4ec2-86db-cb2d6d20bf2c
+name: google-calendar-write-snapshot
+description: Read a PII-free hash of one deterministic Linear-linked primary-calendar target before owner approval.
+tags:
+  domain: hermes-platform
+  integration: google-calendar
+  safety: read-only-before-state
+  owner: personal-assistant
+inputs:
+  type: object
+  properties:
+    blockKey:
+      type: string
+      maxLength: 64
+      pattern: "^[a-z0-9]+(-[a-z0-9]+)*$"
+      default: primary
+    linearUrl:
+      type: string
+      pattern: "^https://linear\\.app/[A-Za-z0-9_-]+/issue/SIS-[1-9][0-9]*/[A-Za-z0-9][A-Za-z0-9_-]*$"
+  required: [blockKey, linearUrl]
+  additionalProperties: false
+jobs:
+  - name: snapshot
+    steps:
+      - name: read-before-state-hash
+        task:
+          type: model_method
+          modelIdOrName: google-calendar-write
+          methodName: execute
+          inputs:
+            run: >-
+              /Users/hermes/.hermes/hermes-agent/venv/bin/python scripts/google_calendar_write.py
+              --mode snapshot
+              --block-key '${{ inputs.blockKey }}'
+              --linear-url '${{ inputs.linearUrl }}'
+              --profile personal-assistant
+            workingDir: .
+            timeout: 60000
+            ignoreExitCode: false
+        dependsOn: []
+        weight: 1
+        allowFailure: false
+version: 1

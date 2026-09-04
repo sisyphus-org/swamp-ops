@@ -336,6 +336,20 @@ def validate_linear_url(value: str) -> tuple[str, str]:
     return value, match.group(1)
 
 
+def stable_event_id(identifier: str, block_key: str) -> str:
+    if re.fullmatch(r"SIS-[1-9][0-9]*", identifier) is None:
+        raise CalendarWriteError("Linear identifier is invalid")
+    if (
+        not isinstance(block_key, str)
+        or len(block_key) > 64
+        or BLOCK_KEY.fullmatch(block_key) is None
+    ):
+        raise CalendarWriteError("block_key must be a safe slug of at most 64 characters")
+    return "sis" + hashlib.sha256(
+        EVENT_ID_DOMAIN + identifier.encode("ascii") + b"\0" + block_key.encode("ascii")
+    ).hexdigest()
+
+
 def parse_kyiv_local(value: str) -> datetime:
     if not isinstance(value, str) or LOCAL_DATETIME.fullmatch(value) is None:
         raise CalendarWriteError("datetime must be local YYYY-MM-DDTHH:MM[:SS]")
@@ -377,9 +391,7 @@ def build_plan(
     if not all(isinstance(value, str) for value in (summary, start, end, details)):
         raise CalendarWriteError("event fields must be strings")
     canonical_url, identifier = validate_linear_url(linear_url)
-    event_id = "sis" + hashlib.sha256(
-        EVENT_ID_DOMAIN + identifier.encode("ascii") + b"\0" + block_key.encode("ascii")
-    ).hexdigest()
+    event_id_value = stable_event_id(identifier, block_key)
     if operation == "delete":
         if any((summary, start, end, details)):
             raise CalendarWriteError("delete requires empty summary, start, end, and details")
@@ -411,7 +423,7 @@ def build_plan(
         "calendarId": WRITE_CALENDAR_ID,
         "operation": operation,
         "blockKey": block_key,
-        "eventId": event_id,
+        "eventId": event_id_value,
         "linearIssue": {"identifier": identifier, "url": canonical_url},
         "event": event,
         "requiredApproval": f"{operation.title()} this exact checksum-bound primary-calendar event",
@@ -498,6 +510,58 @@ def _get_event(service: Any, event_id: str) -> dict[str, Any] | None:
     raise CalendarWriteError("Calendar event lookup returned malformed payload")
 
 
+def snapshot_target(
+    *, linear_url: str, block_key: str, service: Any
+) -> dict[str, Any]:
+    """Return a PII-free fingerprint of the exact deterministic Calendar target."""
+    _canonical_url, identifier = validate_linear_url(linear_url)
+    target_id = stable_event_id(identifier, block_key)
+    existing = _get_event(service, target_id)
+    state_hash = _event_state_hash(existing)
+    return {
+        "operation": "snapshot",
+        "status": "ok",
+        "linearIssue": identifier,
+        "blockKey": block_key,
+        "beforeStateHash": state_hash,
+    }
+
+
+def _event_state_hash(existing: dict[str, Any] | None) -> str:
+    if existing is None:
+        state: dict[str, Any] = {"status": "absent"}
+    else:
+        # Hash the complete provider event so an intervening change to any
+        # field that apply could overwrite (attendees, reminders, recurrence,
+        # visibility, conference data, and future provider fields) invalidates
+        # the owner's preview without exposing that private state.
+        state = {"status": "present", "event": existing}
+    return _canonical_sha256(state)
+
+
+def _execute_existing_event_mutation(
+    request: Any,
+    existing: dict[str, Any],
+    *,
+    require_precondition: bool,
+) -> Any:
+    if require_precondition:
+        etag = existing.get("etag")
+        headers = getattr(request, "headers", None)
+        if (
+            not isinstance(etag, str)
+            or not etag
+            or len(etag) > 512
+            or any(ord(char) < 32 for char in etag)
+            or not isinstance(headers, dict)
+        ):
+            raise CalendarWriteError(
+                "Calendar provider revision is unavailable for conditional mutation"
+            )
+        headers["If-Match"] = etag
+    return request.execute()
+
+
 def _verify_event(actual: dict[str, Any], expected: dict[str, Any]) -> None:
     if actual.get("status") == "cancelled":
         raise CalendarWriteError("Calendar read-back is cancelled")
@@ -557,6 +621,7 @@ def apply_plan(
     approved_checksum: str,
     service: Any,
     authorization: VerifiedApproval | None = None,
+    expected_before_state_hash: str | None = None,
 ) -> dict[str, Any]:
     if (
         not isinstance(authorization, VerifiedApproval)
@@ -566,6 +631,11 @@ def apply_plan(
         raise CalendarWriteError("apply requires verified manual approval for the exact plan")
     if not isinstance(approved_checksum, str) or SHA256.fullmatch(approved_checksum) is None:
         raise CalendarWriteError("approved checksum must be a SHA-256 digest")
+    if expected_before_state_hash is not None and (
+        not isinstance(expected_before_state_hash, str)
+        or SHA256.fullmatch(expected_before_state_hash) is None
+    ):
+        raise CalendarWriteError("approved before-state hash must be a SHA-256 digest")
     _validate_plan_schema(plan)
     if (
         plan.get("schemaVersion") != 1
@@ -590,9 +660,7 @@ def apply_plan(
         raise CalendarWriteError("approved Linear issue identifier is inconsistent")
     if not isinstance(operation, str) or not isinstance(block_key, str):
         raise CalendarWriteError("approved plan operation identity is invalid")
-    expected_event_id = "sis" + hashlib.sha256(
-        EVENT_ID_DOMAIN + identifier.encode("ascii") + b"\0" + block_key.encode("ascii")
-    ).hexdigest()
+    expected_event_id = stable_event_id(identifier, block_key)
     if plan.get("eventId") != expected_event_id:
         raise CalendarWriteError("approved event identity is inconsistent")
     if operation != "delete" and not _is_exact_linear_link(
@@ -603,19 +671,44 @@ def apply_plan(
     event_id = expected_event_id
     existing = _get_event(service, event_id)
 
-    if operation == "delete":
-        if existing is None or existing.get("status") == "cancelled":
+    if operation == "delete" and (
+        existing is None or existing.get("status") == "cancelled"
+    ):
+        return _sanitized_result(
+            operation=operation, identifier=identifier, block_key=block_key, reused=True
+        )
+    if operation != "delete" and existing is not None and existing.get("status") != "cancelled":
+        try:
+            _verify_event(existing, event)
+        except CalendarWriteError:
+            pass
+        else:
             return _sanitized_result(
                 operation=operation, identifier=identifier, block_key=block_key, reused=True
             )
+    if (
+        expected_before_state_hash is not None
+        and _event_state_hash(existing) != expected_before_state_hash
+    ):
+        raise CalendarWriteError("Calendar target changed after owner preview")
+
+    if operation == "delete":
+        if existing is None:
+            raise CalendarWriteError("Calendar delete target state is inconsistent")
         if not _is_exact_linear_link(existing.get("description"), canonical_url):
             raise CalendarWriteError("Calendar target is linked to a different Linear issue")
         try:
-            service.events().delete(
+            request = service.events().delete(
                 calendarId=WRITE_CALENDAR_ID,
                 eventId=event_id,
                 sendUpdates="none",
-            ).execute()
+            )
+            _execute_existing_event_mutation(
+                request, existing,
+                require_precondition=expected_before_state_hash is not None,
+            )
+        except CalendarWriteError:
+            raise
         except Exception:
             pass
         remaining = _get_event(service, event_id)
@@ -638,12 +731,18 @@ def apply_plan(
             _verify_event(existing, expected)
         except CalendarWriteError:
             try:
-                service.events().update(
+                request = service.events().update(
                     calendarId=WRITE_CALENDAR_ID,
                     eventId=event_id,
                     body=body,
                     sendUpdates="none",
-                ).execute()
+                )
+                _execute_existing_event_mutation(
+                    request, existing,
+                    require_precondition=expected_before_state_hash is not None,
+                )
+            except CalendarWriteError:
+                raise
             except Exception:
                 pass
             read_back = _get_event(service, event_id)
@@ -664,12 +763,18 @@ def apply_plan(
             raise CalendarWriteError("Calendar target is linked to a different Linear issue")
         restore_body = {**body, "status": "confirmed"}
         try:
-            service.events().update(
+            request = service.events().update(
                 calendarId=WRITE_CALENDAR_ID,
                 eventId=event_id,
                 body=restore_body,
                 sendUpdates="none",
-            ).execute()
+            )
+            _execute_existing_event_mutation(
+                request, existing,
+                require_precondition=expected_before_state_hash is not None,
+            )
+        except CalendarWriteError:
+            raise
         except Exception:
             pass
         existing = _get_event(service, event_id)
@@ -726,12 +831,16 @@ def _build_service(profile: str) -> Any:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     mode_parser = argparse.ArgumentParser(add_help=False)
-    mode_parser.add_argument("--mode", choices=("plan", "attest", "apply"), default="plan")
+    mode_parser.add_argument(
+        "--mode", choices=("plan", "snapshot", "attest", "apply"), default="plan"
+    )
     selected, _ = mode_parser.parse_known_args(argv)
     parser = argparse.ArgumentParser(
         description="Approval-gated Google Calendar create/update/delete lane."
     )
-    parser.add_argument("--mode", choices=("plan", "attest", "apply"), default="plan")
+    parser.add_argument(
+        "--mode", choices=("plan", "snapshot", "attest", "apply"), default="plan"
+    )
     if selected.mode == "plan":
         parser.add_argument("--operation", choices=OPERATIONS, default="create")
         parser.add_argument("--block-key", default="primary")
@@ -741,6 +850,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.add_argument("--linear-url", required=True)
         parser.add_argument("--details", default="")
         parser.add_argument("--profile", default="personal-assistant")
+    elif selected.mode == "snapshot":
+        parser.add_argument("--block-key", default="primary")
+        parser.add_argument("--linear-url", required=True)
+        parser.add_argument("--profile", default="personal-assistant")
     else:
         parser.add_argument("--plan-run-id", required=True)
         parser.add_argument("--plan-artifact-version", required=True, type=int)
@@ -749,6 +862,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             parser.add_argument("--approval-run-id", required=True)
             parser.add_argument("--approval-artifact-version", required=True, type=int)
             parser.add_argument("--approval-checksum", required=True)
+            parser.add_argument("--before-state-hash", required=True)
             parser.add_argument("--profile", default="personal-assistant")
     return parser.parse_args(argv)
 
@@ -764,6 +878,12 @@ def main(argv: list[str] | None = None) -> int:
             end=args.end,
             linear_url=args.linear_url,
             details=args.details,
+        )
+    elif args.mode == "snapshot":
+        result = snapshot_target(
+            linear_url=args.linear_url,
+            block_key=args.block_key,
+            service=_build_service(args.profile),
         )
     elif args.mode == "attest":
         result = build_approval_attestation(
@@ -785,6 +905,7 @@ def main(argv: list[str] | None = None) -> int:
             approved_checksum=args.plan_checksum,
             authorization=authorization,
             service=_build_service(args.profile),
+            expected_before_state_hash=args.before_state_hash,
         )
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0

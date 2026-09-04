@@ -347,9 +347,12 @@ class SwampContractTests(unittest.TestCase):
     def test_workflow_declares_only_inputs_it_honors(self):
         workflow_path = SCRIPT.parents[1] / "workflows" / "workflow-google-calendar-read.yaml"
         workflow = yaml.safe_load(workflow_path.read_text())
-        self.assertEqual(set(workflow["inputs"]), {"window"})
+        self.assertEqual(set(workflow["inputs"]), {"operation", "window"})
+        self.assertEqual(workflow["inputs"]["operation"]["enum"], ["inventory", "events", "freebusy"])
         command = workflow["jobs"][0]["steps"][0]["task"]["inputs"]["run"]
+        self.assertIn("${{ inputs.operation }}", command)
         self.assertIn("${{ inputs.window }}", command)
+        self.assertIn("--live", command)
 
 
 if __name__ == "__main__":
