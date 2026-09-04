@@ -1,0 +1,12 @@
+type: command/shell
+typeVersion: 2026.02.09.1
+id: d1c2eacb-d683-45cc-a8a6-0a877339b020
+name: google-calendar-read
+version: 1
+tags:
+  domain: hermes-platform
+  integration: google-calendar
+  safety: read-only-plan-and-bounded-read
+  owner: default
+globalArguments: {}
+methods: {}

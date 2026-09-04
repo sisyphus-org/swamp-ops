@@ -1,0 +1,49 @@
+id: 4a3f2c1b-5d6e-4f7a-8b9c-0d1e2f3a4b5c
+name: google-calendar-read
+description: >-
+  Deterministic, audit-gated read lane for the Personal Assistant Google Calendar
+  integration. Requests only calendar.calendarlist.readonly, calendar.events, and
+  calendar.freebusy scopes. All output is normalized to Europe/Kyiv. Read
+  allowlist is primary calendar only; write allowlist is empty in this slice.
+tags:
+  domain: hermes-platform
+  integration: google-calendar
+  safety: read-only-plan-and-bounded-read
+  owner: default
+inputs:
+  operation:
+    type: string
+    enum: [plan]
+    default: plan
+    description: Read operation. plan emits the deterministic config plan without network.
+  window:
+    type: string
+    enum: [today, next-7-days, next-30-days]
+    default: today
+    description: Bounded read window. No arbitrary date ranges are accepted.
+  includeSummary:
+    type: boolean
+    default: false
+    description: Include event summary in the atomic payload file. Never emitted to stdout.
+  live:
+    type: boolean
+    default: false
+    description: If true, perform the actual Calendar API call. If false, print the deterministic plan only.
+jobs:
+  - name: main
+    description: List, inspect, or query Google Calendar for the Personal Assistant with strict bounds and redaction.
+    steps:
+      - name: run
+        description: Execute the deterministic calendar read CLI in plan/smoke mode.
+        task:
+          type: model_method
+          modelIdOrName: google-calendar-read
+          methodName: execute
+          inputs:
+            run: /Users/hermes/.hermes/hermes-agent/venv/bin/python scripts/google_calendar_read.py --operation smoke --window ${{ inputs.window }} --profile personal-assistant
+            workingDir: .
+            timeout: 60000
+            ignoreExitCode: false
+        dependsOn: []
+        weight: 1
+version: 2
