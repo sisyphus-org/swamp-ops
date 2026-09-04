@@ -78,6 +78,29 @@ class BootstrapContractTests(unittest.TestCase):
         self.assertNotIn("plugins", parsed)
         self.assertNotIn("LINEAR_TOKEN", rendered)
 
+        profile = "pa-contract-test"
+        old_argv = sys.argv
+        old_root = getattr(bootstrap, "HERMES_ROOT")
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                setattr(bootstrap, "HERMES_ROOT", Path(tmp))
+                sys.argv = [
+                    str(SCRIPT),
+                    "--profile",
+                    profile,
+                    "--role",
+                    "personal-assistant",
+                    "--mode",
+                    "plan",
+                ]
+                with contextlib.redirect_stdout(io.StringIO()) as output:
+                    self.assertEqual(bootstrap.main(), 0)
+                payload = json.loads(output.getvalue())
+        finally:
+            setattr(bootstrap, "HERMES_ROOT", old_root)
+            sys.argv = old_argv
+        self.assertTrue(payload["telegram"]["explicitlyDisabled"])
+
     def test_personal_assistant_scripts_do_not_implement_direct_linear_access(self):
         scripts = SCRIPT.parents[1] / "scripts"
         forbidden = ("api.linear.app", "LINEAR_TOKEN", "_linear_graphql")

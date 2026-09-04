@@ -8,6 +8,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
+from unittest import mock
 
 import yaml
 
@@ -55,6 +56,12 @@ class WindowTests(unittest.TestCase):
 
 
 class NormalizeEventTests(unittest.TestCase):
+    def test_trailing_z_timestamp_remains_timezone_aware(self):
+        rendered = gcr._format_dt("2026-06-01T07:00:00Z")
+        parsed = datetime.fromisoformat(rendered)
+        self.assertIsNotNone(parsed.utcoffset())
+        self.assertEqual(parsed.hour, 10)
+
     def test_normalize_timed_event(self):
         raw = {
             "id": "evt1",
@@ -193,6 +200,15 @@ class FreebusyTests(unittest.TestCase):
         self.assertEqual(captured["body"]["timeZone"], "Europe/Kyiv")
         self.assertEqual(len(result["calendars"]["primary"]["busy"]), 1)
 
+    def test_query_freebusy_rejects_non_allowlisted_calendar(self):
+        with self.assertRaises(PermissionError):
+            gcr.query_freebusy(
+                object(),
+                datetime(2026, 6, 1, tzinfo=KYIV),
+                datetime(2026, 6, 2, tzinfo=KYIV),
+                ["primary", "unauthorized"],
+            )
+
 
 class RunReadTests(unittest.TestCase):
     def test_smoke_returns_plan_skeleton(self):
@@ -212,6 +228,38 @@ class RunReadTests(unittest.TestCase):
         # Unknown ops should raise before credentials are touched.
         with self.assertRaises(ValueError):
             gcr.run_read("nope", "today", live=False)
+
+    def test_include_summary_preserves_summary_only_in_detailed_payload(self):
+        class Calendars:
+            def list(self, **_kwargs):
+                return self
+            def execute(self):
+                return {"items": [{"id": "primary", "primary": True}]}
+            def list_next(self, _req, _resp):
+                return None
+
+        class Events:
+            def list(self, **_kwargs):
+                return self
+            def execute(self):
+                return {"items": [{
+                    "id": "evt",
+                    "summary": "Private title",
+                    "start": {"dateTime": "2026-06-01T07:00:00Z"},
+                    "end": {"dateTime": "2026-06-01T08:00:00Z"},
+                }]}
+            def list_next(self, _req, _resp):
+                return None
+
+        class Service:
+            def calendarList(self):
+                return Calendars()
+            def events(self):
+                return Events()
+
+        with mock.patch.object(gcr, "_write_atomic_payload"), mock.patch.object(gcr, "_emit_sanitized_stdout"):
+            result = gcr.run_read("events", "today", service=Service(), include_summary=True, live=True)
+        self.assertEqual(result["events"][0]["summary"], "Private title")
 
 
 class SanitizationTests(unittest.TestCase):
@@ -253,6 +301,7 @@ class SanitizationTests(unittest.TestCase):
                 self.assertEqual(mode, 0o600)
                 data = json.loads(payload_path.read_text())
                 self.assertEqual(data["operation"], "smoke")
+                self.assertFalse(payload_path.with_suffix(".tmp").exists())
             finally:
                 del os.environ["HERMES_HOME"]
 
@@ -275,6 +324,13 @@ class SwampContractTests(unittest.TestCase):
         parsed = uuid.UUID(model["id"])
         self.assertIn(parsed.version, range(1, 9))
         self.assertEqual(parsed.variant, uuid.RFC_4122)
+
+    def test_workflow_declares_only_inputs_it_honors(self):
+        workflow_path = SCRIPT.parents[1] / "workflows" / "workflow-google-calendar-read.yaml"
+        workflow = yaml.safe_load(workflow_path.read_text())
+        self.assertEqual(set(workflow["inputs"]), {"window"})
+        command = workflow["jobs"][0]["steps"][0]["task"]["inputs"]["run"]
+        self.assertIn("${{ inputs.window }}", command)
 
 
 if __name__ == "__main__":

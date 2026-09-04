@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Iterable, Set
+from typing import Iterable
 
 import google.auth
 import google.auth.exceptions
@@ -40,10 +40,15 @@ FORBIDDEN_SCOPES: tuple[str, ...] = (
 )
 
 DEFAULT_HERMES_HOME = Path.home() / ".hermes"
+SUPPORTED_PROFILE = "personal-assistant"
 
 def profile_root(profile: str = "personal-assistant", hermes_home: Path | None = None) -> Path:
     """Return the profile-local secrets root."""
+    if profile != SUPPORTED_PROFILE:
+        raise ValueError(f"unsupported Calendar profile: {profile!r}")
     base = hermes_home or Path(os.environ.get("HERMES_HOME", DEFAULT_HERMES_HOME))
+    if base.name == profile and base.parent.name == "profiles":
+        return base
     return base / "profiles" / profile
 
 def token_path(profile: str = "personal-assistant", hermes_home: Path | None = None) -> Path:
@@ -76,6 +81,8 @@ def load_credentials(profile: str = "personal-assistant", hermes_home: Path | No
     tpath = token_path(profile, hermes_home)
     if not tpath.exists():
         raise FileNotFoundError(f"token not found: {tpath}")
+    if secure_file_mode(tpath) & 0o077:
+        raise PermissionError(f"token file must be owner-only: {tpath}")
     info = json.loads(tpath.read_text())
     scopes = info.get("scopes", [])
     validate_scopes(scopes)

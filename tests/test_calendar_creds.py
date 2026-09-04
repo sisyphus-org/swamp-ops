@@ -5,6 +5,7 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "calendar_creds.py"
 SPEC = importlib.util.spec_from_file_location("calendar_creds", SCRIPT)
@@ -64,6 +65,16 @@ class ProfilePathTests(unittest.TestCase):
             home = Path(tmp)
             tp = creds.token_path("personal-assistant", hermes_home=home)
             self.assertEqual(tp, home / "profiles" / "personal-assistant" / "google_token.json")
+            profile_home = home / "profiles" / "personal-assistant"
+            self.assertEqual(
+                creds.token_path("personal-assistant", hermes_home=profile_home),
+                profile_home / "google_token.json",
+            )
+
+    def test_profile_paths_reject_unknown_or_path_shaped_names(self):
+        for profile in ("other", "../personal-assistant", "/tmp/personal-assistant", "personal-assistant/../other"):
+            with self.subTest(profile=profile), self.assertRaises(ValueError):
+                creds.profile_root(profile)
 
 
 class FileModeTests(unittest.TestCase):
@@ -75,6 +86,19 @@ class FileModeTests(unittest.TestCase):
             token.write_text("{}")
             os.chmod(token, 0o600)
             self.assertEqual(creds.secure_file_mode(token), 0o600)
+
+    def test_load_credentials_rejects_group_readable_token_before_reading(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            root = home / "profiles" / "personal-assistant"
+            root.mkdir(parents=True)
+            token = root / "google_token.json"
+            token.write_text("{}")
+            os.chmod(token, 0o640)
+            with mock.patch.object(creds.google.auth, "load_credentials_from_file") as loader:
+                with self.assertRaisesRegex(PermissionError, "owner-only"):
+                    creds.load_credentials("personal-assistant", hermes_home=home)
+            loader.assert_not_called()
 
 
 if __name__ == "__main__":

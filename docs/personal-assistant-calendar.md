@@ -8,6 +8,7 @@ The Personal Assistant Google Calendar integration is split into a deterministic
 
 - **Calendar ID**: `primary` only.
 - **Scopes**: `calendar.calendarlist.readonly`, `calendar.events`, `calendar.freebusy`.
+  - `calendar.events` is intentionally retained for the owner-required future create/update/delete lane; possession of the scope does not authorize a write, which remains blocked until checksum-bound preview and explicit owner approval.
   - Zero non-Calendar scopes (Gmail, Drive, Docs, Sheets, Contacts, etc.).
 - **Timezone**: all requests and output are normalized to `Europe/Kyiv`. The zoneinfo database resolves DST automatically: winter 2026 = UTC+02, summer 2026 = UTC+03.
 
@@ -17,8 +18,8 @@ The Personal Assistant Google Calendar integration is split into a deterministic
 
 ### Protected data
 
-- **Never exposed** to stdout or artifacts: no event titles, locations, descriptions, calendar IDs, event IDs, email addresses, or OAuth token paths.
-- Stdout output contains only: `operation`, `status`, `timezone`, `window`, `bounds`, `calendar_count`, `writable_calendar_count`, `event_count`, `all_day_events`, `recurring_events`, `busy_intervals`.
+- **Default output never exposes** event titles, locations, descriptions, calendar IDs, event IDs, email addresses, or OAuth token paths. The direct CLI-only `--include-summary` option may retain titles solely in the profile-local `0600` payload; the committed Swamp workflow does not expose that option.
+- Stdout remains sanitized in all modes and contains only: `operation`, `status`, `timezone`, `window`, `bounds`, `calendar_count`, `writable_calendar_count`, `event_count`, `all_day_events`, `recurring_events`, `busy_intervals`.
 
 ## Live run commands
 
