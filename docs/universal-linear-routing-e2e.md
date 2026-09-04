@@ -36,7 +36,7 @@ The plugin:
 - returns only public status and user-relevant target facts to the source model; task/run IDs, routing/idempotency keys, schema versions, worker state, route audits, hashes, UUIDs, internal entity IDs and raw PM payloads never cross the tool-result boundary;
 - imports no Linear client and reads no Linear credential.
 
-The paired `linear-source-request-routing` skill requires short factual replies: `Принято, выполняю.` while queued, then only the final user-visible result and canonical Linear URL. It forbids Kanban inspection after queueing, direct Linear mutation, generic GraphQL, terminal fallback, passive lifecycle narration, invented Telegram topics, or another profile's bot.
+The paired `linear-source-request-routing` skill requires short factual replies: `Принято, выполняю.` while queued, then only the final user-visible result and canonical Linear URL. It forbids Kanban inspection after queueing, direct Linear mutation, generic GraphQL, terminal fallback, passive lifecycle narration, invented Telegram topics, or another profile's bot. `create_standalone_issue` and `converge_issue_tree` require `project` and `milestone` objects with exact `name` fields; bare strings and `null` are rejected by both the published tool schema and source validator so an invalid request cannot masquerade as a Project Manager failure.
 
 ## Project Manager lane
 
@@ -69,7 +69,7 @@ The default `hermes-profile-bootstrap` role now:
 - does not configure Linear MCP;
 - reports required source-Gateway and broker restarts plus config/model/STT/PM read-back/wake/replay gates.
 
-The `project-manager` role retains Linear credential/MCP configuration. The `broker` role retains neither.
+The `project-manager` role retains Linear MCP but requires a separately scoped profile-local `LINEAR_TOKEN`; it has no shared root fallback or Telegram credential. The `personal-assistant` role is a distinct headless Calendar-only baseline with no Linear MCP/token/source plugin. The `broker` role retains neither external credential.
 
 ## Local verification
 

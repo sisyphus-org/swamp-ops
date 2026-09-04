@@ -63,6 +63,33 @@ class BootstrapContractTests(unittest.TestCase):
         self.assertNotIn("mcp_servers", parsed)
         self.assertNotIn("secrets", parsed)
 
+    def test_personal_assistant_role_is_calendar_only_and_has_no_linear_access(self):
+        rendered = bootstrap.render_config(
+            "openai-codex",
+            "gpt-5.6-sol-900k",
+            Path("/Users/hermes/workspaces"),
+            role="personal-assistant",
+        )
+        parsed = yaml.safe_load(rendered)
+        self.assertFalse(parsed["gateway"]["platforms"]["telegram"]["enabled"])
+        self.assertFalse(parsed["kanban"]["dispatch_in_gateway"])
+        self.assertNotIn("mcp_servers", parsed)
+        self.assertNotIn("secrets", parsed)
+        self.assertNotIn("plugins", parsed)
+        self.assertNotIn("LINEAR_TOKEN", rendered)
+
+    def test_personal_assistant_scripts_do_not_implement_direct_linear_access(self):
+        scripts = SCRIPT.parents[1] / "scripts"
+        forbidden = ("api.linear.app", "LINEAR_TOKEN", "_linear_graphql")
+        violations = []
+        for pattern in ("google_calendar*.py", "calendar_creds.py", "task_and_calendar*.py"):
+            for path in sorted(scripts.glob(pattern)):
+                source = path.read_text()
+                for marker in forbidden:
+                    if marker in source:
+                        violations.append(f"{path.name}:{marker}")
+        self.assertEqual(violations, [])
+
     def test_source_profile_has_no_linear_secret_or_mcp_and_pm_keeps_them(self):
         source = bootstrap.render_config(
             "openai-codex",
@@ -87,86 +114,20 @@ class BootstrapContractTests(unittest.TestCase):
         )
         parsed_pm = yaml.safe_load(pm)
         self.assertIn("linear", parsed_pm["mcp_servers"])
-        self.assertIn("LINEAR_TOKEN", parsed_pm["secrets"]["command"]["command"])
+        self.assertNotIn("secrets", parsed_pm)
         self.assertIn('Authorization: "Bearer ${LINEAR_TOKEN}"', pm)
 
-    def test_secret_helper_prefers_profile_values_and_falls_back_per_key(self):
+    def test_project_manager_config_requires_profile_local_linear_token(self):
         rendered = bootstrap.render_config(
             "openai-codex",
             "gpt-5.6-sol-900k",
             Path("/Users/hermes/workspaces"),
             role="project-manager",
         )
-        command = yaml.safe_load(rendered)["secrets"]["command"]["command"]
-        with tempfile.TemporaryDirectory() as tmp:
-            fixture = Path(tmp)
-            shared_env = fixture / "shared.env"
-            profile_home = fixture / "profile"
-            profile_home.mkdir()
-            shared_env.write_text(
-                "LINEAR_TOKEN=shared-linear-fixture\n"
-                "TELEGRAM_ALLOWED_USERS=shared-telegram-fixture\n"
-            )
-            (profile_home / ".env").write_text(
-                "LINEAR_TOKEN=profile-linear-fixture\n"
-            )
-            command = command.replace(str(bootstrap.SHARED_ENV), str(shared_env))
-            proc = subprocess.run(
-                command,
-                shell=True,
-                capture_output=True,
-                text=True,
-                check=True,
-                env={"HERMES_HOME": str(profile_home), "PATH": "/usr/bin:/bin"},
-            )
-            values = dict(
-                line.split("=", 1)
-                for line in proc.stdout.splitlines()
-                if "=" in line
-            )
-            self.assertNotIn("LINEAR_TOKEN", values)
-            self.assertEqual(
-                values["TELEGRAM_ALLOWED_USERS"], "shared-telegram-fixture"
-            )
-
-    def test_secret_helper_treats_blank_profile_values_as_absent(self):
-        rendered = bootstrap.render_config(
-            "openai-codex",
-            "gpt-5.6-sol-900k",
-            Path("/Users/hermes/workspaces"),
-            role="project-manager",
-        )
-        command = yaml.safe_load(rendered)["secrets"]["command"]["command"]
-        with tempfile.TemporaryDirectory() as tmp:
-            fixture = Path(tmp)
-            shared_env = fixture / "shared.env"
-            profile_home = fixture / "profile"
-            profile_home.mkdir()
-            shared_env.write_text(
-                "LINEAR_TOKEN=shared-linear-fixture\n"
-                "TELEGRAM_ALLOWED_USERS=shared-telegram-fixture\n"
-            )
-            (profile_home / ".env").write_text(
-                "LINEAR_TOKEN=\nTELEGRAM_ALLOWED_USERS=   \n"
-            )
-            command = command.replace(str(bootstrap.SHARED_ENV), str(shared_env))
-            proc = subprocess.run(
-                command,
-                shell=True,
-                capture_output=True,
-                text=True,
-                check=True,
-                env={"HERMES_HOME": str(profile_home), "PATH": "/usr/bin:/bin"},
-            )
-            values = dict(
-                line.split("=", 1)
-                for line in proc.stdout.splitlines()
-                if "=" in line
-            )
-            self.assertEqual(values["LINEAR_TOKEN"], "shared-linear-fixture")
-            self.assertEqual(
-                values["TELEGRAM_ALLOWED_USERS"], "shared-telegram-fixture"
-            )
+        parsed = yaml.safe_load(rendered)
+        self.assertNotIn("secrets", parsed)
+        self.assertIn("${LINEAR_TOKEN}", parsed["mcp_servers"]["linear"]["headers"]["Authorization"])
+        self.assertNotIn(str(bootstrap.SHARED_ENV), rendered)
 
     def test_plan_lists_owner_variables_without_writing(self):
         profile = "bootstrap-contract-test"
@@ -219,10 +180,13 @@ class BootstrapContractTests(unittest.TestCase):
         payload = json.loads(proc.stdout)
         self.assertEqual(payload["role"], "project-manager")
         self.assertFalse(payload["telegram"]["enabledAtBootstrap"])
+        self.assertFalse(payload["telegram"]["preparedForOwnerToken"])
         self.assertTrue(payload["linear"]["enabled"])
+        self.assertTrue(payload["linear"]["profileTokenRequired"])
+        self.assertIsNone(payload["linear"]["sharedTokenSource"])
         self.assertEqual(
             {item["name"] for item in payload["requiredProfileEnv"]},
-            {"TELEGRAM_BOT_TOKEN"},
+            {"LINEAR_TOKEN"},
         )
         self.assertFalse(profile_dir.exists())
 
@@ -355,7 +319,7 @@ class BootstrapContractTests(unittest.TestCase):
         parsed = yaml.safe_load(workflow_path.read_text())
         self.assertEqual(
             parsed["inputs"]["role"]["enum"],
-            ["general", "broker", "project-manager"],
+            ["general", "broker", "personal-assistant", "project-manager"],
         )
         command = parsed["jobs"][0]["steps"][0]["task"]["inputs"]["run"]
         self.assertIn("--role '${{ inputs.role }}'", command)

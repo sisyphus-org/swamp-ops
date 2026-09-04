@@ -39,16 +39,10 @@ FALLBACK_CHAIN = [
 
 SHARED_ENV_VARS = [
     {
-        "name": "LINEAR_TOKEN",
-        "location": str(SHARED_ENV),
-        "required": True,
-        "purpose": "shared Linear MCP credential for every profile",
-    },
-    {
         "name": "TELEGRAM_ALLOWED_USERS",
         "location": str(SHARED_ENV),
         "required": True,
-        "purpose": "default Telegram user allowlist for every profile",
+        "purpose": "default Telegram user allowlist for user-facing profiles",
     },
 ]
 PROFILE_ENV_VARS = [
@@ -59,10 +53,6 @@ PROFILE_ENV_VARS = [
     },
 ]
 OPTIONAL_PROFILE_ENV_VARS = [
-    {
-        "name": "LINEAR_TOKEN",
-        "purpose": "optional profile override for the shared Linear MCP credential",
-    },
     {
         "name": "TELEGRAM_ALLOWED_USERS",
         "purpose": "optional profile override for the shared Telegram allowlist",
@@ -101,21 +91,9 @@ stt:
 {role_config}
 """
 
-LINEAR_SECRET_AND_MCP_CONFIG = """\
-# Fetch LINEAR_TOKEN and TELEGRAM_ALLOWED_USERS from the default Hermes secret
-# file only when the profile does not explicitly define its own value.
-# Profile-specific bot/GitHub/Swamp credentials remain isolated in this .env.
-secrets:
-  command:
-    enabled: true
-    command: >-
-      if ! grep -q '^LINEAR_TOKEN=.*[^[:space:]]' "${HERMES_HOME}/.env" 2>/dev/null;
-      then grep '^LINEAR_TOKEN=' /Users/hermes/.hermes/.env; fi;
-      if ! grep -q '^TELEGRAM_ALLOWED_USERS=.*[^[:space:]]' "${HERMES_HOME}/.env" 2>/dev/null;
-      then grep '^TELEGRAM_ALLOWED_USERS=' /Users/hermes/.hermes/.env; fi
-    helper_timeout_seconds: 3
-    override_existing: true
-
+LINEAR_MCP_CONFIG = """\
+# Project Manager receives LINEAR_TOKEN only from its profile-local .env.
+# No user-facing profile, broker, or Personal Assistant receives Linear access.
 mcp_servers:
   linear:
     url: https://mcp.linear.app/mcp
@@ -170,6 +148,16 @@ gateway:
 kanban:
   dispatch_in_gateway: false
 """,
+    "personal-assistant": """\
+gateway:
+  multiplex_profiles: false
+  platforms:
+    telegram:
+      enabled: false
+
+kanban:
+  dispatch_in_gateway: false
+""",
     "project-manager": """\
 gateway:
   multiplex_profiles: false
@@ -181,7 +169,7 @@ gateway:
 kanban:
   dispatch_in_gateway: false
 
-""" + LINEAR_SECRET_AND_MCP_CONFIG,
+""" + LINEAR_MCP_CONFIG,
 }
 
 
@@ -310,32 +298,30 @@ def main() -> int:
 
     linear_enabled = args.role == "project-manager"
     source_routing_enabled = args.role == "general"
-    telegram_prepared = args.role != "broker"
-    shared_linear_present = env_has_key(SHARED_ENV, "LINEAR_TOKEN")
+    telegram_prepared = args.role == "general"
+    profile_linear_present = env_has_key(profile_dir / ".env", "LINEAR_TOKEN")
     shared_telegram_allowlist_present = env_has_key(
         SHARED_ENV, "TELEGRAM_ALLOWED_USERS"
     )
     shared_env_issues = []
-    if linear_enabled and not shared_linear_present:
-        shared_env_issues.append(f"LINEAR_TOKEN is missing from {SHARED_ENV}")
     if telegram_prepared and not shared_telegram_allowlist_present:
         shared_env_issues.append(
             f"TELEGRAM_ALLOWED_USERS is missing from {SHARED_ENV}"
         )
+    required_shared_env = SHARED_ENV_VARS if args.role == "general" else []
     if args.role == "project-manager":
-        required_shared_env = SHARED_ENV_VARS
-    elif args.role == "general":
-        required_shared_env = [
-            item for item in SHARED_ENV_VARS if item["name"] == "TELEGRAM_ALLOWED_USERS"
+        required_profile_env = [
+            {
+                "name": "LINEAR_TOKEN",
+                "required": True,
+                "purpose": "separately scoped Linear credential for Project Manager only",
+            }
         ]
+    elif telegram_prepared:
+        required_profile_env = PROFILE_ENV_VARS
     else:
-        required_shared_env = []
-    required_profile_env = PROFILE_ENV_VARS if telegram_prepared else []
-    optional_profile_env = [
-        item
-        for item in OPTIONAL_PROFILE_ENV_VARS
-        if args.role == "project-manager" or item["name"] != "LINEAR_TOKEN"
-    ]
+        required_profile_env = []
+    optional_profile_env = list(OPTIONAL_PROFILE_ENV_VARS)
     owner_steps = [
         "authenticate the profile's model provider without copying auth files",
         "review and install the dedicated system LaunchDaemon draft",
@@ -346,6 +332,11 @@ def main() -> int:
             f"create {profile_dir / '.env'} with a unique TELEGRAM_BOT_TOKEN only when Telegram activation begins",
             "chmod 600 the profile .env",
             "enable gateway.platforms.telegram only after the unique token is present",
+        ]
+    if linear_enabled:
+        owner_steps[:0] = [
+            f"create {profile_dir / '.env'} with a separately scoped LINEAR_TOKEN",
+            "chmod 600 the profile .env",
         ]
     if source_routing_enabled:
         owner_steps.extend(
@@ -374,10 +365,11 @@ def main() -> int:
         "linear": {
             "enabled": linear_enabled,
             "endpoint": "https://mcp.linear.app/mcp" if linear_enabled else None,
-            "sharedTokenSource": str(SHARED_ENV) if linear_enabled else None,
-            "sharedTokenPresent": shared_linear_present if linear_enabled else None,
-            "profileTokenRequired": False,
-            "profileOverrideSupported": linear_enabled,
+            "sharedTokenSource": None,
+            "sharedTokenPresent": None,
+            "profileTokenRequired": linear_enabled,
+            "profileTokenPresent": profile_linear_present if linear_enabled else None,
+            "profileOverrideSupported": False,
         },
         "sourceRouting": {
             "enabled": source_routing_enabled,

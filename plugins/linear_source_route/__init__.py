@@ -641,6 +641,24 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                 "required": ["operation", "project", "milestone", "issue"],
                 "properties": {
                     "operation": {"const": "create_standalone_issue"},
+                    "project": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "name": {"type": "string", "minLength": 1, "maxLength": 200},
+                            "description": {"type": "string", "maxLength": 10000},
+                        },
+                        "required": ["name"],
+                    },
+                    "milestone": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "name": {"type": "string", "minLength": 1, "maxLength": 200},
+                            "description": {"type": "string", "maxLength": 10000},
+                        },
+                        "required": ["name"],
+                    },
                     "issue": {
                         "required": ["title", "description", "state", "priority"]
                     },
@@ -656,6 +674,24 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                 ],
                 "properties": {
                     "operation": {"const": "converge_issue_tree"},
+                    "project": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "name": {"type": "string", "minLength": 1, "maxLength": 200},
+                            "description": {"type": "string", "maxLength": 10000},
+                        },
+                        "required": ["name"],
+                    },
+                    "milestone": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "name": {"type": "string", "minLength": 1, "maxLength": 200},
+                            "description": {"type": "string", "maxLength": 10000},
+                        },
+                        "required": ["name"],
+                    },
                     "issue": {
                         "required": ["title", "description", "state", "priority"]
                     },

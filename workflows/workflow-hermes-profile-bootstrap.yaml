@@ -18,7 +18,7 @@ inputs:
     description: Name of the Hermes profile to bootstrap.
   role:
     type: string
-    enum: [general, broker, project-manager]
+    enum: [general, broker, personal-assistant, project-manager]
     default: general
     description: Bounded capability baseline for the profile.
 jobs:

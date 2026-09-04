@@ -840,6 +840,23 @@ class PluginTests(unittest.TestCase):
                 branch["properties"]["issue"]["required"],
                 ["title", "description", "state", "priority"],
             )
+            for scope in ("project", "milestone"):
+                self.assertEqual(
+                    branch["properties"][scope],
+                    {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "name": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 200,
+                            },
+                            "description": {"type": "string", "maxLength": 10000},
+                        },
+                        "required": ["name"],
+                    },
+                )
         entity_schema = parameters["properties"]["issue"]
         self.assertNotIn("id", entity_schema["properties"])
         self.assertNotIn("id", entity_schema["required"])
