@@ -257,10 +257,27 @@ class RunReadTests(unittest.TestCase):
             def events(self):
                 return Events()
 
-        with mock.patch.object(gcr, "_write_atomic_payload"), mock.patch.object(gcr, "_emit_sanitized_stdout"):
-            result = gcr.run_read("events", "today", service=Service(), include_summary=True, live=True)
+        import io
+        from contextlib import redirect_stdout
+
+        stdout = io.StringIO()
+        with mock.patch.object(gcr, "_write_atomic_payload") as writer:
+            with redirect_stdout(stdout):
+                result = gcr.run_read(
+                    "events",
+                    "today",
+                    service=Service(),
+                    include_summary=True,
+                    live=True,
+                )
         self.assertEqual(result["events"][0]["summary"], "Private title")
         self.assertEqual(result["events"][0]["id"], "evt")
+        writer.assert_called_once()
+        published = writer.call_args.args[0]
+        self.assertEqual(published["events"][0]["summary"], "Private title")
+        self.assertEqual(published["events"][0]["id"], "evt")
+        self.assertNotIn("Private title", stdout.getvalue())
+        self.assertNotIn("evt", stdout.getvalue())
 
 
 class SanitizationTests(unittest.TestCase):
