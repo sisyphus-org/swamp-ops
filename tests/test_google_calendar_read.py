@@ -331,11 +331,9 @@ class ReadWriteAllowlistTests(unittest.TestCase):
     def test_read_allowlist_is_primary_only(self):
         self.assertEqual(gcr.READ_CALENDAR_IDS, ("primary",))
 
-    def test_write_allowlist_is_empty(self):
-        self.assertEqual(gcr.WRITE_CALENDAR_IDS, ())
-
-    def test_read_only_slice_has_no_calendar_write_entrypoint(self):
-        self.assertFalse((SCRIPT.parent / "google_calendar_write.py").exists())
+    def test_read_slice_has_no_calendar_write_entrypoint(self):
+        self.assertFalse(hasattr(gcr, "run_write"))
+        self.assertFalse(hasattr(gcr, "apply_plan"))
 
 
 class SwampContractTests(unittest.TestCase):

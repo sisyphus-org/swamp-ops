@@ -1,0 +1,12 @@
+type: command/shell
+typeVersion: 2026.02.09.1
+id: 88b59e40-7f7a-4524-92a3-2dbc37491ee3
+name: google-calendar-write
+version: 1
+tags:
+  domain: hermes-platform
+  integration: google-calendar
+  safety: approval-gated-write
+  owner: personal-assistant
+globalArguments: {}
+methods: {}

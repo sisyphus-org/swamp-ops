@@ -1,0 +1,57 @@
+id: 9ae6542d-f262-4620-b866-b5b8c6840380
+name: google-calendar-write-approval
+description: Suspend for manual approval and emit an attestation bound to one exact protected Calendar plan artifact.
+tags:
+  domain: hermes-platform
+  integration: google-calendar
+  safety: approval-gated-attestation-only
+  owner: personal-assistant
+inputs:
+  type: object
+  properties:
+    planRunId:
+      type: string
+      pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    planArtifactVersion:
+      type: integer
+      minimum: 1
+    planChecksum:
+      type: string
+      pattern: "^[0-9a-f]{64}$"
+  required: [planRunId, planArtifactVersion, planChecksum]
+  additionalProperties: false
+jobs:
+  - name: attest
+    steps:
+      - name: approve-calendar-write
+        description: Approve only after reviewing the exact protected plan artifact and checksum.
+        task:
+          type: manual_approval
+          prompt: Approve the exact Calendar create, update, or delete operation in this checksum-bound plan artifact.
+        dependsOn: []
+        weight: 0
+        allowFailure: false
+      - name: emit-calendar-approval-attestation
+        task:
+          type: model_method
+          modelIdOrName: google-calendar-write-approval
+          methodName: execute
+          inputs:
+            run: >-
+              /Users/hermes/.hermes/hermes-agent/venv/bin/python scripts/google_calendar_write.py
+              --mode attest
+              --plan-run-id '${{ inputs.planRunId }}'
+              --plan-artifact-version '${{ inputs.planArtifactVersion }}'
+              --plan-checksum '${{ inputs.planChecksum }}'
+            workingDir: .
+            timeout: 60000
+            ignoreExitCode: false
+        dependsOn:
+          - step: approve-calendar-write
+            condition:
+              type: succeeded
+        weight: 1
+        allowFailure: false
+    dependsOn: []
+    weight: 1
+version: 1
