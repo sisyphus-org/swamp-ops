@@ -571,10 +571,12 @@ def execute_calendar_command(
         raise CalendarWorkerError("Calendar target changed after owner preview")
     reservation_check()
     data = workflows.apply(plan, approval)
-    expected_keys = {"operation", "status", "reused", "linearIssue", "blockKey"}
+    required_keys = {"operation", "status", "reused", "blockKey"}
+    allowed_keys = required_keys | {"linearIssue"}
     if (
         not isinstance(data, dict)
-        or set(data) != expected_keys
+        or not required_keys.issubset(data)
+        or not set(data).issubset(allowed_keys)
         or data.get("status") != "verified"
         or data.get("operation") != approved_request.get("operation")
         or not isinstance(data.get("reused"), bool)
@@ -844,12 +846,15 @@ def _validate_completed_result(
             raise CalendarWorkerError("completed Calendar plan journal binding is invalid")
     elif operation == "approve_write":
         data = result.get("data")
+        required_data = {"operation", "status", "reused", "blockKey"}
+        allowed_data = required_data | {"linearIssue"}
         if (
             set(result) != common | {"data"}
             or result.get("phase") != "completed"
             or result.get("outcome") not in {"applied", "no_op"}
             or not isinstance(data, dict)
-            or set(data) != {"operation", "status", "reused", "linearIssue", "blockKey"}
+            or not required_data.issubset(data)
+            or not set(data).issubset(allowed_data)
             or data.get("status") != "verified"
             or not isinstance(data.get("reused"), bool)
         ):

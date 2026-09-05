@@ -354,7 +354,6 @@ class PersonalAssistantCalendarWorkerTests(unittest.TestCase):
                     "operation": "create",
                     "status": "verified",
                     "reused": False,
-                    "linearIssue": None,
                     "blockKey": standalone_request["block_key"],
                 }
 
@@ -370,7 +369,7 @@ class PersonalAssistantCalendarWorkerTests(unittest.TestCase):
         self.assertEqual(output["status"], "completed")
         persisted = json.loads(lifecycle.completed[0]["result"])
         self.assertEqual(persisted["outcome"], "applied")
-        self.assertIsNone(persisted["data"]["linearIssue"])
+        self.assertNotIn("linearIssue", persisted["data"])
 
     def test_approval_renews_claim_before_each_network_step_and_apply(self):
         approval_ref = "calendar-approval:v1:" + "c" * 64

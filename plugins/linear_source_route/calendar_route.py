@@ -354,12 +354,14 @@ def _load_completed(task: dict[str, Any], command: dict[str, Any]) -> dict[str, 
                 raise CalendarRouteError("Calendar read completion is invalid")
         return {"status": "completed", "phase": "completed", "data": data}
     if result["operation"] == "approve_write":
-        allowed_apply = {"operation", "status", "reused", "linearIssue", "blockKey"}
+        required_apply = {"operation", "status", "reused", "blockKey"}
+        allowed_apply = required_apply | {"linearIssue"}
         if (
             result.get("phase") != "completed"
             or result.get("outcome") not in {"applied", "no_op"}
             or not isinstance(data, dict)
-            or set(data) != allowed_apply
+            or not required_apply.issubset(data)
+            or not set(data).issubset(allowed_apply)
             or data.get("operation") not in WRITE_OPERATIONS
             or data.get("status") != "verified"
             or not isinstance(data.get("reused"), bool)

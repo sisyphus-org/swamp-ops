@@ -275,7 +275,6 @@ class CalendarRoutingTests(unittest.TestCase):
                 "operation": "create",
                 "status": "verified",
                 "reused": False,
-                "linearIssue": None,
                 "blockKey": "lavina-rusanovka-2026-09-06",
             },
             "verified": True,
@@ -292,7 +291,7 @@ class CalendarRoutingTests(unittest.TestCase):
         output = calendar_route.route_calendar_request(request, source=source, board=board)
 
         self.assertEqual(output["status"], "completed")
-        self.assertIsNone(output["data"]["linearIssue"])
+        self.assertNotIn("linearIssue", output["data"])
         self.assertTrue(output["changed"])
 
     def test_completed_plan_replay_rejects_substituted_opaque_reference(self):
