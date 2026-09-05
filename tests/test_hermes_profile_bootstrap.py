@@ -20,6 +20,19 @@ SPEC.loader.exec_module(bootstrap)
 
 
 class BootstrapContractTests(unittest.TestCase):
+    def test_calendar_source_skill_requires_literal_user_identifiers(self):
+        skill = " ".join(
+            (
+                SCRIPT.parents[1]
+                / "skills"
+                / "calendar-source-request-routing"
+                / "SKILL.md"
+            ).read_text().split()
+        )
+        self.assertIn("copy it byte-for-byte", skill)
+        self.assertIn("Never shorten, expand, repair, or regenerate a Linear URL slug", skill)
+        self.assertIn("Never derive `block_key` from the SIS identifier", skill)
+
     def test_default_model_is_sol_900k(self):
         self.assertEqual(
             bootstrap.DEFAULT_MODEL,
