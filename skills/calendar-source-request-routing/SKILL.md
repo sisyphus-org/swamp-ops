@@ -1,0 +1,32 @@
+---
+name: calendar-source-request-routing
+description: Route Calendar reads and approval-gated writes to PA.
+version: 1.0.0
+author: sisyphus-org
+platforms: [linux, macos]
+metadata:
+  hermes:
+    tags: [calendar, kanban, routing]
+---
+
+# Calendar Source Request Routing
+
+Use `calendar_source_request` for Calendar requests. The source profile never asks the owner for an OAuth client, reads Google credentials, or calls Google APIs directly. The broker-dispatched `personal-assistant` owns Calendar access.
+
+## Bounded reads
+
+Call exactly one of `inventory`, `events`, or `freebusy` with `window` equal to `today`, `next-7-days`, or `next-30-days`. After `queued`, stop. On exact-session wake, replay the literal request once and report only the sanitized completed data.
+
+## Approval-gated writes
+
+1. Resolve any supplied `SIS-N` through the Linear source route first when a canonical URL was not already supplied. Pass only the canonical public `https://linear.app/.../issue/SIS-N/...` URL; never pass Linear credentials or an internal ID.
+2. Call `calendar_source_request` with `operation=create|update|delete`, exact `block_key`, `summary`, local Kyiv `start`/`end`, canonical `linear_url`, and `details`. Delete requires empty event fields.
+3. When replay returns `phase=awaiting_approval`, show the exact `preview` to the owner. Do not approve implicitly or paraphrase away material fields.
+4. Only after an explicit approval in this same source session, call `calendar_source_request` with `operation=approve` and the exact opaque `approval_reference` returned with that preview.
+5. After `queued`, stop. On wake, replay the exact approval call and report sanitized verified read-back.
+
+Never copy workflow run IDs, task IDs, OAuth data, event IDs, artifact versions, checksums, before-state hashes, or internal routing fields into the human response. The public preview contains only the operation, block key, summary, details, Kyiv-aware start/end, timezone, and canonical Linear URL. If routing is unavailable, report the truthful capability error; never instruct the owner to upload an OAuth JSON file.
+
+## Replay
+
+Literal replay is required. The route derives one global semantic key and one exact source-session delivery key, so it reuses the same Kanban task and notification. Approval references are accepted only by the same profile/session that received the preview.

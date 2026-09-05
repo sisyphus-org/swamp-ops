@@ -194,6 +194,7 @@ class PlanTests(unittest.TestCase):
 class FakeRequest:
     def __init__(self, payload):
         self.payload = payload
+        self.headers = {}
 
     def execute(self):
         if isinstance(self.payload, BaseException):
@@ -214,6 +215,8 @@ class FakeEvents:
         self.delete_calls = []
         self.get_calls = []
         self.created = None
+        self.update_request = None
+        self.delete_request = None
 
     def insert(self, **kwargs):
         self.insert_calls.append(kwargs)
@@ -223,12 +226,14 @@ class FakeEvents:
     def update(self, **kwargs):
         self.update_calls.append(kwargs)
         self.created = dict(kwargs["body"])
-        return FakeRequest({"id": kwargs["eventId"]})
+        self.update_request = FakeRequest({"id": kwargs["eventId"]})
+        return self.update_request
 
     def delete(self, **kwargs):
         self.delete_calls.append(kwargs)
         self.created = None
-        return FakeRequest({})
+        self.delete_request = FakeRequest({})
+        return self.delete_request
 
     def get(self, **kwargs):
         self.get_calls.append(kwargs)
@@ -290,6 +295,61 @@ class FakeService:
 
     def events(self):
         return self.events_api
+
+
+class SnapshotTests(unittest.TestCase):
+    def test_target_snapshot_is_hash_only_and_changes_with_live_state(self):
+        events = FakeEvents()
+        service = FakeService(events)
+        absent = gcw.snapshot_target(
+            linear_url=LINEAR_URL, block_key="primary", service=service
+        )
+        self.assertEqual(set(absent), {
+            "operation", "status", "linearIssue", "blockKey", "beforeStateHash"
+        })
+        self.assertEqual(absent["operation"], "snapshot")
+        self.assertNotIn("summary", json.dumps(absent))
+
+        events.created = {
+            "id": gcw.stable_event_id("SIS-84", "primary"),
+            "status": "confirmed",
+            "summary": "Private title",
+            "description": f"Linear: {LINEAR_URL}",
+            "start": {"dateTime": "2026-09-07T10:00:00+03:00", "timeZone": "Europe/Kyiv"},
+            "end": {"dateTime": "2026-09-07T10:30:00+03:00", "timeZone": "Europe/Kyiv"},
+        }
+        present = gcw.snapshot_target(
+            linear_url=LINEAR_URL, block_key="primary", service=service
+        )
+        self.assertNotEqual(absent["beforeStateHash"], present["beforeStateHash"])
+        self.assertNotIn("Private title", json.dumps(present))
+
+        events.created["summary"] = "Intervening edit"
+        changed = gcw.snapshot_target(
+            linear_url=LINEAR_URL, block_key="primary", service=service
+        )
+        self.assertNotEqual(present["beforeStateHash"], changed["beforeStateHash"])
+
+    def test_target_snapshot_detects_out_of_allowlist_event_field_changes(self):
+        events = FakeEvents()
+        events.created = {
+            "id": gcw.stable_event_id("SIS-84", "primary"),
+            "status": "confirmed",
+            "summary": "Private title",
+            "description": f"Linear: {LINEAR_URL}",
+            "start": {"dateTime": "2026-09-07T10:00:00+03:00", "timeZone": "Europe/Kyiv"},
+            "end": {"dateTime": "2026-09-07T10:30:00+03:00", "timeZone": "Europe/Kyiv"},
+        }
+        service = FakeService(events)
+        before = gcw.snapshot_target(
+            linear_url=LINEAR_URL, block_key="primary", service=service
+        )
+        events.created["attendees"] = [{"email": "private@example.com"}]
+        after = gcw.snapshot_target(
+            linear_url=LINEAR_URL, block_key="primary", service=service
+        )
+        self.assertNotEqual(before["beforeStateHash"], after["beforeStateHash"])
+        self.assertNotIn("private@example.com", json.dumps(after))
 
 
 def approval_fixture(
@@ -1045,13 +1105,120 @@ class ApplyTests(unittest.TestCase):
         self.assertEqual(service.events_api.insert_calls, [])
 
 
+    def test_apply_rechecks_approved_before_state_inside_mutation_process(self):
+        plan = gcw.build_plan(
+            operation="update", block_key="primary", summary="Approved title",
+            start="2026-09-07T10:00", end="2026-09-07T10:30",
+            linear_url=LINEAR_URL, details="",
+        )
+        service = FakeService()
+        service.events_api.created = {
+            "id": plan["eventId"], "status": "confirmed", "summary": "Before title",
+            "description": f"Linear: {LINEAR_URL}",
+            "start": {"dateTime": "2026-09-07T09:00:00+03:00", "timeZone": "Europe/Kyiv"},
+            "end": {"dateTime": "2026-09-07T09:30:00+03:00", "timeZone": "Europe/Kyiv"},
+        }
+        before_hash = gcw.snapshot_target(
+            linear_url=LINEAR_URL, block_key="primary", service=service
+        )["beforeStateHash"]
+        service.events_api.created["attendees"] = [{"email": "intervening@example.com"}]
+        authorization = gcw.VerifiedApproval(
+            plan["checksum"], _marker=gcw._VERIFIED_APPROVAL_MARKER
+        )
+        with self.assertRaisesRegex(gcw.CalendarWriteError, "changed after owner preview"):
+            gcw.apply_plan(
+                plan, approved_checksum=plan["checksum"], service=service,
+                authorization=authorization,
+                expected_before_state_hash=before_hash,
+            )
+        self.assertEqual(service.events_api.update_calls, [])
+
+    def test_apply_allows_verified_converged_replay_after_before_state_changed(self):
+        plan = gcw.build_plan(
+            operation="update", block_key="primary", summary="Approved title",
+            start="2026-09-07T10:00", end="2026-09-07T10:30",
+            linear_url=LINEAR_URL, details="",
+        )
+        service = FakeService()
+        service.events_api.created = dict(plan["event"])
+        authorization = gcw.VerifiedApproval(
+            plan["checksum"], _marker=gcw._VERIFIED_APPROVAL_MARKER
+        )
+        result = gcw.apply_plan(
+            plan, approved_checksum=plan["checksum"], service=service,
+            authorization=authorization,
+            expected_before_state_hash="f" * 64,
+        )
+        self.assertEqual(result["status"], "verified")
+        self.assertTrue(result["reused"])
+        self.assertEqual(service.events_api.update_calls, [])
+
+
+    def test_before_state_bound_update_uses_provider_if_match_precondition(self):
+        plan = gcw.build_plan(
+            operation="update", block_key="primary", summary="Approved title",
+            start="2026-09-07T10:00", end="2026-09-07T10:30",
+            linear_url=LINEAR_URL, details="",
+        )
+        service = FakeService()
+        service.events_api.created = {
+            "id": plan["eventId"], "etag": '"provider-v1"', "status": "confirmed",
+            "summary": "Before title", "description": f"Linear: {LINEAR_URL}",
+            "start": {"dateTime": "2026-09-07T09:00:00+03:00", "timeZone": "Europe/Kyiv"},
+            "end": {"dateTime": "2026-09-07T09:30:00+03:00", "timeZone": "Europe/Kyiv"},
+        }
+        before_hash = gcw.snapshot_target(
+            linear_url=LINEAR_URL, block_key="primary", service=service
+        )["beforeStateHash"]
+        authorization = gcw.VerifiedApproval(
+            plan["checksum"], _marker=gcw._VERIFIED_APPROVAL_MARKER
+        )
+        result = gcw.apply_plan(
+            plan, approved_checksum=plan["checksum"], service=service,
+            authorization=authorization,
+            expected_before_state_hash=before_hash,
+        )
+        self.assertEqual(result["status"], "verified")
+        self.assertEqual(
+            service.events_api.update_request.headers.get("If-Match"), '"provider-v1"'
+        )
+
+
+    def test_before_state_bound_update_requires_provider_revision(self):
+        plan = gcw.build_plan(
+            operation="update", block_key="primary", summary="Approved title",
+            start="2026-09-07T10:00", end="2026-09-07T10:30",
+            linear_url=LINEAR_URL, details="",
+        )
+        service = FakeService()
+        service.events_api.created = {
+            "id": plan["eventId"], "status": "confirmed", "summary": "Before title",
+            "description": f"Linear: {LINEAR_URL}",
+            "start": {"dateTime": "2026-09-07T09:00:00+03:00", "timeZone": "Europe/Kyiv"},
+            "end": {"dateTime": "2026-09-07T09:30:00+03:00", "timeZone": "Europe/Kyiv"},
+        }
+        before_hash = gcw.snapshot_target(
+            linear_url=LINEAR_URL, block_key="primary", service=service
+        )["beforeStateHash"]
+        authorization = gcw.VerifiedApproval(
+            plan["checksum"], _marker=gcw._VERIFIED_APPROVAL_MARKER
+        )
+        with self.assertRaisesRegex(gcw.CalendarWriteError, "provider revision"):
+            gcw.apply_plan(
+                plan, approved_checksum=plan["checksum"], service=service,
+                authorization=authorization,
+                expected_before_state_hash=before_hash,
+            )
+
+
 class SwampContractTests(unittest.TestCase):
-    def test_write_models_and_three_workflows_are_valid_uuid_documents(self):
+    def test_write_models_and_four_workflows_are_valid_uuid_documents(self):
         root = SCRIPT.parents[1]
         paths = (
             root / "models" / "command" / "shell" / "google-calendar-write.yaml",
             root / "models" / "command" / "shell" / "google-calendar-write-approval.yaml",
             root / "workflows" / "workflow-google-calendar-write-plan.yaml",
+            root / "workflows" / "workflow-google-calendar-write-snapshot.yaml",
             root / "workflows" / "workflow-google-calendar-write-approval.yaml",
             root / "workflows" / "workflow-google-calendar-write-apply.yaml",
         )
@@ -1060,6 +1227,17 @@ class SwampContractTests(unittest.TestCase):
                 document = yaml.safe_load(path.read_text())
                 parsed = uuid.UUID(document["id"])
                 self.assertEqual(parsed.variant, uuid.RFC_4122)
+
+    def test_snapshot_workflow_is_read_only_and_accepts_only_exact_target(self):
+        path = SCRIPT.parents[1] / "workflows" / "workflow-google-calendar-write-snapshot.yaml"
+        workflow = yaml.safe_load(path.read_text())
+        self.assertEqual(
+            set(workflow["inputs"]["properties"]), {"blockKey", "linearUrl"}
+        )
+        command = workflow["jobs"][0]["steps"][0]["task"]["inputs"]["run"]
+        self.assertIn("--mode snapshot", command)
+        self.assertIn("--profile personal-assistant", command)
+        self.assertNotIn("summary", command)
 
     def test_plan_workflow_exposes_operation_block_key_and_raw_event_fields(self):
         path = SCRIPT.parents[1] / "workflows" / "workflow-google-calendar-write-plan.yaml"
@@ -1106,6 +1284,7 @@ class SwampContractTests(unittest.TestCase):
             {
                 "planRunId", "planArtifactVersion", "planChecksum",
                 "approvalRunId", "approvalArtifactVersion", "approvalChecksum",
+                "beforeStateHash",
             },
         )
         steps = workflow["jobs"][0]["steps"]
@@ -1116,6 +1295,7 @@ class SwampContractTests(unittest.TestCase):
         self.assertNotIn("linear-url", command)
         self.assertNotIn("details", command)
         self.assertIn("--approval-run-id '${{ inputs.approvalRunId }}'", command)
+        self.assertIn("--before-state-hash '${{ inputs.beforeStateHash }}'", command)
 
     def test_plan_cli_accepts_delete_with_default_empty_event_fields(self):
         args = gcw.parse_args([
@@ -1137,16 +1317,19 @@ class SwampContractTests(unittest.TestCase):
             "--approval-run-id", APPROVAL_RUN_ID,
             "--approval-artifact-version", "2",
             "--approval-checksum", "b" * 64,
+            "--before-state-hash", "c" * 64,
         ])
         self.assertEqual(args.mode, "apply")
         self.assertFalse(hasattr(args, "summary"))
         self.assertFalse(hasattr(args, "linear_url"))
+        self.assertEqual(args.before_state_hash, "c" * 64)
 
     def test_workflows_use_hermes_venv_with_google_sdk(self):
         root = SCRIPT.parents[1] / "workflows"
         expected = "/Users/hermes/.hermes/hermes-agent/venv/bin/python"
         for name, step_index in (
             ("workflow-google-calendar-write-plan.yaml", 0),
+            ("workflow-google-calendar-write-snapshot.yaml", 0),
             ("workflow-google-calendar-write-approval.yaml", 1),
             ("workflow-google-calendar-write-apply.yaml", 0),
         ):

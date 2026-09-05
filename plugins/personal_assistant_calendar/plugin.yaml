@@ -1,0 +1,8 @@
+name: personal-assistant-calendar
+version: 1.0.0
+description: >-
+  Persisted calendar-command.v1 worker using reviewed Personal Assistant Swamp workflows.
+author: sisyphus-org
+kind: backend
+provides_tools:
+  - pa_calendar_execute

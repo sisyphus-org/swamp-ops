@@ -1,8 +1,9 @@
 name: linear-source-route
-version: 1.3.1
+version: 1.4.0
 description: >-
-  Exact-session ingress for SIS issue-number aliases and bounded PM-routed Linear reads and writes.
+  Exact-session ingress for bounded Linear and Personal Assistant Calendar routes.
 author: sisyphus-org
 kind: backend
 provides_tools:
   - linear_source_request
+  - calendar_source_request

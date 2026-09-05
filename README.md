@@ -14,16 +14,17 @@ The deterministic Swamp smoke workflow is `ops-broker-readonly-smoke`. Installat
 
 Deterministic bootstrap of a new Hermes profile. Two-phase usage:
 
-1. `swamp workflow run hermes-profile-bootstrap --input profile=<name> --input role=<general|broker|project-manager>` — read-only **plan** (default in the committed workflow).
+1. `swamp workflow run hermes-profile-bootstrap --input profile=<name> --input role=<general|broker|personal-assistant|project-manager>` — read-only **plan** (default in the committed workflow).
 2. After reviewing the plan, run the deterministic script with the same profile and role plus `--mode apply`; it creates only the new profile directory and refuses overwrite.
 
 Writes are scoped to `/Users/hermes/.hermes/profiles/<name>/` only; existing profiles are never overwritten. Every role receives config version 38, `openai-codex/gpt-5.6-sol-900k`, local Qwen3-ASR (`ru`), terminal cwd under `/Users/hermes/workspaces`, and the keyless free fallback chain (`laguna-s-2.1-free`, `nemotron-3.5-lightning-free` via `opencode-free`).
 
 Role baselines fail closed:
 
-- `general`: universal source-routing plugin/skill enabled, Telegram allowlist-only shared fallback, and no Linear MCP or `LINEAR_TOKEN` injection.
-- `broker`: Telegram explicitly disabled, dispatcher left disabled for the separate cutover slice, and no Linear MCP or shared secret helper.
-- `project-manager`: Linear MCP enabled through the shared command-secret fallback; Telegram explicitly disabled until the owner inserts a unique profile token and enables the adapter.
+- `general`: universal Linear plus Calendar source-routing plugin/skills enabled, Telegram allowlist-only shared fallback, and no Linear MCP, `LINEAR_TOKEN`, Google client, or Google OAuth injection.
+- `broker`: Telegram explicitly disabled, dispatcher left disabled for the separate cutover slice, and no Linear MCP, Google client, or shared secret helper.
+- `personal-assistant`: headless Calendar worker plugin/skill enabled; existing profile-local Google OAuth is not copied by bootstrap, and Linear MCP/client/credentials are absent. This role is accepted only for the canonical profile name `personal-assistant`, matching task assignment and runtime attestation paths.
+- `project-manager`: Linear MCP enabled through the profile-local `LINEAR_TOKEN`; Telegram explicitly disabled.
 
 The plan reports role-specific required variables and dedicated Gateway safe roots. Secrets, Telegram tokens, model authentication, LaunchDaemon installation, and gateway service starts remain manual/approval-gated. Profile `.env` files are never created or copied by the workflow.
 
@@ -93,7 +94,11 @@ SIS-68 defines universal routing for every current and future user-facing profil
 
 SIS-77 uses one current protocol only: source commands are `linear-command.v2`, persisted PM envelopes are `linear-kanban-task.v2`, and PM results/replay validation are `linear-result.v2`. Mutation keys use the global `linear:v2` namespace and delivery keys use `linear-delivery:v2`, retaining the same source-independent mutation payload and exact source-identity delivery payload. Any non-current schema fails closed; no alternate Linear mutation route exists.
 
-The default `hermes-profile-bootstrap` role installs/enables the universal plugin and routing skill, configures no Linear MCP/token for the source profile, and reports mandatory source-Gateway/broker restart plus PM read-back/wake/replay gates. Full local verification, reviewed per-profile rollout, future-profile proof and rollback: [`docs/universal-linear-routing-e2e.md`](docs/universal-linear-routing-e2e.md).
+The default `hermes-profile-bootstrap` role installs/enables the universal plugin and routing skills, configures no Linear MCP/token or Google credential/client for the source profile, and reports mandatory source-Gateway/broker restart plus specialist read-back/wake/replay gates. Full local verification, reviewed per-profile rollout, future-profile proof and rollback: [`docs/universal-linear-routing-e2e.md`](docs/universal-linear-routing-e2e.md).
+
+## `calendar_source_request` + `personal-assistant-calendar`
+
+SIS-123 routes bounded Calendar inventory/events/freebusy and approval-gated create/update/delete from every general profile through the same exact-session Kanban bus to the headless Personal Assistant. The source and broker have no Google credentials/client; Personal Assistant has no Linear credentials/client. Writes return the exact preview plus an opaque approval reference bound to a PII-free target-state snapshot, accept explicit approval only from that same source session, recheck the snapshot immediately before apply, and then execute the reviewed approval/apply/read-back workflows. Protocol, local evidence, owner-gated rollout, cleanup, and the explicitly pending production E2E are documented in [`docs/universal-calendar-routing-e2e.md`](docs/universal-calendar-routing-e2e.md).
 
 ## `linear-project-standard`
 

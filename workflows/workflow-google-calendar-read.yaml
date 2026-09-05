@@ -9,8 +9,13 @@ tags:
   domain: hermes-platform
   integration: google-calendar
   safety: read-only-plan-and-bounded-read
-  owner: default
+  owner: personal-assistant
 inputs:
+  operation:
+    type: string
+    enum: [inventory, events, freebusy]
+    default: events
+    description: Fixed bounded Calendar read operation.
   window:
     type: string
     enum: [today, next-7-days, next-30-days]
@@ -21,13 +26,18 @@ jobs:
     description: List, inspect, or query Google Calendar for the Personal Assistant with strict bounds and redaction.
     steps:
       - name: run
-        description: Execute the deterministic calendar read CLI in plan/smoke mode.
+        description: Execute the deterministic Calendar CLI in bounded live read mode.
         task:
           type: model_method
           modelIdOrName: google-calendar-read
           methodName: execute
           inputs:
-            run: /Users/hermes/.hermes/hermes-agent/venv/bin/python scripts/google_calendar_read.py --operation smoke --window ${{ inputs.window }} --profile personal-assistant
+            run: >-
+              /Users/hermes/.hermes/hermes-agent/venv/bin/python scripts/google_calendar_read.py
+              --operation '${{ inputs.operation }}'
+              --window '${{ inputs.window }}'
+              --profile personal-assistant
+              --live
             workingDir: .
             timeout: 60000
             ignoreExitCode: false

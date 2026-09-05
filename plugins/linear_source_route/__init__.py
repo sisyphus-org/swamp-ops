@@ -6,6 +6,10 @@ from datetime import date
 from typing import Any, Callable
 
 from .audit import audit_route as bundled_audit_route
+from .calendar_route import (
+    CalendarRouteError,
+    route_calendar_request,
+)
 from .route import (
     CREDENTIAL_SHAPES,
     RouteError,
@@ -1844,6 +1848,89 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
         )
 
 
+CALENDAR_SOURCE_REQUEST_SCHEMA = {
+    "name": "calendar_source_request",
+    "description": (
+        "Route one bounded Calendar inventory, events, freebusy, write-plan, or "
+        "same-session explicit approval through the Personal Assistant Kanban lane."
+    ),
+    "parameters": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "operation": {
+                "type": "string",
+                "enum": ["inventory", "events", "freebusy", "create", "update", "delete", "approve"],
+            },
+            "window": {"type": "string", "enum": ["today", "next-7-days", "next-30-days"]},
+            "block_key": {"type": "string", "maxLength": 64, "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"},
+            "summary": {"type": "string", "maxLength": 200, "pattern": "^[^'\\r\\n]*$"},
+            "start": {"type": "string", "maxLength": 19},
+            "end": {"type": "string", "maxLength": 19},
+            "linear_url": {
+                "type": "string",
+                "pattern": "^https://linear\\.app/[A-Za-z0-9_-]+/issue/SIS-[1-9][0-9]*/[A-Za-z0-9][A-Za-z0-9_-]*$",
+            },
+            "details": {"type": "string", "maxLength": 4000, "pattern": "^[^'\\r\\n]*$"},
+            "approval_reference": {
+                "type": "string",
+                "pattern": "^calendar-approval:v1:[a-f0-9]{64}$",
+            },
+        },
+        "oneOf": [
+            {
+                "required": ["operation", "window"],
+                "minProperties": 2,
+                "maxProperties": 2,
+                "properties": {"operation": {"enum": ["inventory", "events", "freebusy"]}},
+            },
+            {
+                "required": ["operation", "block_key", "summary", "start", "end", "linear_url", "details"],
+                "minProperties": 7,
+                "maxProperties": 7,
+                "properties": {"operation": {"enum": ["create", "update", "delete"]}},
+            },
+            {
+                "required": ["operation", "approval_reference"],
+                "minProperties": 2,
+                "maxProperties": 2,
+                "properties": {"operation": {"const": "approve"}},
+            },
+        ],
+    },
+}
+
+
+def handle_calendar_source_request(args: dict[str, Any], **kwargs: Any) -> str:
+    """Route Calendar work without exposing credentials or internal task identity."""
+    try:
+        if not isinstance(args, dict):
+            raise CalendarRouteError("tool input must be an object")
+        session_getter = kwargs.get("session_getter") or _default_session_getter
+        runtime_profile_getter = kwargs.get("runtime_profile_getter") or _default_runtime_profile_getter
+        source = _source_context(
+            handler_session_id=str(kwargs.get("session_id") or ""),
+            runtime_profile=str(runtime_profile_getter() or ""),
+            session_getter=session_getter,
+        )
+        board_factory = kwargs.get("board_factory") or HermesKanbanBoard
+        board = board_factory(source_profile=source.profile)
+        return json.dumps(
+            route_calendar_request(dict(args), source=source, board=board),
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    except Exception:  # noqa: BLE001 - fail closed at the public plugin boundary
+        return json.dumps(
+            {
+                "status": "rejected",
+                "message": "Calendar routing is unavailable or the request is outside the safe capability.",
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+
+
 def register(ctx: Any) -> None:
     ctx.register_tool(
         name="linear_source_request",
@@ -1852,4 +1939,12 @@ def register(ctx: Any) -> None:
         handler=handle_linear_source_request,
         description=LINEAR_SOURCE_REQUEST_SCHEMA["description"],
         emoji="🔁",
+    )
+    ctx.register_tool(
+        name="calendar_source_request",
+        toolset="linear-source-route",
+        schema=CALENDAR_SOURCE_REQUEST_SCHEMA,
+        handler=handle_calendar_source_request,
+        description=CALENDAR_SOURCE_REQUEST_SCHEMA["description"],
+        emoji="📅",
     )

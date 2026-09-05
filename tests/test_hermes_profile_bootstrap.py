@@ -75,10 +75,10 @@ class BootstrapContractTests(unittest.TestCase):
         self.assertFalse(parsed["kanban"]["dispatch_in_gateway"])
         self.assertNotIn("mcp_servers", parsed)
         self.assertNotIn("secrets", parsed)
-        self.assertNotIn("plugins", parsed)
+        self.assertEqual(parsed["plugins"]["enabled"], ["personal-assistant-calendar"])
         self.assertNotIn("LINEAR_TOKEN", rendered)
 
-        profile = "pa-contract-test"
+        profile = "personal-assistant"
         old_argv = sys.argv
         old_root = bootstrap.HERMES_ROOT
         try:
@@ -100,6 +100,36 @@ class BootstrapContractTests(unittest.TestCase):
             bootstrap.HERMES_ROOT = old_root  # type: ignore[attr-defined]
             sys.argv = old_argv
         self.assertTrue(payload["telegram"]["explicitlyDisabled"])
+        self.assertTrue(payload["calendarRouting"]["enabled"])
+        self.assertEqual(payload["calendarRouting"]["workerProfile"], "personal-assistant")
+        self.assertFalse(payload["calendarRouting"]["directLinearAccessAvailable"])
+
+    def test_personal_assistant_role_rejects_noncanonical_profile_name(self):
+        old_argv = sys.argv
+        old_root = bootstrap.HERMES_ROOT
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                bootstrap.HERMES_ROOT = Path(tmp) / "profiles"
+                sys.argv = [
+                    str(SCRIPT), "--profile", "pa-fixture",
+                    "--role", "personal-assistant", "--mode", "plan",
+                ]
+                with contextlib.redirect_stdout(io.StringIO()) as output:
+                    self.assertEqual(bootstrap.main(), 1)
+                payload = json.loads(output.getvalue())
+        finally:
+            bootstrap.HERMES_ROOT = old_root
+            sys.argv = old_argv
+        self.assertIn("canonical profile name", payload["issues"][0])
+
+    def test_general_source_plan_exposes_calendar_route_without_google_credentials(self):
+        rendered = bootstrap.render_config(
+            "openai-codex", "gpt-5.6-sol-900k", Path("/Users/hermes/workspaces")
+        )
+        parsed = yaml.safe_load(rendered)
+        self.assertIn("linear-source-route", parsed["plugins"]["enabled"])
+        for forbidden in ("GOOGLE_CLIENT_SECRET", "GOOGLE_APPLICATION_CREDENTIALS", "token.json", "googleapiclient"):
+            self.assertNotIn(forbidden, rendered)
 
     def test_personal_assistant_scripts_do_not_implement_direct_linear_access(self):
         scripts = SCRIPT.parents[1] / "scripts"
@@ -210,6 +240,15 @@ class BootstrapContractTests(unittest.TestCase):
         self.assertEqual(
             {item["name"] for item in payload["requiredProfileEnv"]},
             {"LINEAR_TOKEN"},
+        )
+        self.assertEqual(
+            payload["verificationGates"],
+            [
+                "run config check and a real model response",
+                "run a real Russian STT transcription",
+                "verify profile-local LINEAR_TOKEN presence without exposing its value",
+                "verify a real Project Manager Linear read with exact read-back",
+            ],
         )
         self.assertFalse(profile_dir.exists())
 
@@ -389,6 +428,26 @@ class BootstrapContractTests(unittest.TestCase):
                 setattr(bootstrap, "HERMES_ROOT", old_root)
                 setattr(bootstrap, "SHARED_ENV", old_shared_env)
                 sys.argv = old_argv
+    def test_apply_installs_personal_assistant_worker_plugin_and_skill(self):
+        old_root = bootstrap.HERMES_ROOT
+        old_argv = sys.argv
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                bootstrap.HERMES_ROOT = Path(tmp) / "profiles"
+                sys.argv = [
+                    str(SCRIPT), "--profile", "personal-assistant", "--role", "personal-assistant", "--mode", "apply"
+                ]
+                with contextlib.redirect_stdout(io.StringIO()) as output:
+                    self.assertEqual(bootstrap.main(), 0)
+                profile = bootstrap.HERMES_ROOT / "personal-assistant"
+                self.assertTrue((profile / "plugins" / "personal_assistant_calendar" / "plugin.yaml").is_file())
+                self.assertTrue((profile / "skills" / "personal-assistant-calendar-worker" / "SKILL.md").is_file())
+                self.assertFalse((profile / ".env").exists())
+                payload = json.loads(output.getvalue())
+                self.assertTrue(payload["calendarRouting"]["enabled"])
+        finally:
+            bootstrap.HERMES_ROOT = old_root
+            sys.argv = old_argv
 
 
 if __name__ == "__main__":
