@@ -1,7 +1,7 @@
 ---
 name: calendar-source-request-routing
 description: Route Calendar reads and approval-gated writes to PA.
-version: 1.1.0
+version: 1.1.1
 author: sisyphus-org
 platforms: [linux, macos]
 metadata:
@@ -29,6 +29,26 @@ Calendar and Linear are independent operations. A normal Calendar request must n
 6. After `queued`, stop. On wake, replay the exact approval call and report sanitized verified read-back.
 
 Never copy workflow run IDs, task IDs, OAuth data, event IDs, artifact versions, checksums, before-state hashes, or internal routing fields into the human response. The public preview contains only the operation, block key, summary, details, Kyiv-aware start/end, timezone, and optional canonical Linear URL. If routing is unavailable, report the truthful capability error; never instruct the owner to upload an OAuth JSON file.
+
+### Owner-facing preview format
+
+Validate and retain every exact preview field internally for approval binding,
+but present only human-relevant information. Use a short heading that expresses
+the action (`Создать запись?`, `Изменить запись?`, or `Удалить запись?`) instead
+of rendering the literal protocol operation.
+
+- Show the event title.
+- Convert ISO timestamps to a human-readable local date and time range, for
+  example `6 сентября, 10:00–12:00`.
+- Show the timezone name and UTC offset, for example `Киев, UTC+3`.
+- Show details only when they add material information not already in the title.
+- Show a linked Linear issue only when `linear_url` is non-empty.
+- Always omit `operation`, omit `block_key`, omit an empty `linear_url`, and do
+  not expose ISO timestamps or empty fields.
+
+Do not change, drop, or infer any material value when formatting. The approval
+call still uses the exact opaque reference bound to the complete machine
+preview, not the shortened owner-facing rendering.
 
 ### Literal field preservation
 

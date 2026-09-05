@@ -272,6 +272,20 @@ class CalendarSourcePluginTests(unittest.TestCase):
         self.assertIn("calendar_source_request", runbook)
         self.assertIn("pa_calendar_execute", runbook)
 
+    def test_calendar_preview_guidance_is_concise_and_human_readable(self):
+        guidance = (
+            ROOT / "skills" / "calendar-source-request-routing" / "SKILL.md"
+        ).read_text()
+        for required in (
+            "human-readable local date",
+            "timezone name and UTC offset",
+            "omit `operation`",
+            "omit `block_key`",
+            "omit an empty `linear_url`",
+        ):
+            self.assertIn(required, guidance)
+        self.assertIn("Show details only when", guidance)
+
 
 if __name__ == "__main__":
     unittest.main()
