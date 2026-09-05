@@ -750,6 +750,16 @@ def parse_linear_request(
                 raise RouteError("state is not in the safe-state allowlist")
             target = {"type": "issue", "identifier": identifier}
             change = {"state": state}
+        elif operation == "add_comment":
+            identifier = _issue_identifier(request)
+            target_field = "identifier" if "identifier" in request else "issue_number"
+            if set(request) != {"operation", target_field, "body"}:
+                raise RouteError("structured comment request has invalid fields")
+            _validate_clean_text(
+                request.get("body"), "body", maximum=4_000, required=True
+            )
+            target = {"type": "issue", "identifier": identifier}
+            change = {"body": request["body"]}
         elif operation == "update_issue":
             allowed = {
                 "operation",

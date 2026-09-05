@@ -477,6 +477,66 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(command["policy"], {"mode": "standard"})
         self.assertRegex(command["idempotency_key"], r"^linear:v2:[a-f0-9]{32}$")
 
+    def test_structured_comment_request_becomes_same_bounded_command(self):
+        structured = route.parse_linear_request(
+            {
+                "operation": "add_comment",
+                "identifier": "SIS-70",
+                "body": "Краткие выводы после чтения.",
+            },
+            source_profile="books",
+            uuid_factory=uuid_factory(),
+        ).command
+        legacy = route.parse_linear_request(
+            "Добавь к SIS-70 комментарий: Краткие выводы после чтения.",
+            source_profile="books",
+            uuid_factory=uuid_factory(),
+        ).command
+
+        self.assertEqual(structured["operation"], "add_comment")
+        self.assertEqual(
+            structured["target"], {"type": "issue", "identifier": "SIS-70"}
+        )
+        self.assertEqual(structured["change"], {"body": "Краткие выводы после чтения."})
+        self.assertEqual(structured["idempotency_key"], legacy["idempotency_key"])
+
+    def test_structured_comment_accepts_positive_issue_number(self):
+        command = route.parse_linear_request(
+            {
+                "operation": "add_comment",
+                "issue_number": 70,
+                "body": "Books proof.",
+            },
+            source_profile="books",
+            uuid_factory=uuid_factory(),
+        ).command
+        self.assertEqual(command["target"]["identifier"], "SIS-70")
+
+    def test_structured_comment_fails_closed_on_invalid_shape_or_body(self):
+        invalid = (
+            {"operation": "add_comment", "identifier": "SIS-70"},
+            {
+                "operation": "add_comment",
+                "identifier": "SIS-70",
+                "issue_number": 70,
+                "body": "ambiguous target",
+            },
+            {
+                "operation": "add_comment",
+                "identifier": "SIS-70",
+                "body": "Authorization: Bearer secret-shaped-value",
+            },
+            {
+                "operation": "add_comment",
+                "identifier": "SIS-70",
+                "body": "bounded",
+                "unexpected": True,
+            },
+        )
+        for request in invalid:
+            with self.subTest(request=request), self.assertRaises(route.RouteError):
+                route.parse_linear_request(request, uuid_factory=uuid_factory())
+
     def test_exact_replay_keeps_idempotency_key(self):
         factory = uuid_factory()
         first = route.parse_linear_request(

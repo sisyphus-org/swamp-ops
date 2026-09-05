@@ -179,8 +179,8 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
     "name": "linear_source_request",
     "description": (
         "Route one bounded Linear request from an allowed user-facing profile "
-        "through the project-manager Kanban lane. Accepts an exact comment text, "
-        "a structured state/field/child request targeting either exact SIS-N or a "
+        "through the project-manager Kanban lane. Accepts a structured bounded "
+        "comment or state/field/child request targeting either exact SIS-N or a "
         "positive issue_number in the single SIS team, deterministic description "
         "link removal, one bounded hierarchy request, one "
         "standalone issue in an exact existing scope, one exact project or milestone "
@@ -200,12 +200,17 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 4200,
-                "description": "Exact bounded comment request text.",
+                "description": (
+                    "Legacy-only exact Russian comment command for backward-compatible "
+                    "replay; use operation=add_comment with identifier or issue_number "
+                    "and body for new calls."
+                ),
             },
             "operation": {
                 "type": "string",
                 "enum": [
                     "bulk_linear_operations",
+                    "add_comment",
                     "change_state",
                     "update_issue",
                     "inventory_sub_issues",
@@ -231,6 +236,7 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                 ],
             },
             "query": {"type": "string", "minLength": 1, "maxLength": 500},
+            "body": {"type": "string", "minLength": 1, "maxLength": 4000},
             "entity_types": {
                 "type": "array",
                 "minItems": 1,
@@ -483,7 +489,16 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
             },
         },
         "oneOf": [
-            {"required": ["request"]},
+            {"required": ["request"], "maxProperties": 1},
+            {
+                "required": ["operation", "body"],
+                "maxProperties": 3,
+                "properties": {"operation": {"const": "add_comment"}},
+                "oneOf": [
+                    {"required": ["identifier"]},
+                    {"required": ["issue_number"]},
+                ],
+            },
             {
                 "required": ["operation", "items"],
                 "properties": {
@@ -1679,6 +1694,15 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
         elif (
             args.get("operation") in {"archive_linear_entity", "delete_linear_entity"}
             and set(args) == {"operation", "entity_type", "selector", "approval"}
+        ):
+            request = dict(args)
+        elif (
+            args.get("operation") == "add_comment"
+            and "body" in args
+            and bool(set(args) & {"identifier", "issue_number"})
+            and set(args).issubset(
+                {"operation", "identifier", "issue_number", "body"}
+            )
         ):
             request = dict(args)
         elif (

@@ -1,7 +1,7 @@
 ---
 name: linear-source-request-routing
 description: Route Linear reads/writes through broker and Project Manager.
-version: 1.3.2
+version: 1.3.3
 author: Alexey Petrov, Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -77,7 +77,7 @@ If authoritative mutation-scoped provenance identifies one exact compatible resu
    - do not ask solely about omitted `SIS-`, case, or the word `задача`;
    - ask only when there is no task number, more than one plausible task number, or the number belongs to unrelated prose rather than a task reference.
 2. Call `linear_source_request` once with the matching bounded shape:
-   - comment: `request=<exact supported comment text>`;
+   - comment: `operation=add_comment`, exactly one of exact `identifier` or positive `issue_number`, and exact non-empty `body` (maximum 4,000 characters). Never encode the target or action into a natural-language `request` string. The old exact Russian string form remains accepted only for backward-compatible replay;
    - state: `operation=change_state`, exactly one of exact `identifier` or positive `issue_number`, and one exact directly writable `state`. Never attach approval to a state transition. `Duplicate` is not writable through `change_state`;
    - issue fields: `operation=update_issue`, exactly one of exact `identifier` or positive `issue_number`, and a bounded managed-field subset. A standard top-level parent attach uses exact `parent_identifier`. Parent replacement or clear must contain only `parent_identifier` (exact `SIS-N` or `null`) plus the exact fixed `approval` reference;
    - when the owner says to remove links from the description, use `description_transform=remove_links`; this preserves visible text (including Markdown labels) and removes HTTP(S) destinations. Do not ask whether to clear the whole description unless the owner explicitly asked to clear it;

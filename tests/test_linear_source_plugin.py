@@ -230,6 +230,53 @@ class FakeKanban:
 
 
 class AdapterTests(unittest.TestCase):
+    def test_tool_schema_exposes_structured_comment_shape(self):
+        parameters = LINEAR_SOURCE_REQUEST_SCHEMA["parameters"]
+        self.assertIn("add_comment", parameters["properties"]["operation"]["enum"])
+        self.assertEqual(
+            parameters["properties"]["body"],
+            {"type": "string", "minLength": 1, "maxLength": 4000},
+        )
+        self.assertIn(
+            "Legacy-only", parameters["properties"]["request"]["description"]
+        )
+        self.assertIn(
+            "use operation=add_comment", parameters["properties"]["request"]["description"]
+        )
+        jsonschema.validate(
+            {
+                "operation": "add_comment",
+                "identifier": "SIS-70",
+                "body": "Краткие выводы после чтения.",
+            },
+            parameters,
+        )
+        with self.assertRaises(jsonschema.ValidationError):
+            jsonschema.validate(
+                {
+                    "operation": "add_comment",
+                    "identifier": "SIS-70",
+                    "body": "Краткие выводы после чтения.",
+                    "state": "Todo",
+                },
+                parameters,
+            )
+        for hybrid in (
+            {
+                "request": "Добавь к SIS-70 комментарий: replay",
+                "body": "extra",
+            },
+            {
+                "request": "Добавь к SIS-70 комментарий: replay",
+                "operation": "add_comment",
+                "body": "extra",
+            },
+        ):
+            with self.subTest(hybrid=hybrid), self.assertRaises(
+                jsonschema.ValidationError
+            ):
+                jsonschema.validate(hybrid, parameters)
+
     def test_tool_schema_exposes_terminal_state_without_approval(self):
         schema = LINEAR_SOURCE_REQUEST_SCHEMA["parameters"]
         request = {
@@ -661,6 +708,7 @@ class PluginTests(unittest.TestCase):
             {
                 "request",
                 "operation",
+                "body",
                 "query",
                 "entity_types",
                 "include_archived",
@@ -769,7 +817,7 @@ class PluginTests(unittest.TestCase):
             create_branch["properties"]["parent_identifier"],
             {"type": "string", "pattern": "^SIS-[1-9][0-9]*$"},
         )
-        self.assertEqual(len(parameters["oneOf"]), 23)
+        self.assertEqual(len(parameters["oneOf"]), 24)
         self.assertEqual(
             parameters["properties"]["description_transform"]["enum"],
             ["remove_links"],
@@ -778,6 +826,7 @@ class PluginTests(unittest.TestCase):
             parameters["properties"]["operation"]["enum"],
             [
                 "bulk_linear_operations",
+                "add_comment",
                 "change_state",
                 "update_issue",
                 "inventory_sub_issues",
@@ -806,6 +855,7 @@ class PluginTests(unittest.TestCase):
             [branch.get("properties", {}).get("operation", {}).get("const") for branch in parameters["oneOf"]],
             [
                 None,
+                "add_comment",
                 "bulk_linear_operations",
                 "search_linear",
                 "inventory_linear",
@@ -1610,6 +1660,53 @@ class PluginTests(unittest.TestCase):
         self.assertNotIn("task_id", json.dumps(result))
         self.assertNotIn("idempotency", json.dumps(result))
         self.assertNotIn("delivery_key", json.dumps(result))
+        fake_board.get_or_create_task.assert_called_once()
+
+    def test_handler_accepts_structured_comment_without_hidden_prose_grammar(self):
+        fake_board = mock.Mock()
+        existing = {
+            "id": "t_1234abcd",
+            "status": "done",
+            "session_id": "20260828_120000_abcdef12",
+            "result": json.dumps(
+                {
+                    "schema_version": "linear-result.v2",
+                    "verified": True,
+                    "result": "applied",
+                    "target": {
+                        "identifier": "SIS-70",
+                        "url": "https://linear.app/example/issue/SIS-70/fixture",
+                    },
+                }
+            ),
+        }
+        set_existing_task(fake_board, existing)
+        session_values = {
+            "HERMES_SESSION_PROFILE": "books",
+            "HERMES_SESSION_PLATFORM": "telegram",
+            "HERMES_SESSION_CHAT_ID": "442308262",
+            "HERMES_SESSION_USER_ID": "442308262",
+            "HERMES_SESSION_CHAT_TYPE": "dm",
+            "HERMES_SESSION_THREAD_ID": "448864",
+            "HERMES_SESSION_ID": "20260828_120000_abcdef12",
+        }
+
+        result = json.loads(
+            handle_linear_source_request(
+                {
+                    "operation": "add_comment",
+                    "identifier": "SIS-70",
+                    "body": "Краткие выводы после чтения.",
+                },
+                session_id="20260828_120000_abcdef12",
+                board_factory=lambda **_kwargs: fake_board,
+                session_getter=lambda name, default="": session_values.get(name, default),
+                runtime_profile_getter=lambda: "books",
+            )
+        )
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["target"]["identifier"], "SIS-70")
         fake_board.get_or_create_task.assert_called_once()
 
     def test_handler_accepts_any_allowlisted_runtime_profile(self):
