@@ -20,6 +20,10 @@ UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 APPROVAL_REFERENCE = re.compile(r"^calendar-approval:v1:[a-f0-9]{64}$")
 GIT_REVISION = re.compile(r"^[0-9a-f]{40}$")
+PUBLIC_ISSUE_URL = re.compile(
+    r"^https://linear\.app/[A-Za-z0-9_-]+/issue/(SIS-[1-9][0-9]*)/"
+    r"[A-Za-z0-9][A-Za-z0-9_-]*$"
+)
 RUNTIME_WORKSPACE = Path("/Users/hermes/workspaces/swamp-ops-runtime")
 RUNTIME_REVISION_FILE = Path(
     "/Users/hermes/.hermes/profiles/personal-assistant/plugin-data/"
@@ -30,6 +34,7 @@ CREDENTIAL_PATTERNS = (
     re.compile(r"\b(?:ya29\.|1//)[A-Za-z0-9._-]{6,}\b"),
     re.compile(r'"(?:client_secret|refresh_token|access_token)"\s*:\s*"[^"]*"', re.IGNORECASE),
 )
+_UNSET = object()
 EXPECTED_WORKER_CONTRACT = {
     "profile": "personal-assistant",
     "tool": "pa_calendar_execute",
@@ -162,10 +167,7 @@ def _validate_command_request(command: dict[str, Any]) -> None:
             raise CalendarWorkerError(f"Calendar write {field} is invalid")
     if re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", request["block_key"]) is None:
         raise CalendarWorkerError("Calendar write block_key is invalid")
-    if re.fullmatch(
-        r"https://linear\.app/[A-Za-z0-9_-]+/issue/SIS-[1-9][0-9]*/[A-Za-z0-9][A-Za-z0-9_-]*",
-        request["linear_url"],
-    ) is None:
+    if request["linear_url"] and PUBLIC_ISSUE_URL.fullmatch(request["linear_url"]) is None:
         raise CalendarWorkerError("Calendar write Linear URL is invalid")
     serialized = json.dumps(request, ensure_ascii=False)
     if any(pattern.search(serialized) for pattern in CREDENTIAL_PATTERNS):
@@ -366,11 +368,12 @@ def _public_plan_preview(request: dict[str, Any], plan: Any) -> dict[str, Any]:
         raise CalendarWorkerError("Calendar plan preview is invalid")
     linear = plan.get("linearIssue")
     event = plan.get("event")
-    if (
-        not isinstance(linear, dict)
-        or linear.get("url") != request["linear_url"]
-        or not isinstance(event, dict)
-    ):
+    expected_linear = request["linear_url"]
+    if expected_linear:
+        linear_matches = isinstance(linear, dict) and linear.get("url") == expected_linear
+    else:
+        linear_matches = linear is None
+    if not linear_matches or not isinstance(event, dict):
         raise CalendarWorkerError("Calendar plan preview does not match the request")
     operation = request["operation"]
     if operation == "delete":
@@ -380,9 +383,12 @@ def _public_plan_preview(request: dict[str, Any], plan: Any) -> dict[str, Any]:
     else:
         start_value = event.get("start")
         end_value = event.get("end")
-        expected_description = f"Linear: {request['linear_url']}"
-        if request["details"].strip():
-            expected_description = f"{request['details'].strip()}\n\n{expected_description}"
+        expected_description = request["details"].strip()
+        if request["linear_url"]:
+            marker = f"Linear: {request['linear_url']}"
+            expected_description = (
+                f"{expected_description}\n\n{marker}" if expected_description else marker
+            )
         if (
             event.get("summary") != request["summary"].strip()
             or event.get("description") != expected_description
@@ -474,8 +480,9 @@ def execute_calendar_command(
         preview = _public_plan_preview(request, raw_plan)
         reservation_check()
         snapshot = workflows.snapshot(request)
-        expected_identifier_match = re.search(
-            r"/issue/(SIS-[1-9][0-9]*)/", request["linear_url"]
+        expected_identifier_match = PUBLIC_ISSUE_URL.fullmatch(request["linear_url"])
+        expected_identifier = (
+            expected_identifier_match.group(1) if expected_identifier_match else None
         )
         if (
             not isinstance(snapshot, dict)
@@ -484,8 +491,7 @@ def execute_calendar_command(
             }
             or snapshot.get("operation") != "snapshot"
             or snapshot.get("status") != "ok"
-            or expected_identifier_match is None
-            or snapshot.get("linearIssue") != expected_identifier_match.group(1)
+            or snapshot.get("linearIssue") != expected_identifier
             or snapshot.get("blockKey") != request["block_key"]
             or not isinstance(snapshot.get("beforeStateHash"), str)
             or SHA256.fullmatch(snapshot["beforeStateHash"]) is None
@@ -546,6 +552,12 @@ def execute_calendar_command(
     })
     reservation_check()
     live_snapshot = workflows.snapshot(approved_request)
+    expected_identifier_match = PUBLIC_ISSUE_URL.fullmatch(
+        approved_request.get("linear_url", "")
+    )
+    expected_identifier = (
+        expected_identifier_match.group(1) if expected_identifier_match else None
+    )
     if (
         not isinstance(live_snapshot, dict)
         or set(live_snapshot) != {
@@ -553,23 +565,23 @@ def execute_calendar_command(
         }
         or live_snapshot.get("operation") != "snapshot"
         or live_snapshot.get("status") != "ok"
+        or live_snapshot.get("linearIssue") != expected_identifier
+        or live_snapshot.get("blockKey") != approved_request.get("block_key")
         or live_snapshot.get("beforeStateHash") != plan["before_state_hash"]
     ):
         raise CalendarWorkerError("Calendar target changed after owner preview")
     reservation_check()
     data = workflows.apply(plan, approval)
-    expected_identifier_match = re.search(
-        r"/issue/(SIS-[1-9][0-9]*)/", approved_request.get("linear_url", "")
-    )
-    expected_keys = {"operation", "status", "reused", "linearIssue", "blockKey"}
+    required_keys = {"operation", "status", "reused", "blockKey"}
+    allowed_keys = required_keys | {"linearIssue"}
     if (
         not isinstance(data, dict)
-        or set(data) != expected_keys
+        or not required_keys.issubset(data)
+        or not set(data).issubset(allowed_keys)
         or data.get("status") != "verified"
         or data.get("operation") != approved_request.get("operation")
         or not isinstance(data.get("reused"), bool)
-        or expected_identifier_match is None
-        or data.get("linearIssue") != expected_identifier_match.group(1)
+        or data.get("linearIssue") != expected_identifier
         or data.get("blockKey") != approved_request.get("block_key")
     ):
         raise CalendarWorkerError("Calendar apply workflow lacks verified read-back")
@@ -790,7 +802,11 @@ def _completed_result_path(command: dict[str, Any], environ: Any) -> Path:
 
 
 def _validate_completed_result(
-    command: dict[str, Any], result: Any, session_id: str
+    command: dict[str, Any],
+    result: Any,
+    session_id: str,
+    *,
+    expected_linear_issue: str | None | object = _UNSET,
 ) -> dict[str, Any]:
     common = {
         "schema_version", "command_id", "idempotency_key", "source_profile",
@@ -835,14 +851,29 @@ def _validate_completed_result(
             raise CalendarWorkerError("completed Calendar plan journal binding is invalid")
     elif operation == "approve_write":
         data = result.get("data")
+        required_data = {"operation", "status", "reused", "blockKey"}
+        allowed_data = required_data | {"linearIssue"}
+        observed_linear_issue = data.get("linearIssue") if isinstance(data, dict) else None
+        linkage_matches = (
+            expected_linear_issue is _UNSET
+            or (expected_linear_issue is None and observed_linear_issue is None)
+            or (
+                isinstance(expected_linear_issue, str)
+                and isinstance(data, dict)
+                and "linearIssue" in data
+                and observed_linear_issue == expected_linear_issue
+            )
+        )
         if (
             set(result) != common | {"data"}
             or result.get("phase") != "completed"
             or result.get("outcome") not in {"applied", "no_op"}
             or not isinstance(data, dict)
-            or set(data) != {"operation", "status", "reused", "linearIssue", "blockKey"}
+            or not required_data.issubset(data)
+            or not set(data).issubset(allowed_data)
             or data.get("status") != "verified"
             or not isinstance(data.get("reused"), bool)
+            or not linkage_matches
         ):
             raise CalendarWorkerError("completed Calendar apply journal is invalid")
     else:
@@ -860,7 +891,23 @@ def _load_completed_result(
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise CalendarWorkerError("completed Calendar journal is unreadable") from exc
-    return _validate_completed_result(command, value, session_id)
+    expected_linear_issue: str | None | object = _UNSET
+    if command["operation"] == "approve_write":
+        reference = command["request"].get("approval_reference")
+        approved = _load_approval_plan(
+            reference, Path(str(environ["HERMES_KANBAN_DB"]))
+        )
+        approved_request = approved.get("request")
+        if not isinstance(approved_request, dict):
+            raise CalendarWorkerError("completed Calendar approval binding is invalid")
+        match = PUBLIC_ISSUE_URL.fullmatch(approved_request.get("linear_url", ""))
+        expected_linear_issue = match.group(1) if match else None
+    return _validate_completed_result(
+        command,
+        value,
+        session_id,
+        expected_linear_issue=expected_linear_issue,
+    )
 
 
 def _write_completed_result(

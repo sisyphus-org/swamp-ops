@@ -35,10 +35,15 @@ CREDENTIAL_SHAPES = (
     re.compile(r"\b(?:ya29\.|1//)[A-Za-z0-9._-]{12,}\b"),
     re.compile(r'"(?:client_secret|refresh_token|access_token)"\s*:', re.IGNORECASE),
 )
+_UNSET = object()
 
 
 class CalendarRouteError(RuntimeError):
     """A Calendar request violates the bounded source contract."""
+
+
+class CalendarRequestError(CalendarRouteError):
+    """A safe owner-visible validation error in the submitted request."""
 
 
 @dataclass(frozen=True)
@@ -84,7 +89,7 @@ def _validate_text(value: Any, field: str, maximum: int, *, required: bool) -> s
 
 
 def _write_request(request: dict[str, Any]) -> dict[str, Any]:
-    if set(request) != WRITE_FIELDS:
+    if set(request) not in (WRITE_FIELDS, WRITE_FIELDS - {"linear_url"}):
         raise CalendarRouteError("Calendar write request has invalid fields")
     operation = request.get("operation")
     if operation not in WRITE_OPERATIONS:
@@ -96,9 +101,11 @@ def _write_request(request: dict[str, Any]) -> dict[str, Any]:
     details = _validate_text(request.get("details"), "details", 4000, required=False)
     start = _validate_text(request.get("start"), "start", 19, required=operation != "delete")
     end = _validate_text(request.get("end"), "end", 19, required=operation != "delete")
-    linear_url = request.get("linear_url")
-    if not isinstance(linear_url, str) or PUBLIC_ISSUE_URL.fullmatch(linear_url) is None:
-        raise CalendarRouteError("linear_url must be one canonical public SIS issue URL")
+    linear_url = request.get("linear_url", "")
+    if not isinstance(linear_url, str) or (
+        linear_url and PUBLIC_ISSUE_URL.fullmatch(linear_url) is None
+    ):
+        raise CalendarRouteError("linear_url must be empty or one canonical public SIS issue URL")
     if operation == "delete":
         if any((summary, start, end, details)):
             raise CalendarRouteError("delete requires empty event fields")
@@ -113,10 +120,10 @@ def _write_request(request: dict[str, Any]) -> dict[str, Any]:
                 raise CalendarRouteError(f"{field} must be a valid datetime") from exc
         if parsed_boundaries["end"] <= parsed_boundaries["start"]:
             raise CalendarRouteError("end must be after start")
-    return dict(request)
+    return {**request, "linear_url": linear_url}
 
 
-def parse_calendar_request(
+def _parse_calendar_request(
     request: Any,
     *,
     source_profile: str,
@@ -153,6 +160,20 @@ def parse_calendar_request(
     }
     command["idempotency_key"] = _semantic_key(command)
     return ParsedCalendarRequest(command=command)
+
+
+def parse_calendar_request(
+    request: Any,
+    *,
+    source_profile: str,
+    uuid_factory: UUIDFactory = _uuid4,
+) -> ParsedCalendarRequest:
+    try:
+        return _parse_calendar_request(
+            request, source_profile=source_profile, uuid_factory=uuid_factory
+        )
+    except CalendarRouteError as exc:
+        raise CalendarRequestError(str(exc)) from exc
 
 
 def delivery_key(mutation_key: str, source: SourceContext) -> str:
@@ -203,7 +224,12 @@ def _expected_approval_reference(
     return f"calendar-approval:v1:{digest}"
 
 
-def _load_completed(task: dict[str, Any], command: dict[str, Any]) -> dict[str, Any]:
+def _load_completed(
+    task: dict[str, Any],
+    command: dict[str, Any],
+    *,
+    expected_linear_issue: str | None | object = _UNSET,
+) -> dict[str, Any]:
     try:
         envelope = json.loads(task.get("body", ""))
         result = json.loads(task.get("result", ""))
@@ -334,17 +360,36 @@ def _load_completed(task: dict[str, Any], command: dict[str, Any]) -> dict[str, 
                 raise CalendarRouteError("Calendar read completion is invalid")
         return {"status": "completed", "phase": "completed", "data": data}
     if result["operation"] == "approve_write":
-        allowed_apply = {"operation", "status", "reused", "linearIssue", "blockKey"}
+        required_apply = {"operation", "status", "reused", "blockKey"}
+        allowed_apply = required_apply | {"linearIssue"}
+        observed_linear_issue = data.get("linearIssue") if isinstance(data, dict) else None
+        linkage_matches = (
+            expected_linear_issue is _UNSET
+            or (expected_linear_issue is None and observed_linear_issue is None)
+            or (
+                isinstance(expected_linear_issue, str)
+                and isinstance(data, dict)
+                and "linearIssue" in data
+                and observed_linear_issue == expected_linear_issue
+            )
+        )
         if (
             result.get("phase") != "completed"
             or result.get("outcome") not in {"applied", "no_op"}
             or not isinstance(data, dict)
-            or set(data) != allowed_apply
+            or not required_apply.issubset(data)
+            or not set(data).issubset(allowed_apply)
             or data.get("operation") not in WRITE_OPERATIONS
             or data.get("status") != "verified"
             or not isinstance(data.get("reused"), bool)
-            or not isinstance(data.get("linearIssue"), str)
-            or re.fullmatch(r"SIS-[1-9][0-9]*", data["linearIssue"]) is None
+            or not linkage_matches
+            or (
+                data.get("linearIssue") is not None
+                and (
+                    not isinstance(data.get("linearIssue"), str)
+                    or re.fullmatch(r"SIS-[1-9][0-9]*", data["linearIssue"]) is None
+                )
+            )
             or not isinstance(data.get("blockKey"), str)
             or BLOCK_KEY.fullmatch(data["blockKey"]) is None
         ):
@@ -356,6 +401,34 @@ def _load_completed(task: dict[str, Any], command: dict[str, Any]) -> dict[str, 
             "data": data,
         }
     raise CalendarRouteError("Calendar result operation is invalid")
+
+
+def approval_plan_linear_issue(
+    task: dict[str, Any], reference: str, source: SourceContext
+) -> str | None:
+    """Return the exact optional SIS identifier bound to one completed plan."""
+    try:
+        envelope = json.loads(task.get("body", ""))
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise CalendarRouteError("Calendar approval plan task is malformed") from exc
+    command = envelope.get("command") if isinstance(envelope, dict) else None
+    if (
+        not isinstance(command, dict)
+        or command.get("operation") != "plan_write"
+        or command.get("source_profile") != source.profile
+        or task.get("session_id") != source.session_id
+    ):
+        raise CalendarRouteError("Calendar approval plan binding is invalid")
+    completed = _load_completed(task, command)
+    if completed.get("approval_reference") != reference:
+        raise CalendarRouteError("Calendar approval plan reference is invalid")
+    linear_url = completed["preview"].get("linear_url")
+    if not linear_url:
+        return None
+    match = PUBLIC_ISSUE_URL.fullmatch(linear_url)
+    if match is None:
+        raise CalendarRouteError("Calendar approval plan linkage is invalid")
+    return match.group(1)
 
 
 def route_calendar_request(
@@ -386,7 +459,14 @@ def route_calendar_request(
     if not created:
         status = task.get("status")
         if status == "done":
-            return _load_completed(task, command)
+            expected_linear_issue: str | None | object = _UNSET
+            if command["operation"] == "approve_write":
+                expected_linear_issue = board.calendar_approval_linear_issue(
+                    command["request"]["approval_reference"], source
+                )
+            return _load_completed(
+                task, command, expected_linear_issue=expected_linear_issue
+            )
         if status == "blocked":
             return {"status": "blocked", "message": "Calendar routing or execution failed safely."}
         if status in {"todo", "ready", "running", "review"}:

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Approval-gated Google Calendar create/update/delete lane.
 
-The caller supplies a canonical Linear issue URL obtained through the existing
-Linear specialist route. This module never reads Linear credentials or calls
-Linear. It mutates only stable Linear-linked blocks in the primary calendar and
-verifies each outcome by deterministic read-back.
+The caller may supply a canonical Linear issue URL obtained through the existing
+Linear specialist route, but standalone Calendar events do not require one.
+This module never reads Linear credentials or calls Linear. It mutates only
+stable standalone or optionally Linear-linked blocks in the primary calendar
+and verifies each outcome by deterministic read-back.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ LOCAL_DATETIME = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(?::[
 BLOCK_KEY = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 OPERATIONS = ("create", "update", "delete")
 EVENT_ID_DOMAIN = b"google-calendar-linear-block:v1\0"
+STANDALONE_EVENT_ID_DOMAIN = b"google-calendar-standalone-block:v1\0"
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 UUID = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
@@ -327,17 +329,19 @@ def verify_calendar_approval(
     return plan, VerifiedApproval(plan_checksum, _marker=_VERIFIED_APPROVAL_MARKER)
 
 
-def validate_linear_url(value: str) -> tuple[str, str]:
-    if not isinstance(value, str) or not value:
-        raise CalendarWriteError("linear_url is required")
+def validate_linear_url(value: str) -> tuple[str, str | None]:
+    if not isinstance(value, str):
+        raise CalendarWriteError("linear_url must be a string")
+    if not value:
+        return "", None
     match = PUBLIC_ISSUE_URL.fullmatch(value)
     if match is None:
         raise CalendarWriteError("linear_url must be one canonical SIS issue URL")
     return value, match.group(1)
 
 
-def stable_event_id(identifier: str, block_key: str) -> str:
-    if re.fullmatch(r"SIS-[1-9][0-9]*", identifier) is None:
+def stable_event_id(identifier: str | None, block_key: str) -> str:
+    if identifier is not None and re.fullmatch(r"SIS-[1-9][0-9]*", identifier) is None:
         raise CalendarWriteError("Linear identifier is invalid")
     if (
         not isinstance(block_key, str)
@@ -345,6 +349,10 @@ def stable_event_id(identifier: str, block_key: str) -> str:
         or BLOCK_KEY.fullmatch(block_key) is None
     ):
         raise CalendarWriteError("block_key must be a safe slug of at most 64 characters")
+    if identifier is None:
+        return "evt" + hashlib.sha256(
+            STANDALONE_EVENT_ID_DOMAIN + block_key.encode("ascii")
+        ).hexdigest()
     return "sis" + hashlib.sha256(
         EVENT_ID_DOMAIN + identifier.encode("ascii") + b"\0" + block_key.encode("ascii")
     ).hexdigest()
@@ -406,9 +414,10 @@ def build_plan(
         if end_dt <= start_dt:
             raise CalendarWriteError("end must be after start")
 
-        description = f"Linear: {canonical_url}"
-        if details.strip():
-            description = f"{details.strip()}\n\n{description}"
+        description = details.strip()
+        if canonical_url:
+            linear_marker = f"Linear: {canonical_url}"
+            description = f"{description}\n\n{linear_marker}" if description else linear_marker
         event = {
             "summary": summary.strip(),
             "description": description,
@@ -424,7 +433,11 @@ def build_plan(
         "operation": operation,
         "blockKey": block_key,
         "eventId": event_id_value,
-        "linearIssue": {"identifier": identifier, "url": canonical_url},
+        "linearIssue": (
+            {"identifier": identifier, "url": canonical_url}
+            if identifier is not None
+            else None
+        ),
         "event": event,
         "requiredApproval": f"{operation.title()} this exact checksum-bound primary-calendar event",
         "blockers": [],
@@ -456,14 +469,19 @@ def _validate_plan_schema(plan: Any) -> None:
     operation = plan.get("operation")
     block_key = plan.get("blockKey")
     event_id = plan.get("eventId")
+    linked = (
+        isinstance(linear, dict)
+        and set(linear) == {"identifier", "url"}
+        and isinstance(linear.get("identifier"), str)
+        and isinstance(linear.get("url"), str)
+    )
     if (
         operation not in OPERATIONS
         or not isinstance(block_key, str)
         or len(block_key) > 64
         or BLOCK_KEY.fullmatch(block_key) is None
         or not isinstance(event_id, str)
-        or not isinstance(linear, dict)
-        or set(linear) != {"identifier", "url"}
+        or (linear is not None and not linked)
         or not isinstance(event, dict)
     ):
         raise CalendarWriteError("approved plan schema is invalid")
@@ -565,9 +583,12 @@ def _execute_existing_event_mutation(
 def _verify_event(actual: dict[str, Any], expected: dict[str, Any]) -> None:
     if actual.get("status") == "cancelled":
         raise CalendarWriteError("Calendar read-back is cancelled")
-    for field in ("summary", "description"):
-        if actual.get(field) != expected.get(field):
-            raise CalendarWriteError(f"Calendar read-back mismatch for {field}")
+    if actual.get("summary") != expected.get("summary"):
+        raise CalendarWriteError("Calendar read-back mismatch for summary")
+    expected_description = expected.get("description")
+    observed_description = actual.get("description", "")
+    if observed_description != expected_description:
+        raise CalendarWriteError("Calendar read-back mismatch for description")
     for field in ("start", "end"):
         observed = actual.get(field)
         desired = expected.get(field)
@@ -604,7 +625,7 @@ def _is_exact_linear_link(description: Any, canonical_url: str) -> bool:
 
 
 def _sanitized_result(
-    *, operation: str, identifier: str, block_key: str, reused: bool
+    *, operation: str, identifier: str | None, block_key: str, reused: bool
 ) -> dict[str, Any]:
     return {
         "operation": operation,
@@ -653,17 +674,22 @@ def apply_plan(
     event = plan.get("event")
     operation = plan.get("operation")
     block_key = plan.get("blockKey")
-    if not isinstance(linear, dict) or not isinstance(event, dict):
+    if linear is not None and not isinstance(linear, dict):
         raise CalendarWriteError("approved plan is incomplete")
-    canonical_url, identifier = validate_linear_url(linear.get("url"))
-    if linear.get("identifier") != identifier:
-        raise CalendarWriteError("approved Linear issue identifier is inconsistent")
+    if not isinstance(event, dict):
+        raise CalendarWriteError("approved plan is incomplete")
+    if linear is None:
+        canonical_url, identifier = "", None
+    else:
+        canonical_url, identifier = validate_linear_url(linear.get("url"))
+        if identifier is None or linear.get("identifier") != identifier:
+            raise CalendarWriteError("approved Linear issue identifier is inconsistent")
     if not isinstance(operation, str) or not isinstance(block_key, str):
         raise CalendarWriteError("approved plan operation identity is invalid")
     expected_event_id = stable_event_id(identifier, block_key)
     if plan.get("eventId") != expected_event_id:
         raise CalendarWriteError("approved event identity is inconsistent")
-    if operation != "delete" and not _is_exact_linear_link(
+    if canonical_url and operation != "delete" and not _is_exact_linear_link(
         event.get("description"), canonical_url
     ):
         raise CalendarWriteError("approved event description is not linked to Linear")
@@ -695,7 +721,7 @@ def apply_plan(
     if operation == "delete":
         if existing is None:
             raise CalendarWriteError("Calendar delete target state is inconsistent")
-        if not _is_exact_linear_link(existing.get("description"), canonical_url):
+        if canonical_url and not _is_exact_linear_link(existing.get("description"), canonical_url):
             raise CalendarWriteError("Calendar target is linked to a different Linear issue")
         try:
             request = service.events().delete(
@@ -725,7 +751,7 @@ def apply_plan(
     if operation == "update":
         if existing is None or existing.get("status") == "cancelled":
             raise CalendarWriteError("Calendar update target does not exist")
-        if not _is_exact_linear_link(existing.get("description"), canonical_url):
+        if canonical_url and not _is_exact_linear_link(existing.get("description"), canonical_url):
             raise CalendarWriteError("Calendar target is linked to a different Linear issue")
         try:
             _verify_event(existing, expected)
@@ -759,7 +785,7 @@ def apply_plan(
         )
 
     if existing is not None and existing.get("status") == "cancelled":
-        if not _is_exact_linear_link(existing.get("description"), canonical_url):
+        if canonical_url and not _is_exact_linear_link(existing.get("description"), canonical_url):
             raise CalendarWriteError("Calendar target is linked to a different Linear issue")
         restore_body = {**body, "status": "confirmed"}
         try:
@@ -847,12 +873,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.add_argument("--summary", default="")
         parser.add_argument("--start", default="")
         parser.add_argument("--end", default="")
-        parser.add_argument("--linear-url", required=True)
+        parser.add_argument("--linear-url", default="")
         parser.add_argument("--details", default="")
         parser.add_argument("--profile", default="personal-assistant")
     elif selected.mode == "snapshot":
         parser.add_argument("--block-key", default="primary")
-        parser.add_argument("--linear-url", required=True)
+        parser.add_argument("--linear-url", default="")
         parser.add_argument("--profile", default="personal-assistant")
     else:
         parser.add_argument("--plan-run-id", required=True)

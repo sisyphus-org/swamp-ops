@@ -7,7 +7,8 @@ from typing import Any, Callable
 
 from .audit import audit_route as bundled_audit_route
 from .calendar_route import (
-    CalendarRouteError,
+    CalendarRequestError,
+    approval_plan_linear_issue,
     route_calendar_request,
 )
 from .route import (
@@ -863,6 +864,26 @@ class HermesKanbanBoard:
             if task is None:
                 raise RouteError("delivery lookup returned a missing task")
             return _task_dict(task)
+        finally:
+            conn.close()
+
+    def calendar_approval_linear_issue(
+        self, reference: str, source: SourceContext
+    ) -> str | None:
+        """Resolve the exact optional SIS linkage from one completed plan task."""
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT id FROM tasks WHERE status = 'done' AND session_id = ? "
+                "AND result LIKE ? ORDER BY created_at DESC",
+                (source.session_id, f'%"approval_reference": "{reference}"%'),
+            ).fetchall()
+            if len(rows) != 1:
+                raise RouteError("Calendar approval plan is missing or ambiguous")
+            task = self.kb.get_task(conn, rows[0]["id"])
+            if task is None:
+                raise RouteError("Calendar approval plan task is missing")
+            return approval_plan_linear_issue(_task_dict(task), reference, source)
         finally:
             conn.close()
 
@@ -1937,8 +1958,10 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
 CALENDAR_SOURCE_REQUEST_SCHEMA = {
     "name": "calendar_source_request",
     "description": (
-        "Route one bounded Calendar inventory, events, freebusy, write-plan, or "
-        "same-session explicit approval through the Personal Assistant Kanban lane."
+        "Route one bounded Calendar inventory, events, freebusy, standalone or "
+        "optionally Linear-linked write-plan, or same-session explicit approval "
+        "through the Personal Assistant Kanban lane. Calendar and Linear are "
+        "independent operations; never create a Linear issue only to create an event."
     ),
     "parameters": {
         "type": "object",
@@ -1949,13 +1972,24 @@ CALENDAR_SOURCE_REQUEST_SCHEMA = {
                 "enum": ["inventory", "events", "freebusy", "create", "update", "delete", "approve"],
             },
             "window": {"type": "string", "enum": ["today", "next-7-days", "next-30-days"]},
-            "block_key": {"type": "string", "maxLength": 64, "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"},
+            "block_key": {
+                "type": "string",
+                "maxLength": 64,
+                "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+                "description": (
+                    "Stable event identity. For standalone events include a date or other "
+                    "unique discriminator so unrelated events do not collide."
+                ),
+            },
             "summary": {"type": "string", "maxLength": 200, "pattern": "^[^'\\r\\n]*$"},
             "start": {"type": "string", "maxLength": 19},
             "end": {"type": "string", "maxLength": 19},
             "linear_url": {
                 "type": "string",
-                "pattern": "^https://linear\\.app/[A-Za-z0-9_-]+/issue/SIS-[1-9][0-9]*/[A-Za-z0-9][A-Za-z0-9_-]*$",
+                "pattern": "^$|^https://linear\\.app/[A-Za-z0-9_-]+/issue/SIS-[1-9][0-9]*/[A-Za-z0-9][A-Za-z0-9_-]*$",
+                "description": (
+                    "Optional canonical SIS issue URL. Omit for a standalone Calendar event."
+                ),
             },
             "details": {"type": "string", "maxLength": 4000, "pattern": "^[^'\\r\\n]*$"},
             "approval_reference": {
@@ -1971,8 +2005,8 @@ CALENDAR_SOURCE_REQUEST_SCHEMA = {
                 "properties": {"operation": {"enum": ["inventory", "events", "freebusy"]}},
             },
             {
-                "required": ["operation", "block_key", "summary", "start", "end", "linear_url", "details"],
-                "minProperties": 7,
+                "required": ["operation", "block_key", "summary", "start", "end", "details"],
+                "minProperties": 6,
                 "maxProperties": 7,
                 "properties": {"operation": {"enum": ["create", "update", "delete"]}},
             },
@@ -1991,7 +2025,7 @@ def handle_calendar_source_request(args: dict[str, Any], **kwargs: Any) -> str:
     """Route Calendar work without exposing credentials or internal task identity."""
     try:
         if not isinstance(args, dict):
-            raise CalendarRouteError("tool input must be an object")
+            raise CalendarRequestError("tool input must be an object")
         session_getter = kwargs.get("session_getter") or _default_session_getter
         runtime_profile_getter = kwargs.get("runtime_profile_getter") or _default_runtime_profile_getter
         source = _source_context(
@@ -2003,6 +2037,12 @@ def handle_calendar_source_request(args: dict[str, Any], **kwargs: Any) -> str:
         board = board_factory(source_profile=source.profile)
         return json.dumps(
             route_calendar_request(dict(args), source=source, board=board),
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    except CalendarRequestError as exc:
+        return json.dumps(
+            {"status": "rejected", "message": str(exc)},
             ensure_ascii=False,
             sort_keys=True,
         )

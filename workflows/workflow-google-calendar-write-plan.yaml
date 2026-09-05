@@ -1,6 +1,6 @@
 id: 87bb8fb0-a665-4496-8228-d889aac1d473
 name: google-calendar-write-plan
-description: Build a read-only checksum-bound create, update, or delete plan for one Linear-linked primary-calendar block.
+description: Build a read-only checksum-bound plan for one standalone or optionally Linear-linked primary-calendar block.
 tags:
   domain: hermes-platform
   integration: google-calendar
@@ -33,7 +33,8 @@ inputs:
       default: ""
     linearUrl:
       type: string
-      pattern: "^https://linear\\.app/[A-Za-z0-9_-]+/issue/SIS-[1-9][0-9]*/[A-Za-z0-9][A-Za-z0-9_-]*$"
+      pattern: "^$|^https://linear\\.app/[A-Za-z0-9_-]+/issue/SIS-[1-9][0-9]*/[A-Za-z0-9][A-Za-z0-9_-]*$"
+      default: ""
     details:
       type: string
       maxLength: 4000

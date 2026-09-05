@@ -1,7 +1,7 @@
 ---
 name: calendar-source-request-routing
 description: Route Calendar reads and approval-gated writes to PA.
-version: 1.0.2
+version: 1.1.0
 author: sisyphus-org
 platforms: [linux, macos]
 metadata:
@@ -19,13 +19,16 @@ Call exactly one of `inventory`, `events`, or `freebusy` with `window` equal to 
 
 ## Approval-gated writes
 
-1. Resolve any supplied `SIS-N` through the Linear source route first when a canonical URL was not already supplied. Pass only the canonical public `https://linear.app/.../issue/SIS-N/...` URL; never pass Linear credentials or an internal ID.
-2. Call `calendar_source_request` with `operation=create|update|delete`, exact `block_key`, `summary`, local Kyiv `start`/`end`, canonical `linear_url`, and `details`. Delete requires empty event fields.
-3. When replay returns `phase=awaiting_approval`, show the exact `preview` to the owner. Do not approve implicitly or paraphrase away material fields.
-4. Only after an explicit approval in this same source session, call `calendar_source_request` with `operation=approve` and the exact opaque `approval_reference` returned with that preview.
-5. After `queued`, stop. On wake, replay the exact approval call and report sanitized verified read-back.
+Calendar and Linear are independent operations. A normal Calendar request must not create or require a Linear issue. Link them only when the owner explicitly supplies an SIS issue or asks for the connection.
 
-Never copy workflow run IDs, task IDs, OAuth data, event IDs, artifact versions, checksums, before-state hashes, or internal routing fields into the human response. The public preview contains only the operation, block key, summary, details, Kyiv-aware start/end, timezone, and canonical Linear URL. If routing is unavailable, report the truthful capability error; never instruct the owner to upload an OAuth JSON file.
+1. For a standalone event, omit `linear_url`. Choose a stable safe `block_key` that includes the event date or another unique discriminator, for example `lavina-rusanovka-2026-09-06`, so unrelated events do not collide.
+2. When the owner explicitly supplies `SIS-N` without its URL, resolve it through the Linear source route and pass only the returned canonical public `https://linear.app/.../issue/SIS-N/...` URL. Never pass Linear credentials or an internal ID.
+3. Call `calendar_source_request` with `operation=create|update|delete`, exact `block_key`, `summary`, local Kyiv `start`/`end`, `details`, and optional canonical `linear_url`. Delete requires empty event fields.
+4. When replay returns `phase=awaiting_approval`, show the exact `preview` to the owner. Do not approve implicitly or paraphrase away material fields. A standalone preview has an empty `linear_url`.
+5. Only after an explicit approval in this same source session, call `calendar_source_request` with `operation=approve` and the exact opaque `approval_reference` returned with that preview.
+6. After `queued`, stop. On wake, replay the exact approval call and report sanitized verified read-back.
+
+Never copy workflow run IDs, task IDs, OAuth data, event IDs, artifact versions, checksums, before-state hashes, or internal routing fields into the human response. The public preview contains only the operation, block key, summary, details, Kyiv-aware start/end, timezone, and optional canonical Linear URL. If routing is unavailable, report the truthful capability error; never instruct the owner to upload an OAuth JSON file.
 
 ### Literal field preservation
 
