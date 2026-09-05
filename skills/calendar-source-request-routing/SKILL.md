@@ -1,7 +1,7 @@
 ---
 name: calendar-source-request-routing
 description: Route Calendar reads and approval-gated writes to PA.
-version: 1.0.1
+version: 1.0.2
 author: sisyphus-org
 platforms: [linux, macos]
 metadata:
@@ -42,3 +42,18 @@ for approval.
 ## Replay
 
 Literal replay is required. The route derives one global semantic key and one exact source-session delivery key, so it reuses the same Kanban task and notification. Approval references are accepted only by the same profile/session that received the preview.
+
+Never reconstruct, abbreviate, or guess an `approval_reference`. Keep the exact
+opaque value from the plan tool result for the later approval and replay calls;
+it remains internal and must not be printed to the owner. If compaction or lost
+active context removes it, call `session_search()` without a cross-profile
+selector, choose the unique most recent Telegram session whose preview contains
+the current owner's replay request, then read it with
+`session_search(session_id=<that exact session>)`. If the read is truncated,
+scroll that same session around the matching plan message. Require a unique
+`calendar_source_request` plan result with the same `block_key` and `linear_url`,
+then copy the complete `calendar-approval:v1:<64 lowercase hex>` value
+byte-for-byte from that tool result. Never search by or reuse a partial hash
+prefix, derive a hash, or borrow a reference from another preview/session. If
+session identity or exact recovery is ambiguous, fail closed and request a
+fresh preview instead of calling approve.
