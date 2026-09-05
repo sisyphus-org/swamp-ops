@@ -179,8 +179,8 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
     "name": "linear_source_request",
     "description": (
         "Route one bounded Linear request from an allowed user-facing profile "
-        "through the project-manager Kanban lane. Accepts an exact comment text, "
-        "a structured state/field/child request targeting either exact SIS-N or a "
+        "through the project-manager Kanban lane. Accepts a structured bounded "
+        "comment or state/field/child request targeting either exact SIS-N or a "
         "positive issue_number in the single SIS team, deterministic description "
         "link removal, one bounded hierarchy request, one "
         "standalone issue in an exact existing scope, one exact project or milestone "
@@ -200,12 +200,17 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 4200,
-                "description": "Exact bounded comment request text.",
+                "description": (
+                    "Legacy-only exact Russian comment command for backward-compatible "
+                    "replay; use operation=add_comment with identifier or issue_number "
+                    "and body for new calls."
+                ),
             },
             "operation": {
                 "type": "string",
                 "enum": [
                     "bulk_linear_operations",
+                    "add_comment",
                     "change_state",
                     "update_issue",
                     "inventory_sub_issues",
@@ -231,6 +236,7 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                 ],
             },
             "query": {"type": "string", "minLength": 1, "maxLength": 500},
+            "body": {"type": "string", "minLength": 1, "maxLength": 4000},
             "entity_types": {
                 "type": "array",
                 "minItems": 1,
@@ -483,7 +489,16 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
             },
         },
         "oneOf": [
-            {"required": ["request"]},
+            {"required": ["request"], "maxProperties": 1},
+            {
+                "required": ["operation", "body"],
+                "maxProperties": 3,
+                "properties": {"operation": {"const": "add_comment"}},
+                "oneOf": [
+                    {"required": ["identifier"]},
+                    {"required": ["issue_number"]},
+                ],
+            },
             {
                 "required": ["operation", "items"],
                 "properties": {
@@ -788,7 +803,8 @@ class HermesKanbanBoard:
             kb = kb_module
         self.board = board
         self.source_profile = source_profile
-        self.kb = kb
+        assert kb is not None
+        self.kb: Any = kb
         self.audit_func = audit_func or bundled_audit_route
 
     def _connect(self):
@@ -826,6 +842,26 @@ class HermesKanbanBoard:
                 if task is None:
                     raise RouteError("Kanban create returned a missing task")
                 return _task_dict(task), True
+        finally:
+            conn.close()
+
+    def find_task(self, delivery_key: str) -> dict[str, Any] | None:
+        """Return the one active exact delivery task without creating it."""
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT id FROM tasks WHERE idempotency_key = ? "
+                "AND status != 'archived' ORDER BY created_at DESC",
+                (delivery_key,),
+            ).fetchall()
+            if len(rows) > 1:
+                raise RouteError("duplicate active tasks share the delivery key")
+            if not rows:
+                return None
+            task = self.kb.get_task(conn, rows[0]["id"])
+            if task is None:
+                raise RouteError("delivery lookup returned a missing task")
+            return _task_dict(task)
         finally:
             conn.close()
 
@@ -1679,6 +1715,15 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
         elif (
             args.get("operation") in {"archive_linear_entity", "delete_linear_entity"}
             and set(args) == {"operation", "entity_type", "selector", "approval"}
+        ):
+            request = dict(args)
+        elif (
+            args.get("operation") == "add_comment"
+            and "body" in args
+            and bool(set(args) & {"identifier", "issue_number"})
+            and set(args).issubset(
+                {"operation", "identifier", "issue_number", "body"}
+            )
         ):
             request = dict(args)
         elif (
