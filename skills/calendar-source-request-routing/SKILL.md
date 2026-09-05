@@ -1,7 +1,7 @@
 ---
 name: calendar-source-request-routing
 description: Route Calendar reads and approval-gated writes to PA.
-version: 1.0.0
+version: 1.0.1
 author: sisyphus-org
 platforms: [linux, macos]
 metadata:
@@ -26,6 +26,18 @@ Call exactly one of `inventory`, `events`, or `freebusy` with `window` equal to 
 5. After `queued`, stop. On wake, replay the exact approval call and report sanitized verified read-back.
 
 Never copy workflow run IDs, task IDs, OAuth data, event IDs, artifact versions, checksums, before-state hashes, or internal routing fields into the human response. The public preview contains only the operation, block key, summary, details, Kyiv-aware start/end, timezone, and canonical Linear URL. If routing is unavailable, report the truthful capability error; never instruct the owner to upload an OAuth JSON file.
+
+### Literal field preservation
+
+When the owner supplies `linear_url` or `block_key`, copy it byte-for-byte into
+the tool request after only the schema's ordinary whitespace handling. Never
+shorten, expand, repair, or regenerate a Linear URL slug, even when it looks
+truncated or differs from the issue title. Never derive `block_key` from the SIS
+identifier, summary, or URL. If an explicit value fails tool validation, report
+that validation error or ask the owner for a replacement; do not substitute a
+different value. Before calling the tool, compare both outgoing values with the
+owner's message. The preview must preserve them exactly; otherwise do not ask
+for approval.
 
 ## Replay
 
