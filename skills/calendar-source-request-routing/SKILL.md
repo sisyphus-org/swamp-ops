@@ -47,13 +47,19 @@ Never reconstruct, abbreviate, or guess an `approval_reference`. Keep the exact
 opaque value from the plan tool result for the later approval and replay calls;
 it remains internal and must not be printed to the owner. If compaction or lost
 active context removes it, call `session_search()` without a cross-profile
-selector, choose the unique most recent Telegram session whose preview contains
-the current owner's replay request, then read it with
+selector and filter sessions to the current profile plus the exact Telegram
+chat/thread represented by the active conversation. Require exactly one
+matching session; zero or multiple matches fail closed. Recency must never
+disambiguate multiple sessions. Read that session with
 `session_search(session_id=<that exact session>)`. If the read is truncated,
-scroll that same session around the matching plan message. Require a unique
-`calendar_source_request` plan result with the same `block_key` and `linear_url`,
-then copy the complete `calendar-approval:v1:<64 lowercase hex>` value
-byte-for-byte from that tool result. Never search by or reuse a partial hash
-prefix, derive a hash, or borrow a reference from another preview/session. If
-session identity or exact recovery is ambiguous, fail closed and request a
-fresh preview instead of calling approve.
+scroll that same session around the matching plan message. Within it, require
+exactly one `calendar_source_request` plan result whose owner-visible preview
+matches every preview field exactly: `operation`, `block_key`, `summary`,
+`details`, `start`, `end`, `timezone`, and `linear_url`. Compare the
+timezone-aware `start` and `end` strings exactly as shown in the approved
+preview, not against the pre-normalized request strings. Then copy the complete
+`calendar-approval:v1:<64 lowercase hex>` value byte-for-byte from that tool
+result. Never search by or reuse a partial hash prefix, derive a hash, or borrow
+a reference from another preview/session. If session identity, full-preview
+identity, or exact recovery is ambiguous, fail closed and request a fresh
+preview instead of calling approve.

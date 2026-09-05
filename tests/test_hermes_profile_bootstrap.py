@@ -40,6 +40,10 @@ class BootstrapContractTests(unittest.TestCase):
         self.assertIn("`session_search(session_id=<that exact session>)`", skill)
         self.assertIn("copy the complete `calendar-approval:v1:<64 lowercase hex>` value", skill)
         self.assertIn("Never search by or reuse a partial hash prefix", skill)
+        self.assertIn("Require exactly one matching session; zero or multiple matches fail closed", skill)
+        self.assertIn("Recency must never disambiguate multiple sessions", skill)
+        self.assertIn("matches every preview field exactly", skill)
+        self.assertIn("`operation`, `block_key`, `summary`, `details`, `start`, `end`, `timezone`, and `linear_url`", skill)
 
     def test_default_model_is_sol_900k(self):
         self.assertEqual(
