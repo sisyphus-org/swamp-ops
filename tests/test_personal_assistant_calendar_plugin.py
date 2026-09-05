@@ -231,6 +231,67 @@ class PersonalAssistantCalendarWorkerTests(unittest.TestCase):
             "before_state_hash": "d" * 64,
         })
 
+    def test_standalone_write_plan_returns_preview_without_linear_link(self):
+        request = {
+            "operation": "create",
+            "block_key": "lavina-rusanovka-2026-09-06",
+            "summary": "Поехать посмотреть вещи: Lavina + Русановка",
+            "start": "2026-09-06T10:00",
+            "end": "2026-09-06T12:00",
+            "details": "",
+        }
+        raw = command(request)
+
+        class StandaloneWorkflows(Workflows):
+            def plan(self, request):
+                self.calls.append(("plan", request))
+                return {
+                    "run_id": PLAN_RUN,
+                    "artifact_version": 7,
+                    "preview": {
+                        "schemaVersion": 1,
+                        "mode": "plan",
+                        "readOnly": True,
+                        "ready": True,
+                        "calendarId": "primary",
+                        "operation": request["operation"],
+                        "blockKey": request["block_key"],
+                        "linearIssue": None,
+                        "event": {
+                            "summary": request["summary"],
+                            "description": "",
+                            "start": {"dateTime": request["start"], "timeZone": "Europe/Kyiv"},
+                            "end": {"dateTime": request["end"], "timeZone": "Europe/Kyiv"},
+                        },
+                        "blockers": [],
+                        "checksum": "a" * 64,
+                    },
+                }
+
+            def snapshot(self, request):
+                self.calls.append(("snapshot", request))
+                return {
+                    "operation": "snapshot",
+                    "status": "ok",
+                    "linearIssue": None,
+                    "blockKey": request["block_key"],
+                    "beforeStateHash": "d" * 64,
+                }
+
+        lifecycle = Lifecycle()
+        workflows = StandaloneWorkflows()
+        output = json.loads(handle_pa_calendar_execute(
+            {}, environ=environ(), task_loader=lambda *_args: task_record(raw),
+            run_reserver=lambda *_args: True, lifecycle_factory=lambda _task_id: lifecycle,
+            workflow_runner_factory=lambda: workflows,
+        ))
+
+        self.assertEqual(output["status"], "completed")
+        persisted = json.loads(lifecycle.completed[0]["result"])
+        self.assertEqual(persisted["preview"]["linear_url"], "")
+        self.assertEqual(persisted["preview"]["summary"], request["summary"])
+        self.assertRegex(persisted["approval_reference"], r"^calendar-approval:v1:[a-f0-9]{64}$")
+
     def test_same_session_approval_suspends_approves_resumes_then_applies(self):
         approval_ref = "calendar-approval:v1:" + "c" * 64
         raw = command({"operation": "approve", "approval_reference": approval_ref})
@@ -250,6 +311,66 @@ class PersonalAssistantCalendarWorkerTests(unittest.TestCase):
         persisted = json.loads(lifecycle.completed[0]["result"])
         self.assertEqual(persisted["outcome"], "applied")
         self.assertNotIn("summary", persisted["data"])
+
+    def test_standalone_approval_applies_and_verifies_without_linear_issue(self):
+        approval_ref = "calendar-approval:v1:" + "c" * 64
+        raw = command({"operation": "approve", "approval_reference": approval_ref})
+        standalone_request = {
+            "operation": "create",
+            "block_key": "lavina-rusanovka-2026-09-06",
+            "summary": "Поехать посмотреть вещи: Lavina + Русановка",
+            "start": "2026-09-06T10:00",
+            "end": "2026-09-06T12:00",
+            "linear_url": "",
+            "details": "",
+        }
+        plan = {
+            "source_profile": "default",
+            "session_id": "20260904_120000_abcdef12",
+            "approval_reference": approval_ref,
+            "plan_reference": {
+                "run_id": PLAN_RUN,
+                "artifact_version": 7,
+                "checksum": "a" * 64,
+                "before_state_hash": "d" * 64,
+            },
+            "request": standalone_request,
+        }
+
+        class StandaloneWorkflows(Workflows):
+            def snapshot(self, request):
+                self.calls.append(("snapshot", request))
+                return {
+                    "operation": "snapshot",
+                    "status": "ok",
+                    "linearIssue": None,
+                    "blockKey": request["block_key"],
+                    "beforeStateHash": "d" * 64,
+                }
+
+            def apply(self, plan_reference, approval_reference):
+                self.calls.append(("apply", plan_reference, approval_reference))
+                return {
+                    "operation": "create",
+                    "status": "verified",
+                    "reused": False,
+                    "linearIssue": None,
+                    "blockKey": standalone_request["block_key"],
+                }
+
+        lifecycle = Lifecycle()
+        workflows = StandaloneWorkflows()
+        output = json.loads(handle_pa_calendar_execute(
+            {}, environ=environ(), task_loader=lambda *_args: task_record(raw),
+            approval_loader=lambda *_args: plan,
+            run_reserver=lambda *_args: True, lifecycle_factory=lambda _task_id: lifecycle,
+            workflow_runner_factory=lambda: workflows,
+        ))
+
+        self.assertEqual(output["status"], "completed")
+        persisted = json.loads(lifecycle.completed[0]["result"])
+        self.assertEqual(persisted["outcome"], "applied")
+        self.assertIsNone(persisted["data"]["linearIssue"])
 
     def test_approval_renews_claim_before_each_network_step_and_apply(self):
         approval_ref = "calendar-approval:v1:" + "c" * 64

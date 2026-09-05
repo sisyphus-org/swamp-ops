@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import re
 import sys
 import unittest
 import uuid
@@ -47,6 +48,32 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(event["start"]["timeZone"], "Europe/Kyiv")
         self.assertEqual(event["end"]["timeZone"], "Europe/Kyiv")
         self.assertTrue(gcw.verify_plan_checksum(plan))
+
+    def test_standalone_plan_uses_block_identity_without_linear_link(self):
+        first = gcw.build_plan(
+            operation="create",
+            block_key="lavina-rusanovka-2026-09-06",
+            summary="Поехать посмотреть вещи: Lavina + Русановка",
+            start="2026-09-06T10:00",
+            end="2026-09-06T12:00",
+            linear_url="",
+            details="Посмотреть вещи в двух местах.",
+        )
+        updated = gcw.build_plan(
+            operation="update",
+            block_key="lavina-rusanovka-2026-09-06",
+            summary="Поехать посмотреть вещи",
+            start="2026-09-06T10:30",
+            end="2026-09-06T12:30",
+            linear_url="",
+            details="",
+        )
+
+        self.assertIsNone(first["linearIssue"])
+        self.assertEqual(first["event"]["description"], "Посмотреть вещи в двух местах.")
+        self.assertRegex(first["eventId"], r"^evt[a-f0-9]{64}$")
+        self.assertEqual(first["eventId"], updated["eventId"])
+        self.assertTrue(gcw.verify_plan_checksum(first))
 
     def test_stable_event_id_depends_only_on_linear_identifier_and_block_key(self):
         first = gcw.build_plan(
@@ -595,6 +622,161 @@ class ApplyTests(unittest.TestCase):
         self.assertEqual(call["sendUpdates"], "none")
         self.assertEqual(call["body"]["description"], f"Linear: {LINEAR_URL}")
         self.assertEqual(service.events_api.get_calls[0]["eventId"], call["body"]["id"])
+
+    def test_apply_creates_standalone_event_without_linear_link(self):
+        plan = gcw.build_plan(
+            operation="create",
+            block_key="lavina-rusanovka-2026-09-06",
+            summary="Поехать посмотреть вещи: Lavina + Русановка",
+            start="2026-09-06T10:00",
+            end="2026-09-06T12:00",
+            linear_url="",
+            details="Посмотреть вещи в двух местах.",
+        )
+        authorization = self.authorization_for(
+            plan,
+            plan_inputs={
+                "operation": "create",
+                "blockKey": "lavina-rusanovka-2026-09-06",
+                "summary": "Поехать посмотреть вещи: Lavina + Русановка",
+                "start": "2026-09-06T10:00",
+                "end": "2026-09-06T12:00",
+                "linearUrl": "",
+                "details": "Посмотреть вещи в двух местах.",
+            },
+        )
+        service = FakeService()
+
+        result = gcw.apply_plan(
+            plan,
+            approved_checksum=plan["checksum"],
+            service=service,
+            authorization=authorization,
+        )
+
+        self.assertEqual(result, {
+            "operation": "create",
+            "status": "verified",
+            "reused": False,
+            "linearIssue": None,
+            "blockKey": "lavina-rusanovka-2026-09-06",
+        })
+        self.assertEqual(
+            service.events_api.insert_calls[0]["body"]["description"],
+            "Посмотреть вещи в двух местах.",
+        )
+
+    def test_standalone_create_accepts_provider_omission_of_empty_description(self):
+        plan = gcw.build_plan(
+            operation="create",
+            block_key="doctor-2026-09-07-0900",
+            summary="Врач",
+            start="2026-09-07T09:00",
+            end="2026-09-07T09:30",
+            linear_url="",
+            details="",
+        )
+        inputs = {
+            "operation": "create",
+            "blockKey": "doctor-2026-09-07-0900",
+            "summary": "Врач",
+            "start": "2026-09-07T09:00",
+            "end": "2026-09-07T09:30",
+            "linearUrl": "",
+            "details": "",
+        }
+        authorization = self.authorization_for(plan, plan_inputs=inputs)
+        provider_event = {
+            key: value for key, value in {**plan["event"], "id": plan["eventId"]}.items()
+            if key != "description"
+        }
+        events = ScriptedEvents(get_script=[HttpFailure(404), provider_event])
+
+        result = gcw.apply_plan(
+            plan,
+            approved_checksum=plan["checksum"],
+            service=FakeService(events),
+            authorization=authorization,
+        )
+
+        self.assertEqual(result["status"], "verified")
+        self.assertFalse(result["reused"])
+
+    def test_standalone_block_supports_update_then_delete_with_replay(self):
+        block_key = "doctor-2026-09-07-0900"
+        service = FakeService()
+        create_plan = gcw.build_plan(
+            operation="create", block_key=block_key, summary="Врач",
+            start="2026-09-07T09:00", end="2026-09-07T09:30",
+            linear_url="", details="",
+        )
+        create_authorization = self.authorization_for(
+            create_plan,
+            plan_inputs={
+                "operation": "create", "blockKey": block_key, "summary": "Врач",
+                "start": "2026-09-07T09:00", "end": "2026-09-07T09:30",
+                "linearUrl": "", "details": "",
+            },
+        )
+        gcw.apply_plan(
+            create_plan, approved_checksum=create_plan["checksum"], service=service,
+            authorization=create_authorization,
+        )
+
+        update_plan = gcw.build_plan(
+            operation="update", block_key=block_key, summary="Врач — перенос",
+            start="2026-09-07T09:30", end="2026-09-07T10:00",
+            linear_url="", details="Новый кабинет",
+        )
+        update_authorization = self.authorization_for(
+            update_plan,
+            plan_inputs={
+                "operation": "update", "blockKey": block_key,
+                "summary": "Врач — перенос", "start": "2026-09-07T09:30",
+                "end": "2026-09-07T10:00", "linearUrl": "",
+                "details": "Новый кабинет",
+            },
+        )
+        updated = gcw.apply_plan(
+            update_plan, approved_checksum=update_plan["checksum"], service=service,
+            authorization=update_authorization,
+        )
+        update_replay = gcw.apply_plan(
+            update_plan, approved_checksum=update_plan["checksum"], service=service,
+            authorization=update_authorization,
+        )
+
+        self.assertEqual(create_plan["eventId"], update_plan["eventId"])
+        self.assertIsNone(updated["linearIssue"])
+        self.assertFalse(updated["reused"])
+        self.assertTrue(update_replay["reused"])
+        self.assertEqual(len(service.events_api.update_calls), 1)
+
+        delete_plan = gcw.build_plan(
+            operation="delete", block_key=block_key, summary="", start="", end="",
+            linear_url="", details="",
+        )
+        delete_authorization = self.authorization_for(
+            delete_plan,
+            plan_inputs={
+                "operation": "delete", "blockKey": block_key, "summary": "",
+                "start": "", "end": "", "linearUrl": "", "details": "",
+            },
+        )
+        deleted = gcw.apply_plan(
+            delete_plan, approved_checksum=delete_plan["checksum"], service=service,
+            authorization=delete_authorization,
+        )
+        delete_replay = gcw.apply_plan(
+            delete_plan, approved_checksum=delete_plan["checksum"], service=service,
+            authorization=delete_authorization,
+        )
+
+        self.assertEqual(create_plan["eventId"], delete_plan["eventId"])
+        self.assertIsNone(deleted["linearIssue"])
+        self.assertFalse(deleted["reused"])
+        self.assertTrue(delete_replay["reused"])
+        self.assertEqual(len(service.events_api.delete_calls), 1)
 
     def test_update_requires_link_updates_exact_body_then_replays_without_write(self):
         service = FakeService()
@@ -1234,6 +1416,9 @@ class SwampContractTests(unittest.TestCase):
         self.assertEqual(
             set(workflow["inputs"]["properties"]), {"blockKey", "linearUrl"}
         )
+        linear_url = workflow["inputs"]["properties"]["linearUrl"]
+        self.assertEqual(linear_url["default"], "")
+        self.assertIsNotNone(re.fullmatch(linear_url["pattern"], ""))
         command = workflow["jobs"][0]["steps"][0]["task"]["inputs"]["run"]
         self.assertIn("--mode snapshot", command)
         self.assertIn("--profile personal-assistant", command)
@@ -1261,8 +1446,9 @@ class SwampContractTests(unittest.TestCase):
         self.assertIn("--block-key '${{ inputs.blockKey }}'", command)
         self.assertEqual(
             properties["linearUrl"]["pattern"],
-            r"^https://linear\.app/[A-Za-z0-9_-]+/issue/SIS-[1-9][0-9]*/[A-Za-z0-9][A-Za-z0-9_-]*$",
+            r"^$|^https://linear\.app/[A-Za-z0-9_-]+/issue/SIS-[1-9][0-9]*/[A-Za-z0-9][A-Za-z0-9_-]*$",
         )
+        self.assertEqual(properties["linearUrl"]["default"], "")
 
     def test_approval_workflow_owns_manual_gate_and_emits_attestation(self):
         path = SCRIPT.parents[1] / "workflows" / "workflow-google-calendar-write-approval.yaml"

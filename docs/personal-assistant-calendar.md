@@ -7,7 +7,7 @@ The Personal Assistant Google Calendar integration is split into two determinist
 - a bounded **read-only** lane;
 - a primary-calendar **create/update/delete** lane with a checksum-bound preview and mandatory manual approval.
 
-The Calendar lane never receives Linear credentials and never calls Linear. The orchestrator resolves an exact task through the existing broker → Project Manager Linear route and passes the returned canonical `https://linear.app/.../issue/SIS-N/...` URL into the Calendar plan. Create/update validate that URL and write it into the event description as `Linear: <canonical URL>`; update/delete refuse to mutate an existing event unless it carries that exact link.
+Calendar and Linear are independent operations. The Calendar lane never receives Linear credentials and never calls Linear. Standalone events omit `linearUrl`; when the owner explicitly asks to link an SIS issue, the orchestrator resolves it through broker → Project Manager and passes the returned canonical `https://linear.app/.../issue/SIS-N/...` URL into the Calendar plan. Linked create/update operations preserve it in the event description as `Linear: <canonical URL>`.
 
 ### Read allowlist
 
@@ -21,10 +21,10 @@ The Calendar lane never receives Linear credentials and never calls Linear. The 
 
 - **Calendar ID**: `primary` only.
 - **Operation**: create, update, or delete one timed event block only.
-- **Required linkage**: one canonical `SIS-N` Linear issue URL in the event description.
-- **Stable identity**: `eventId` is derived from a domain-separated SHA-256 of the Linear identifier plus safe `blockKey` (`primary` by default). It is independent of the plan checksum, so changed event fields still address the same block and one issue may own multiple named blocks.
+- **Optional linkage**: a canonical `SIS-N` Linear issue URL may be preserved in the event description, but is never required for a normal Calendar operation.
+- **Stable identity**: linked event IDs retain the existing domain-separated SHA-256 of Linear identifier plus safe `blockKey`. Standalone event IDs use a separate domain and safe `blockKey`; source callers include a date or other unique discriminator in that key. Both identities are independent of the plan checksum, so changed fields still address the same block without colliding across linked and standalone namespaces.
 - **Approval**: the plan workflow stores the exact event body and SHA-256 checksum in its protected, versioned Swamp artifact. The read-only `google-calendar-write-snapshot` workflow adds a PII-free hash of the deterministic target's current state to the source-session approval binding. A separate manual-approval workflow loads the exact plan artifact and emits a checksum-bound attestation. Apply accepts only fixed-format plan/approval run IDs, artifact versions, and checksums; the Personal Assistant also re-reads the target-state hash immediately before apply and rejects intervening edits.
-- **Read-back/replay**: create inserts only when absent; update requires the linked target and uses `events.update`; delete requires the linked target and accepts either HTTP 404 or Google's `status: cancelled` tombstone as verified absence. Exact create/update replay and already-absent delete are verified no-ops. A later approved create for the same block restores a linked cancelled tombstone with `status: confirmed` instead of attempting a duplicate insert. Google’s observed `Europe/Kiev` alias/offset serialization is accepted only when it represents the exact planned UTC instants. Ambiguous write responses are reconciled by deterministic GET.
+- **Read-back/replay**: create inserts only when absent; update requires the exact deterministic target and uses `events.update`; delete requires that same target and accepts either HTTP 404 or Google's `status: cancelled` tombstone as verified absence. Linked targets retain exact-link validation; standalone targets use their separate event-ID namespace. Exact create/update replay and already-absent delete are verified no-ops. A later approved create for the same block restores a cancelled tombstone with `status: confirmed` instead of attempting a duplicate insert. Google’s observed `Europe/Kiev` alias/offset serialization is accepted only when it represents the exact planned UTC instants. Ambiguous write responses are reconciled by deterministic GET.
 - Recurrence, attendees, notifications, and non-primary calendars remain blocked.
 
 ### Protected data
@@ -105,7 +105,7 @@ swamp workflow run google-calendar-write-approval \
   --input planChecksum=<reviewed-checksum>
 ```
 
-For update use `operation=update` with the same `linearUrl` and `blockKey` plus the replacement `summary/start/end/details`. For delete use `operation=delete`, the same `linearUrl` and `blockKey`, and empty `summary/start/end/details`; any nonempty event field is rejected.
+For a standalone operation pass `linearUrl=` (the source route does this automatically when `linear_url` is omitted). For update use `operation=update` with the same identity fields plus replacement `summary/start/end/details`. For delete use the same identity fields and empty `summary/start/end/details`; any nonempty event field is rejected.
 
 The approval workflow suspends at `approve-calendar-write`. If manually approved, it emits a versioned attestation bound to the exact plan artifact. Apply does not contain an approval gate and accepts no raw event fields:
 

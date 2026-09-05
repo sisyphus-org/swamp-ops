@@ -47,6 +47,26 @@ class CalendarCommandTests(unittest.TestCase):
         self.assertEqual(command["request"], request)
         self.assertEqual(command["source_profile"], "books")
 
+    def test_standalone_write_without_linear_url_is_canonicalized_with_empty_link(self):
+        request = {
+            "operation": "create",
+            "block_key": "lavina-rusanovka-2026-09-06",
+            "summary": "Поехать посмотреть вещи: Lavina + Русановка",
+            "start": "2026-09-06T10:00",
+            "end": "2026-09-06T12:00",
+            "details": "",
+        }
+
+        command = calendar_route.parse_calendar_request(
+            request,
+            source_profile="ideas",
+            uuid_factory=lambda: "11111111-1111-4111-8111-111111111111",
+        ).command
+
+        self.assertEqual(command["operation"], "plan_write")
+        self.assertEqual(command["request"], {**request, "linear_url": ""})
+        self.assertEqual(command["source_profile"], "ideas")
+
     def test_write_request_rejects_non_positive_interval_before_queueing(self):
         for end in ("2026-09-07T10:00", "2026-09-07T09:59"):
             with self.subTest(end=end), self.assertRaisesRegex(
@@ -234,6 +254,46 @@ class CalendarRoutingTests(unittest.TestCase):
         public_text = json.dumps(output, sort_keys=True)
         for internal in ("checksum", "eventId", "run_id", "artifact_version"):
             self.assertNotIn(internal, public_text)
+
+    def test_completed_standalone_apply_accepts_null_linear_issue(self):
+        source = source_context()
+        request = {"operation": "approve", "approval_reference": "calendar-approval:v1:" + "a" * 64}
+        command = calendar_route.parse_calendar_request(
+            request,
+            source_profile=source.profile,
+            uuid_factory=lambda: "11111111-1111-4111-8111-111111111111",
+        ).command
+        result = {
+            "schema_version": "calendar-result.v1",
+            "command_id": command["command_id"],
+            "idempotency_key": command["idempotency_key"],
+            "source_profile": source.profile,
+            "operation": "approve_write",
+            "phase": "completed",
+            "outcome": "applied",
+            "data": {
+                "operation": "create",
+                "status": "verified",
+                "reused": False,
+                "linearIssue": None,
+                "blockKey": "lavina-rusanovka-2026-09-06",
+            },
+            "verified": True,
+        }
+        board = FakeBoard(existing={
+            "id": "t_deadbeef",
+            "status": "done",
+            "session_id": source.session_id,
+            "idempotency_key": calendar_route.delivery_key(command["idempotency_key"], source),
+            "body": calendar_route.build_calendar_task_body(command),
+            "result": json.dumps(result),
+        })
+
+        output = calendar_route.route_calendar_request(request, source=source, board=board)
+
+        self.assertEqual(output["status"], "completed")
+        self.assertIsNone(output["data"]["linearIssue"])
+        self.assertTrue(output["changed"])
 
     def test_completed_plan_replay_rejects_substituted_opaque_reference(self):
         source = source_context()

@@ -41,6 +41,10 @@ class CalendarRouteError(RuntimeError):
     """A Calendar request violates the bounded source contract."""
 
 
+class CalendarRequestError(CalendarRouteError):
+    """A safe owner-visible validation error in the submitted request."""
+
+
 @dataclass(frozen=True)
 class ParsedCalendarRequest:
     command: dict[str, Any]
@@ -84,7 +88,7 @@ def _validate_text(value: Any, field: str, maximum: int, *, required: bool) -> s
 
 
 def _write_request(request: dict[str, Any]) -> dict[str, Any]:
-    if set(request) != WRITE_FIELDS:
+    if set(request) not in (WRITE_FIELDS, WRITE_FIELDS - {"linear_url"}):
         raise CalendarRouteError("Calendar write request has invalid fields")
     operation = request.get("operation")
     if operation not in WRITE_OPERATIONS:
@@ -96,9 +100,11 @@ def _write_request(request: dict[str, Any]) -> dict[str, Any]:
     details = _validate_text(request.get("details"), "details", 4000, required=False)
     start = _validate_text(request.get("start"), "start", 19, required=operation != "delete")
     end = _validate_text(request.get("end"), "end", 19, required=operation != "delete")
-    linear_url = request.get("linear_url")
-    if not isinstance(linear_url, str) or PUBLIC_ISSUE_URL.fullmatch(linear_url) is None:
-        raise CalendarRouteError("linear_url must be one canonical public SIS issue URL")
+    linear_url = request.get("linear_url", "")
+    if not isinstance(linear_url, str) or (
+        linear_url and PUBLIC_ISSUE_URL.fullmatch(linear_url) is None
+    ):
+        raise CalendarRouteError("linear_url must be empty or one canonical public SIS issue URL")
     if operation == "delete":
         if any((summary, start, end, details)):
             raise CalendarRouteError("delete requires empty event fields")
@@ -113,10 +119,10 @@ def _write_request(request: dict[str, Any]) -> dict[str, Any]:
                 raise CalendarRouteError(f"{field} must be a valid datetime") from exc
         if parsed_boundaries["end"] <= parsed_boundaries["start"]:
             raise CalendarRouteError("end must be after start")
-    return dict(request)
+    return {**request, "linear_url": linear_url}
 
 
-def parse_calendar_request(
+def _parse_calendar_request(
     request: Any,
     *,
     source_profile: str,
@@ -153,6 +159,20 @@ def parse_calendar_request(
     }
     command["idempotency_key"] = _semantic_key(command)
     return ParsedCalendarRequest(command=command)
+
+
+def parse_calendar_request(
+    request: Any,
+    *,
+    source_profile: str,
+    uuid_factory: UUIDFactory = _uuid4,
+) -> ParsedCalendarRequest:
+    try:
+        return _parse_calendar_request(
+            request, source_profile=source_profile, uuid_factory=uuid_factory
+        )
+    except CalendarRouteError as exc:
+        raise CalendarRequestError(str(exc)) from exc
 
 
 def delivery_key(mutation_key: str, source: SourceContext) -> str:
@@ -343,8 +363,13 @@ def _load_completed(task: dict[str, Any], command: dict[str, Any]) -> dict[str, 
             or data.get("operation") not in WRITE_OPERATIONS
             or data.get("status") != "verified"
             or not isinstance(data.get("reused"), bool)
-            or not isinstance(data.get("linearIssue"), str)
-            or re.fullmatch(r"SIS-[1-9][0-9]*", data["linearIssue"]) is None
+            or (
+                data.get("linearIssue") is not None
+                and (
+                    not isinstance(data.get("linearIssue"), str)
+                    or re.fullmatch(r"SIS-[1-9][0-9]*", data["linearIssue"]) is None
+                )
+            )
             or not isinstance(data.get("blockKey"), str)
             or BLOCK_KEY.fullmatch(data["blockKey"]) is None
         ):

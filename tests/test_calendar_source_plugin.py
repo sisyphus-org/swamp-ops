@@ -38,6 +38,9 @@ class CalendarSourcePluginTests(unittest.TestCase):
         register(registry)
         self.assertEqual(set(registry.tools), {"linear_source_request", "calendar_source_request"})
         schema = CALENDAR_SOURCE_REQUEST_SCHEMA["parameters"]
+        self.assertIn("standalone", CALENDAR_SOURCE_REQUEST_SCHEMA["description"].lower())
+        self.assertIn("omit", schema["properties"]["linear_url"]["description"].lower())
+        self.assertIn("date", schema["properties"]["block_key"]["description"].lower())
         jsonschema.validate({"operation": "inventory", "window": "today"}, schema)
         jsonschema.validate(
             {
@@ -47,6 +50,29 @@ class CalendarSourcePluginTests(unittest.TestCase):
                 "start": "2026-09-07T10:00",
                 "end": "2026-09-07T10:30",
                 "linear_url": "https://linear.app/sisyphusx/issue/SIS-123/calendar-routing",
+                "details": "",
+            },
+            schema,
+        )
+        jsonschema.validate(
+            {
+                "operation": "create",
+                "block_key": "lavina-rusanovka-2026-09-06",
+                "summary": "Поехать посмотреть вещи: Lavina + Русановка",
+                "start": "2026-09-06T10:00",
+                "end": "2026-09-06T12:00",
+                "details": "",
+            },
+            schema,
+        )
+        jsonschema.validate(
+            {
+                "operation": "create",
+                "block_key": "lavina-rusanovka-2026-09-06",
+                "summary": "Поехать посмотреть вещи: Lavina + Русановка",
+                "start": "2026-09-06T10:00",
+                "end": "2026-09-06T12:00",
+                "linear_url": "",
                 "details": "",
             },
             schema,
@@ -135,6 +161,65 @@ class CalendarSourcePluginTests(unittest.TestCase):
         self.assertIn("routing is unavailable", payload["message"])
         self.assertNotIn("PRIVATE_EVENT_TITLE", result)
         self.assertNotIn("token.json", result)
+
+    def test_handler_returns_safe_specific_contract_error(self):
+        session = {
+            "HERMES_SESSION_ID": "20260904_120000_abcdef12",
+            "HERMES_SESSION_PROFILE": "ideas",
+            "HERMES_SESSION_PLATFORM": "telegram",
+            "HERMES_SESSION_CHAT_ID": "442308262",
+            "HERMES_SESSION_USER_ID": "442308262",
+            "HERMES_SESSION_CHAT_TYPE": "dm",
+            "HERMES_SESSION_THREAD_ID": "448864",
+        }
+        result = json.loads(handle_calendar_source_request(
+            {"operation": "create", "summary": "Missing bounded fields"},
+            session_id=session["HERMES_SESSION_ID"],
+            runtime_profile_getter=lambda: "ideas",
+            session_getter=lambda key, default="": session.get(key, default),
+            board_factory=mock.Mock(),
+        ))
+
+        self.assertEqual(result, {
+            "status": "rejected",
+            "message": "Calendar write request has invalid fields",
+        })
+
+    def test_handler_keeps_internal_replay_failure_generic(self):
+        session = {
+            "HERMES_SESSION_ID": "20260904_120000_abcdef12",
+            "HERMES_SESSION_PROFILE": "ideas",
+            "HERMES_SESSION_PLATFORM": "telegram",
+            "HERMES_SESSION_CHAT_ID": "442308262",
+            "HERMES_SESSION_USER_ID": "442308262",
+            "HERMES_SESSION_CHAT_TYPE": "dm",
+            "HERMES_SESSION_THREAD_ID": "448864",
+        }
+        board = mock.Mock()
+
+        def existing(delivery_key, **kwargs):
+            return ({
+                "id": "t_deadbeef",
+                "status": "done",
+                "session_id": kwargs["session_id"],
+                "idempotency_key": delivery_key,
+                "body": "{}",
+                "result": "{}",
+            }, False)
+
+        board.get_or_create_task.side_effect = existing
+        result = json.loads(handle_calendar_source_request(
+            {"operation": "events", "window": "today"},
+            session_id=session["HERMES_SESSION_ID"],
+            runtime_profile_getter=lambda: "ideas",
+            session_getter=lambda key, default="": session.get(key, default),
+            board_factory=lambda **_kwargs: board,
+        ))
+
+        self.assertEqual(result, {
+            "status": "rejected",
+            "message": "Calendar routing is unavailable or the request is outside the safe capability.",
+        })
 
     def test_source_and_broker_code_have_no_google_credentials_or_calendar_client(self):
         roots = (ROOT / "plugins" / "linear_source_route", ROOT / "plugins" / "ops_broker")
