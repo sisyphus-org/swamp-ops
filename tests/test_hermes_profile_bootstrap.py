@@ -32,6 +32,9 @@ class BootstrapContractTests(unittest.TestCase):
         self.assertIn("copy it byte-for-byte", skill)
         self.assertIn("Never shorten, expand, repair, or regenerate a Linear URL slug", skill)
         self.assertIn("Never derive `block_key` from the SIS identifier", skill)
+        self.assertIn("report that validation error or ask the owner for a replacement; do not substitute", skill)
+        self.assertIn("compare both outgoing values with the owner's message", skill)
+        self.assertIn("The preview must preserve them exactly; otherwise do not ask for approval", skill)
 
     def test_default_model_is_sol_900k(self):
         self.assertEqual(
