@@ -1882,7 +1882,34 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
         return json.dumps(
             _public_result(internal_result), ensure_ascii=False, sort_keys=True
         )
-    except (RouteError, KeyError, TypeError, ValueError, OSError):
+    except RouteError as exc:
+        if (
+            isinstance(args, dict)
+            and set(args) == {"request"}
+            and isinstance(args.get("request"), str)
+            and str(exc) == "legacy comment replay was not found"
+        ):
+            return json.dumps(
+                {
+                    "status": "rejected",
+                    "message": (
+                        "Для нового комментария вызовите add_comment со "
+                        "структурированными полями: operation, ровно одно из "
+                        "identifier/issue_number и body."
+                    ),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        return json.dumps(
+            {
+                "status": "rejected",
+                "message": "Не удалось безопасно обработать запрос.",
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    except (KeyError, TypeError, ValueError, OSError):
         return json.dumps(
             {
                 "status": "rejected",

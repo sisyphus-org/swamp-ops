@@ -2048,6 +2048,47 @@ class PluginTests(unittest.TestCase):
                 with self.assertRaises(RouteError):
                     _public_result(payload)
 
+    def test_handler_tells_stale_callers_to_use_structured_comment_fields(self):
+        fake_board = mock.Mock()
+        fake_board.find_task.return_value = None
+        session_values = {
+            "HERMES_SESSION_PROFILE": "books",
+            "HERMES_SESSION_PLATFORM": "telegram",
+            "HERMES_SESSION_CHAT_ID": "442308262",
+            "HERMES_SESSION_USER_ID": "442308262",
+            "HERMES_SESSION_CHAT_TYPE": "dm",
+            "HERMES_SESSION_THREAD_ID": "453152",
+            "HERMES_SESSION_ID": "20260905_112011_61f9fd71",
+        }
+
+        result = json.loads(
+            handle_linear_source_request(
+                {
+                    "request": (
+                        "Добавь к SIS-124 комментарий: "
+                        "Production E2E: structured add_comment из Books работает."
+                    )
+                },
+                session_id="20260905_112011_61f9fd71",
+                board_factory=lambda **_kwargs: fake_board,
+                session_getter=lambda name, default="": session_values.get(name, default),
+                runtime_profile_getter=lambda: "books",
+            )
+        )
+
+        self.assertEqual(
+            result,
+            {
+                "status": "rejected",
+                "message": (
+                    "Для нового комментария вызовите add_comment со структурированными "
+                    "полями: operation, ровно одно из identifier/issue_number и body."
+                ),
+            },
+        )
+        fake_board.find_task.assert_called_once()
+        fake_board.get_or_create_task.assert_not_called()
+
     def test_handler_hides_internal_route_error(self):
         fake_board = mock.Mock()
         fake_board.get_or_create_task.side_effect = RouteError(
