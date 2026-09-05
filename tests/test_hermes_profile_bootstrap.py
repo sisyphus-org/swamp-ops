@@ -35,6 +35,15 @@ class BootstrapContractTests(unittest.TestCase):
         self.assertIn("report that validation error or ask the owner for a replacement; do not substitute", skill)
         self.assertIn("compare both outgoing values with the owner's message", skill)
         self.assertIn("The preview must preserve them exactly; otherwise do not ask for approval", skill)
+        self.assertIn("Never reconstruct, abbreviate, or guess an `approval_reference`", skill)
+        self.assertIn("call `session_search()` without a cross-profile selector", skill)
+        self.assertIn("`session_search(session_id=<that exact session>)`", skill)
+        self.assertIn("copy the complete `calendar-approval:v1:<64 lowercase hex>` value", skill)
+        self.assertIn("Never search by or reuse a partial hash prefix", skill)
+        self.assertIn("Require exactly one matching session; zero or multiple matches fail closed", skill)
+        self.assertIn("Recency must never disambiguate multiple sessions", skill)
+        self.assertIn("matches every preview field exactly", skill)
+        self.assertIn("`operation`, `block_key`, `summary`, `details`, `start`, `end`, `timezone`, and `linear_url`", skill)
 
     def test_default_model_is_sol_900k(self):
         self.assertEqual(
