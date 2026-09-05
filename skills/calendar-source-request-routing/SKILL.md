@@ -1,7 +1,7 @@
 ---
 name: calendar-source-request-routing
 description: Route Calendar reads and approval-gated writes to PA.
-version: 1.1.0
+version: 1.1.1
 author: sisyphus-org
 platforms: [linux, macos]
 metadata:
@@ -24,11 +24,35 @@ Calendar and Linear are independent operations. A normal Calendar request must n
 1. For a standalone event, omit `linear_url`. Choose a stable safe `block_key` that includes the event date or another unique discriminator, for example `lavina-rusanovka-2026-09-06`, so unrelated events do not collide.
 2. When the owner explicitly supplies `SIS-N` without its URL, resolve it through the Linear source route and pass only the returned canonical public `https://linear.app/.../issue/SIS-N/...` URL. Never pass Linear credentials or an internal ID.
 3. Call `calendar_source_request` with `operation=create|update|delete`, exact `block_key`, `summary`, local Kyiv `start`/`end`, `details`, and optional canonical `linear_url`. Delete requires empty event fields.
-4. When replay returns `phase=awaiting_approval`, show the exact `preview` to the owner. Do not approve implicitly or paraphrase away material fields. A standalone preview has an empty `linear_url`.
+4. When replay returns `phase=awaiting_approval`, retain the complete exact machine preview internally for approval binding and recovery matching, then show only the concise owner-facing rendering defined below. Do not approve implicitly or paraphrase away material values. A standalone machine preview has an empty `linear_url`.
 5. Only after an explicit approval in this same source session, call `calendar_source_request` with `operation=approve` and the exact opaque `approval_reference` returned with that preview.
 6. After `queued`, stop. On wake, replay the exact approval call and report sanitized verified read-back.
 
-Never copy workflow run IDs, task IDs, OAuth data, event IDs, artifact versions, checksums, before-state hashes, or internal routing fields into the human response. The public preview contains only the operation, block key, summary, details, Kyiv-aware start/end, timezone, and optional canonical Linear URL. If routing is unavailable, report the truthful capability error; never instruct the owner to upload an OAuth JSON file.
+Never copy workflow run IDs, task IDs, OAuth data, event IDs, artifact versions, checksums, before-state hashes, or internal routing fields into the human response. The machine preview contains only the operation, block key, summary, details, Kyiv-aware start/end, timezone, and optional canonical Linear URL. Its shortened owner-facing representation follows below. If routing is unavailable, report the truthful capability error; never instruct the owner to upload an OAuth JSON file.
+
+### Owner-facing preview format
+
+Validate and retain every exact preview field internally for approval binding,
+but present only human-relevant information. Use a short heading that expresses
+the action (`Создать запись?`, `Изменить запись?`, or `Удалить запись?`) instead
+of rendering the literal protocol operation.
+
+- Show the event title.
+- Convert ISO timestamps to a human-readable local date and time range, for
+  example `6 сентября, 10:00–12:00`.
+- Show the timezone name and UTC offset, for example `Киев, UTC+3`.
+- Show details only when they add material information not already in the title.
+- Show a linked Linear issue only when `linear_url` is non-empty.
+- For create and update, omit `operation`, omit `block_key`, omit an empty
+  `linear_url`, and do not expose ISO timestamps or empty fields.
+- A delete machine preview intentionally has empty event fields. Never show only
+  `Удалить запись?`: include one exact reviewable target. Until the protocol
+  exposes a stored title/time, render `Цель: <block_key>` as the required
+  exception so the owner can identify the deterministic event being removed.
+
+Do not change, drop, or infer any material value when formatting. The approval
+call still uses the exact opaque reference bound to the complete machine
+preview, not the shortened owner-facing rendering.
 
 ### Literal field preservation
 
@@ -56,11 +80,12 @@ matching session; zero or multiple matches fail closed. Recency must never
 disambiguate multiple sessions. Read that session with
 `session_search(session_id=<that exact session>)`. If the read is truncated,
 scroll that same session around the matching plan message. Within it, require
-exactly one `calendar_source_request` plan result whose owner-visible preview
+exactly one `calendar_source_request` plan result whose complete machine preview
 matches every preview field exactly: `operation`, `block_key`, `summary`,
 `details`, `start`, `end`, `timezone`, and `linear_url`. Compare the
 timezone-aware `start` and `end` strings exactly as shown in the approved
-preview, not against the pre-normalized request strings. Then copy the complete
+machine preview, not against the localized owner-facing rendering or the
+pre-normalized request strings. Then copy the complete
 `calendar-approval:v1:<64 lowercase hex>` value byte-for-byte from that tool
 result. Never search by or reuse a partial hash prefix, derive a hash, or borrow
 a reference from another preview/session. If session identity, full-preview
