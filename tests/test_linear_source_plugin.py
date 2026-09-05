@@ -484,7 +484,11 @@ class AdapterTests(unittest.TestCase):
             chat_type="dm",
             thread_id="448864",
         )
-        request = "Добавь к SIS-61 комментарий: Atomic delivery proof."
+        request = {
+            "operation": "add_comment",
+            "identifier": "SIS-61",
+            "body": "Atomic delivery proof.",
+        }
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "kanban.db"
             with mock.patch.dict(os.environ, {"HERMES_KANBAN_DB": str(db_path)}):
@@ -1637,7 +1641,11 @@ class PluginTests(unittest.TestCase):
 
         result = json.loads(
             handle_linear_source_request(
-                {"request": "Добавь к SIS-61 комментарий: SIS-61 E2E proof A."},
+                {
+                    "operation": "add_comment",
+                    "identifier": "SIS-61",
+                    "body": "SIS-61 E2E proof A.",
+                },
                 session_id="20260828_120000_abcdef12",
                 board_factory=lambda **_kwargs: fake_board,
                 session_getter=lambda name, default="": session_values.get(name, default),
@@ -1745,7 +1753,11 @@ class PluginTests(unittest.TestCase):
 
         result = json.loads(
             handle_linear_source_request(
-                {"request": "Добавь к SIS-61 комментарий: Books proof."},
+                {
+                    "operation": "add_comment",
+                    "identifier": "SIS-61",
+                    "body": "Books proof.",
+                },
                 session_id="20260828_120000_abcdef12",
                 board_factory=board_factory,
                 session_getter=lambda name, default="": session_values.get(name, default),

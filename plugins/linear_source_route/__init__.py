@@ -803,7 +803,8 @@ class HermesKanbanBoard:
             kb = kb_module
         self.board = board
         self.source_profile = source_profile
-        self.kb = kb
+        assert kb is not None
+        self.kb: Any = kb
         self.audit_func = audit_func or bundled_audit_route
 
     def _connect(self):
@@ -841,6 +842,26 @@ class HermesKanbanBoard:
                 if task is None:
                     raise RouteError("Kanban create returned a missing task")
                 return _task_dict(task), True
+        finally:
+            conn.close()
+
+    def find_task(self, delivery_key: str) -> dict[str, Any] | None:
+        """Return the one active exact delivery task without creating it."""
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT id FROM tasks WHERE idempotency_key = ? "
+                "AND status != 'archived' ORDER BY created_at DESC",
+                (delivery_key,),
+            ).fetchall()
+            if len(rows) > 1:
+                raise RouteError("duplicate active tasks share the delivery key")
+            if not rows:
+                return None
+            task = self.kb.get_task(conn, rows[0]["id"])
+            if task is None:
+                raise RouteError("delivery lookup returned a missing task")
+            return _task_dict(task)
         finally:
             conn.close()
 

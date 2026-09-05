@@ -726,10 +726,7 @@ def parse_linear_request(
             )
         identifier, body = match.groups()
         body = body.strip()
-        if len(body) > 4000:
-            raise RouteError("comment body must be 1-4000 characters")
-        if any(pattern.search(body) for pattern in CREDENTIAL_SHAPES):
-            raise RouteError("comment body contains credential-shaped data")
+        _validate_clean_text(body, "body", maximum=4_000, required=True)
         operation = "add_comment"
         target = {"type": "issue", "identifier": identifier}
         change = {"body": body}
@@ -1410,17 +1407,23 @@ def route_request(
     command = parsed.command
     idempotency_key = command["idempotency_key"]
     delivery_key = _delivery_key(idempotency_key, source)
-    task, created = board.get_or_create_task(
-        delivery_key,
-        title=f"Linear {command['operation']} {command['target']['identifier']}",
-        body=build_task_body(command),
-        assignee="project-manager",
-        skills=["project-manager-linear-worker"],
-        triage=True,
-        idempotency_key=delivery_key,
-        session_id=source.session_id,
-        max_runtime_seconds=300,
-    )
+    if isinstance(request, str):
+        task = board.find_task(delivery_key)
+        if task is None:
+            raise RouteError("legacy comment replay was not found")
+        created = False
+    else:
+        task, created = board.get_or_create_task(
+            delivery_key,
+            title=f"Linear {command['operation']} {command['target']['identifier']}",
+            body=build_task_body(command),
+            assignee="project-manager",
+            skills=["project-manager-linear-worker"],
+            triage=True,
+            idempotency_key=delivery_key,
+            session_id=source.session_id,
+            max_runtime_seconds=300,
+        )
     replayed = not created
 
     if not created:

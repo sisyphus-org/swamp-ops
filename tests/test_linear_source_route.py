@@ -64,6 +64,14 @@ class FakeBoard:
         self.calls = []
         self.created = None
 
+    def find_task(self, delivery_key):
+        self.calls.append(("find", delivery_key))
+        if self.existing is None:
+            return None
+        existing = dict(self.existing)
+        existing.setdefault("idempotency_key", delivery_key)
+        return existing
+
     def get_or_create_task(self, delivery_key, **kwargs):
         self.calls.append(("get_or_create", delivery_key, kwargs))
         if self.existing is not None:
@@ -988,6 +996,8 @@ class ParseTests(unittest.TestCase):
             "Добавь к SIS-61 комментарий: Authorization: Bearer secret-shaped-value",
             "Добавь к SIS-61 комментарий: Authorization: Basic secret-shaped-value",
             "Добавь к SIS-61 комментарий: lin_api_" + "A" * 32,
+            "Добавь к SIS-61 комментарий: <!-- linear-command:v2 reserved -->",
+            "Добавь к SIS-61 комментарий: control\x01character",
         )
         for text in cases:
             with self.subTest(text=text):
@@ -1143,10 +1153,28 @@ class SourceContextTests(unittest.TestCase):
 
 
 class DispatchTests(unittest.TestCase):
+    def test_fresh_legacy_comment_fails_before_task_creation(self):
+        board = FakeBoard()
+
+        with self.assertRaisesRegex(route.RouteError, "legacy comment replay was not found"):
+            route.route_request(
+                "Добавь к SIS-61 комментарий: SIS-61 E2E proof A.",
+                source=source_context(),
+                board=board,
+                uuid_factory=uuid_factory(),
+            )
+
+        self.assertEqual([call[0] for call in board.calls], ["find"])
+        self.assertIsNone(board.created)
+
     def test_new_request_is_audited_before_promotion(self):
         board = FakeBoard()
         result = route.route_request(
-            "Добавь к SIS-61 комментарий: SIS-61 E2E proof A.",
+            {
+                "operation": "add_comment",
+                "identifier": "SIS-61",
+                "body": "SIS-61 E2E proof A.",
+            },
             source=source_context(),
             board=board,
             uuid_factory=uuid_factory(),
@@ -1172,7 +1200,11 @@ class DispatchTests(unittest.TestCase):
         board = FakeBoard()
         source = source_context(profile="books")
         route.route_request(
-            "Добавь к SIS-61 комментарий: Books proof.",
+            {
+                "operation": "add_comment",
+                "identifier": "SIS-61",
+                "body": "Books proof.",
+            },
             source=source,
             board=board,
             uuid_factory=uuid_factory(),
@@ -1181,7 +1213,11 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(body["command"]["source_profile"], "books")
 
     def test_cross_profile_and_session_deliveries_share_mutation_key_but_create_separate_tasks(self):
-        text = "Добавь к SIS-61 комментарий: One global change."
+        request = {
+            "operation": "add_comment",
+            "identifier": "SIS-61",
+            "body": "One global change.",
+        }
         deliveries = []
         mutation_keys = []
         task_ids = []
@@ -1192,7 +1228,7 @@ class DispatchTests(unittest.TestCase):
         ):
             board = FakeBoard()
             result = route.route_request(
-                text, source=source, board=board, uuid_factory=uuid_factory()
+                request, source=source, board=board, uuid_factory=uuid_factory()
             )
             deliveries.append(result["delivery_key"])
             mutation_keys.append(result["idempotency_key"])
@@ -1206,7 +1242,11 @@ class DispatchTests(unittest.TestCase):
         board = FakeBoard(audit_result="drift")
         with self.assertRaisesRegex(route.RouteError, "route audit failed"):
             route.route_request(
-                "Добавь к SIS-61 комментарий: SIS-61 E2E proof A.",
+                {
+                    "operation": "add_comment",
+                    "identifier": "SIS-61",
+                    "body": "SIS-61 E2E proof A.",
+                },
                 source=source_context(),
                 board=board,
                 uuid_factory=uuid_factory(),
@@ -1436,7 +1476,7 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(result["status"], "verified_no_op")
         self.assertTrue(result["replayed"])
         self.assertTrue(result["linear_result"]["verified"])
-        self.assertEqual([call[0] for call in board.calls], ["get_or_create"])
+        self.assertEqual([call[0] for call in board.calls], ["find"])
 
     def test_completed_v2_result_for_another_mutation_is_rejected_fail_closed(self):
         request = "Добавь к SIS-61 комментарий: SIS-61 E2E proof A."
@@ -1483,7 +1523,7 @@ class DispatchTests(unittest.TestCase):
                 uuid_factory=uuid_factory(),
             )
 
-        self.assertEqual([call[0] for call in board.calls], ["get_or_create"])
+        self.assertEqual([call[0] for call in board.calls], ["find"])
 
     def test_completed_create_result_requires_nonempty_identifier_and_url(self):
         request = {
@@ -1604,7 +1644,7 @@ class DispatchTests(unittest.TestCase):
                 uuid_factory=uuid_factory(),
             )
 
-        self.assertEqual([call[0] for call in board.calls], ["get_or_create"])
+        self.assertEqual([call[0] for call in board.calls], ["find"])
 
     def test_existing_task_from_other_source_session_fails_closed(self):
         board = FakeBoard(
