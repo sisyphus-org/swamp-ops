@@ -118,9 +118,10 @@ class CalendarCommandTests(unittest.TestCase):
 
 
 class FakeBoard:
-    def __init__(self, existing=None, audit="pass"):
+    def __init__(self, existing=None, audit="pass", approval_linear_issue=None):
         self.existing = existing
         self.audit = audit
+        self.approval_linear_issue = approval_linear_issue
         self.calls = []
 
     def get_or_create_task(self, delivery_key, **kwargs):
@@ -148,6 +149,10 @@ class FakeBoard:
 
     def block_reason(self, task_id):
         return "Calendar route unavailable"
+
+    def calendar_approval_linear_issue(self, reference, source):
+        self.calls.append(("approval_link", reference, source))
+        return self.approval_linear_issue
 
 
 def source_context(**overrides):
@@ -250,6 +255,12 @@ class CalendarRoutingTests(unittest.TestCase):
         self.assertEqual(output["status"], "completed")
         self.assertEqual(output["preview"], preview)
         self.assertEqual(output["approval_reference"], result["approval_reference"])
+        self.assertEqual(
+            calendar_route.approval_plan_linear_issue(
+                dict(board.existing or {}), result["approval_reference"], source
+            ),
+            "SIS-123",
+        )
         self.assertNotIn("task_id", output)
         public_text = json.dumps(output, sort_keys=True)
         for internal in ("checksum", "eventId", "run_id", "artifact_version"):
@@ -293,6 +304,39 @@ class CalendarRoutingTests(unittest.TestCase):
         self.assertEqual(output["status"], "completed")
         self.assertNotIn("linearIssue", output["data"])
         self.assertTrue(output["changed"])
+
+    def test_completed_linked_apply_rejects_substituted_linear_issue(self):
+        source = source_context()
+        request = {"operation": "approve", "approval_reference": "calendar-approval:v1:" + "a" * 64}
+        command = calendar_route.parse_calendar_request(
+            request, source_profile=source.profile,
+            uuid_factory=lambda: "11111111-1111-4111-8111-111111111111",
+        ).command
+        result = {
+            "schema_version": "calendar-result.v1",
+            "command_id": command["command_id"],
+            "idempotency_key": command["idempotency_key"],
+            "source_profile": source.profile,
+            "operation": "approve_write",
+            "phase": "completed",
+            "outcome": "applied",
+            "data": {
+                "operation": "create", "status": "verified", "reused": False,
+                "linearIssue": "SIS-999", "blockKey": "primary",
+            },
+            "verified": True,
+        }
+        task = {
+            "id": "t_deadbeef", "status": "done", "session_id": source.session_id,
+            "idempotency_key": calendar_route.delivery_key(command["idempotency_key"], source),
+            "body": calendar_route.build_calendar_task_body(command),
+            "result": json.dumps(result),
+        }
+
+        with self.assertRaisesRegex(calendar_route.CalendarRouteError, "apply completion"):
+            calendar_route._load_completed(
+                task, command, expected_linear_issue="SIS-123"
+            )
 
     def test_completed_plan_replay_rejects_substituted_opaque_reference(self):
         source = source_context()

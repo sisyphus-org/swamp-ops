@@ -19,6 +19,7 @@ from plugins.personal_assistant_calendar import (  # noqa: E402
     _approval_token,
     _completed_result_path,
     _load_completed_result,
+    _validate_completed_result,
     _write_completed_result,
     _verify_runtime_workspace,
     _validated_approval_plan,
@@ -371,6 +372,32 @@ class PersonalAssistantCalendarWorkerTests(unittest.TestCase):
         self.assertEqual(persisted["outcome"], "applied")
         self.assertNotIn("linearIssue", persisted["data"])
 
+    def test_linked_completed_journal_rejects_substituted_linear_issue(self):
+        approval_ref = "calendar-approval:v1:" + "c" * 64
+        raw = command({"operation": "approve", "approval_reference": approval_ref})
+        result = {
+            "schema_version": "calendar-result.v1",
+            "command_id": raw["command_id"],
+            "idempotency_key": raw["idempotency_key"],
+            "source_profile": raw["source_profile"],
+            "operation": "approve_write",
+            "verified": True,
+            "phase": "completed",
+            "outcome": "applied",
+            "data": {
+                "operation": "create", "status": "verified", "reused": False,
+                "linearIssue": "SIS-999", "blockKey": "primary",
+            },
+        }
+
+        with self.assertRaisesRegex(Exception, "apply journal"):
+            _validate_completed_result(
+                raw,
+                result,
+                "20260904_120000_abcdef12",
+                expected_linear_issue="SIS-123",
+            )
+
     def test_approval_renews_claim_before_each_network_step_and_apply(self):
         approval_ref = "calendar-approval:v1:" + "c" * 64
         raw = command({"operation": "approve", "approval_reference": approval_ref})
@@ -518,6 +545,17 @@ class PersonalAssistantCalendarWorkerTests(unittest.TestCase):
             barrier = threading.Barrier(2)
             outputs = []
 
+            def load_completed(command_value, environ_value, session_id):
+                path = _completed_result_path(command_value, environ_value)
+                if not path.exists():
+                    return None
+                return _validate_completed_result(
+                    command_value,
+                    json.loads(path.read_text(encoding="utf-8")),
+                    session_id,
+                    expected_linear_issue="SIS-123",
+                )
+
             def invoke():
                 barrier.wait()
                 outputs.append(json.loads(real_handle_pa_calendar_execute(
@@ -526,7 +564,7 @@ class PersonalAssistantCalendarWorkerTests(unittest.TestCase):
                     run_reserver=lambda *_args: True,
                     lifecycle_factory=lambda _task_id: Lifecycle(),
                     workflow_runner_factory=SlowWorkflows,
-                    result_loader=_load_completed_result,
+                    result_loader=load_completed,
                     result_writer=_write_completed_result,
                 )))
 

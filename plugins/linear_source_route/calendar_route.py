@@ -35,6 +35,7 @@ CREDENTIAL_SHAPES = (
     re.compile(r"\b(?:ya29\.|1//)[A-Za-z0-9._-]{12,}\b"),
     re.compile(r'"(?:client_secret|refresh_token|access_token)"\s*:', re.IGNORECASE),
 )
+_UNSET = object()
 
 
 class CalendarRouteError(RuntimeError):
@@ -223,7 +224,12 @@ def _expected_approval_reference(
     return f"calendar-approval:v1:{digest}"
 
 
-def _load_completed(task: dict[str, Any], command: dict[str, Any]) -> dict[str, Any]:
+def _load_completed(
+    task: dict[str, Any],
+    command: dict[str, Any],
+    *,
+    expected_linear_issue: str | None | object = _UNSET,
+) -> dict[str, Any]:
     try:
         envelope = json.loads(task.get("body", ""))
         result = json.loads(task.get("result", ""))
@@ -356,6 +362,17 @@ def _load_completed(task: dict[str, Any], command: dict[str, Any]) -> dict[str, 
     if result["operation"] == "approve_write":
         required_apply = {"operation", "status", "reused", "blockKey"}
         allowed_apply = required_apply | {"linearIssue"}
+        observed_linear_issue = data.get("linearIssue") if isinstance(data, dict) else None
+        linkage_matches = (
+            expected_linear_issue is _UNSET
+            or (expected_linear_issue is None and observed_linear_issue is None)
+            or (
+                isinstance(expected_linear_issue, str)
+                and isinstance(data, dict)
+                and "linearIssue" in data
+                and observed_linear_issue == expected_linear_issue
+            )
+        )
         if (
             result.get("phase") != "completed"
             or result.get("outcome") not in {"applied", "no_op"}
@@ -365,6 +382,7 @@ def _load_completed(task: dict[str, Any], command: dict[str, Any]) -> dict[str, 
             or data.get("operation") not in WRITE_OPERATIONS
             or data.get("status") != "verified"
             or not isinstance(data.get("reused"), bool)
+            or not linkage_matches
             or (
                 data.get("linearIssue") is not None
                 and (
@@ -383,6 +401,34 @@ def _load_completed(task: dict[str, Any], command: dict[str, Any]) -> dict[str, 
             "data": data,
         }
     raise CalendarRouteError("Calendar result operation is invalid")
+
+
+def approval_plan_linear_issue(
+    task: dict[str, Any], reference: str, source: SourceContext
+) -> str | None:
+    """Return the exact optional SIS identifier bound to one completed plan."""
+    try:
+        envelope = json.loads(task.get("body", ""))
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise CalendarRouteError("Calendar approval plan task is malformed") from exc
+    command = envelope.get("command") if isinstance(envelope, dict) else None
+    if (
+        not isinstance(command, dict)
+        or command.get("operation") != "plan_write"
+        or command.get("source_profile") != source.profile
+        or task.get("session_id") != source.session_id
+    ):
+        raise CalendarRouteError("Calendar approval plan binding is invalid")
+    completed = _load_completed(task, command)
+    if completed.get("approval_reference") != reference:
+        raise CalendarRouteError("Calendar approval plan reference is invalid")
+    linear_url = completed["preview"].get("linear_url")
+    if not linear_url:
+        return None
+    match = PUBLIC_ISSUE_URL.fullmatch(linear_url)
+    if match is None:
+        raise CalendarRouteError("Calendar approval plan linkage is invalid")
+    return match.group(1)
 
 
 def route_calendar_request(
@@ -413,7 +459,14 @@ def route_calendar_request(
     if not created:
         status = task.get("status")
         if status == "done":
-            return _load_completed(task, command)
+            expected_linear_issue: str | None | object = _UNSET
+            if command["operation"] == "approve_write":
+                expected_linear_issue = board.calendar_approval_linear_issue(
+                    command["request"]["approval_reference"], source
+                )
+            return _load_completed(
+                task, command, expected_linear_issue=expected_linear_issue
+            )
         if status == "blocked":
             return {"status": "blocked", "message": "Calendar routing or execution failed safely."}
         if status in {"todo", "ready", "running", "review"}:

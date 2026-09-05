@@ -34,6 +34,7 @@ CREDENTIAL_PATTERNS = (
     re.compile(r"\b(?:ya29\.|1//)[A-Za-z0-9._-]{6,}\b"),
     re.compile(r'"(?:client_secret|refresh_token|access_token)"\s*:\s*"[^"]*"', re.IGNORECASE),
 )
+_UNSET = object()
 EXPECTED_WORKER_CONTRACT = {
     "profile": "personal-assistant",
     "tool": "pa_calendar_execute",
@@ -801,7 +802,11 @@ def _completed_result_path(command: dict[str, Any], environ: Any) -> Path:
 
 
 def _validate_completed_result(
-    command: dict[str, Any], result: Any, session_id: str
+    command: dict[str, Any],
+    result: Any,
+    session_id: str,
+    *,
+    expected_linear_issue: str | None | object = _UNSET,
 ) -> dict[str, Any]:
     common = {
         "schema_version", "command_id", "idempotency_key", "source_profile",
@@ -848,6 +853,17 @@ def _validate_completed_result(
         data = result.get("data")
         required_data = {"operation", "status", "reused", "blockKey"}
         allowed_data = required_data | {"linearIssue"}
+        observed_linear_issue = data.get("linearIssue") if isinstance(data, dict) else None
+        linkage_matches = (
+            expected_linear_issue is _UNSET
+            or (expected_linear_issue is None and observed_linear_issue is None)
+            or (
+                isinstance(expected_linear_issue, str)
+                and isinstance(data, dict)
+                and "linearIssue" in data
+                and observed_linear_issue == expected_linear_issue
+            )
+        )
         if (
             set(result) != common | {"data"}
             or result.get("phase") != "completed"
@@ -857,6 +873,7 @@ def _validate_completed_result(
             or not set(data).issubset(allowed_data)
             or data.get("status") != "verified"
             or not isinstance(data.get("reused"), bool)
+            or not linkage_matches
         ):
             raise CalendarWorkerError("completed Calendar apply journal is invalid")
     else:
@@ -874,7 +891,23 @@ def _load_completed_result(
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise CalendarWorkerError("completed Calendar journal is unreadable") from exc
-    return _validate_completed_result(command, value, session_id)
+    expected_linear_issue: str | None | object = _UNSET
+    if command["operation"] == "approve_write":
+        reference = command["request"].get("approval_reference")
+        approved = _load_approval_plan(
+            reference, Path(str(environ["HERMES_KANBAN_DB"]))
+        )
+        approved_request = approved.get("request")
+        if not isinstance(approved_request, dict):
+            raise CalendarWorkerError("completed Calendar approval binding is invalid")
+        match = PUBLIC_ISSUE_URL.fullmatch(approved_request.get("linear_url", ""))
+        expected_linear_issue = match.group(1) if match else None
+    return _validate_completed_result(
+        command,
+        value,
+        session_id,
+        expected_linear_issue=expected_linear_issue,
+    )
 
 
 def _write_completed_result(

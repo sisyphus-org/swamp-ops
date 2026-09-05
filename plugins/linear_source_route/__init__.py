@@ -8,6 +8,7 @@ from typing import Any, Callable
 from .audit import audit_route as bundled_audit_route
 from .calendar_route import (
     CalendarRequestError,
+    approval_plan_linear_issue,
     route_calendar_request,
 )
 from .route import (
@@ -863,6 +864,26 @@ class HermesKanbanBoard:
             if task is None:
                 raise RouteError("delivery lookup returned a missing task")
             return _task_dict(task)
+        finally:
+            conn.close()
+
+    def calendar_approval_linear_issue(
+        self, reference: str, source: SourceContext
+    ) -> str | None:
+        """Resolve the exact optional SIS linkage from one completed plan task."""
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT id FROM tasks WHERE status = 'done' AND session_id = ? "
+                "AND result LIKE ? ORDER BY created_at DESC",
+                (source.session_id, f'%"approval_reference": "{reference}"%'),
+            ).fetchall()
+            if len(rows) != 1:
+                raise RouteError("Calendar approval plan is missing or ambiguous")
+            task = self.kb.get_task(conn, rows[0]["id"])
+            if task is None:
+                raise RouteError("Calendar approval plan task is missing")
+            return approval_plan_linear_issue(_task_dict(task), reference, source)
         finally:
             conn.close()
 
