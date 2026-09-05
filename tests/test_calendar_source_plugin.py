@@ -281,10 +281,15 @@ class CalendarSourcePluginTests(unittest.TestCase):
             "timezone name and UTC offset",
             "omit `operation`",
             "omit `block_key`",
-            "omit an empty `linear_url`",
+            "omit an empty",
         ):
             self.assertIn(required, guidance)
         self.assertIn("Show details only when", guidance)
+        self.assertIn("complete exact machine preview", guidance)
+        self.assertIn("complete machine preview", guidance)
+        self.assertIn("localized owner-facing rendering", guidance)
+        self.assertIn("Never show only", guidance)
+        self.assertIn("Цель: <block_key>", guidance)
 
 
 if __name__ == "__main__":
