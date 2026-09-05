@@ -2061,31 +2061,40 @@ class PluginTests(unittest.TestCase):
             "HERMES_SESSION_ID": "20260905_112011_61f9fd71",
         }
 
-        result = json.loads(
-            handle_linear_source_request(
-                {
-                    "request": (
-                        "Добавь к SIS-124 комментарий: "
-                        "Production E2E: structured add_comment из Books работает."
+        for request in (
+            (
+                "Добавь к SIS-124 комментарий: "
+                "Production E2E: structured add_comment из Books работает."
+            ),
+            (
+                "Добавь в SIS-124 комментарий: "
+                "Production E2E: structured add_comment из Books работает."
+            ),
+        ):
+            with self.subTest(request=request):
+                result = json.loads(
+                    handle_linear_source_request(
+                        {"request": request},
+                        session_id="20260905_112011_61f9fd71",
+                        board_factory=lambda **_kwargs: fake_board,
+                        session_getter=lambda name, default="": session_values.get(
+                            name, default
+                        ),
+                        runtime_profile_getter=lambda: "books",
                     )
-                },
-                session_id="20260905_112011_61f9fd71",
-                board_factory=lambda **_kwargs: fake_board,
-                session_getter=lambda name, default="": session_values.get(name, default),
-                runtime_profile_getter=lambda: "books",
-            )
-        )
+                )
 
-        self.assertEqual(
-            result,
-            {
-                "status": "rejected",
-                "message": (
-                    "Для нового комментария вызовите add_comment со структурированными "
-                    "полями: operation, ровно одно из identifier/issue_number и body."
-                ),
-            },
-        )
+                self.assertEqual(
+                    result,
+                    {
+                        "status": "rejected",
+                        "message": (
+                            "Для нового комментария вызовите add_comment со "
+                            "структурированными полями: operation, ровно одно из "
+                            "identifier/issue_number и body."
+                        ),
+                    },
+                )
         fake_board.find_task.assert_called_once()
         fake_board.get_or_create_task.assert_not_called()
 
