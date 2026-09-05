@@ -11,6 +11,7 @@ from .calendar_route import (
     route_calendar_request,
 )
 from .route import (
+    COMMENT_REQUEST,
     CREDENTIAL_SHAPES,
     RouteError,
     SourceContext,
@@ -1694,6 +1695,19 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
             request: Any = args["request"]
             if not isinstance(request, str):
                 raise RouteError("request must be text")
+            if COMMENT_REQUEST.fullmatch(request.strip()) is None:
+                return json.dumps(
+                    {
+                        "status": "rejected",
+                        "message": (
+                            "Для нового комментария вызовите add_comment со "
+                            "структурированными полями: operation, ровно одно из "
+                            "identifier/issue_number и body."
+                        ),
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
         elif (
             args.get("operation") == "bulk_linear_operations"
             and set(args) in (
