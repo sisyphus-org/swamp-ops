@@ -1689,6 +1689,15 @@ def _public_target(result: dict[str, Any]) -> tuple[dict[str, Any], dict[str, An
             raise RouteError(
                 "verified issue update lacks a complete public project/milestone pair"
             )
+        if operation == "move_issue" and (
+            "project" not in after
+            or "milestone" not in after
+            or after.get("project") is None
+            or after.get("milestone") is None
+        ):
+            raise RouteError(
+                "verified move result lacks a complete public project/milestone pair"
+            )
         if operation in {"update_issue", "move_issue"} and "project" in after:
             project = after.get("project")
             milestone = after.get("milestone")

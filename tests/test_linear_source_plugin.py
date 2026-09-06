@@ -1475,6 +1475,31 @@ class PluginTests(unittest.TestCase):
         self.assertEqual(moved["target"]["milestone"], "Milestone Two")
         self.assertNotIn("must-not-leak", json.dumps(moved))
 
+        for incomplete in (
+            {"project": "Project Two"},
+            {"milestone": "Milestone Two"},
+            {"project": None, "milestone": None},
+        ):
+            with self.subTest(incomplete=incomplete), self.assertRaisesRegex(
+                RouteError, "verified move result lacks a complete"
+            ):
+                _public_result(
+                    {
+                        "status": "verified_no_op",
+                        "linear_result": {
+                            "verified": True,
+                            "result": "applied",
+                            "operation": "move_issue",
+                            "target": {
+                                "type": "issue",
+                                "identifier": "SIS-94",
+                                "url": "https://linear.app/example/issue/SIS-94/fixture",
+                            },
+                            "after": incomplete,
+                        },
+                    }
+                )
+
     def test_public_result_rejects_invalid_due_date_or_estimate(self):
         for after in (
             {"due_date": "2026-02-30"},
