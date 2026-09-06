@@ -22,17 +22,63 @@ SAFE_MISMATCH_FIELDS = (
 )
 
 
-def description_matches(desired: str, live: Any) -> bool:
-    """Match exact text or Linear's confirmed deterministic URL autolinking.
+def _canonicalize_unordered_list_markers(desired: str) -> str | None:
+    """Return Linear's observed ``- `` to ``* `` list serialization.
 
-    Mutation payloads stay byte-for-byte unchanged. The only accepted alternate
-    serialization is replacing every unambiguous plain HTTP(S) URL with
-    ``[url](<url>)`` while preserving every other byte.
+    Only complete Markdown list-item lines are changed. A deeply indented item
+    is accepted only beneath an earlier, less-indented list item so indented
+    code is not reinterpreted as a list. Fences and task-list markers stay
+    outside this proven equivalence class.
+    """
+    if re.search(r"(?m)^[ ]*(?:```|~~~)", desired):
+        return None
+
+    canonical: list[str] = []
+    list_indents: list[int] = []
+    changed = False
+    for line in desired.splitlines(keepends=True):
+        match = re.match(r"^( *)(-) ([^\r\n]+)(\r?\n)?$", line)
+        if match is None:
+            canonical.append(line)
+            continue
+
+        indent = len(match.group(1))
+        content = match.group(3)
+        if content.startswith(("[ ] ", "[x] ", "[X] ")):
+            return None
+        if re.fullmatch(r"(?:-\s*){2,}", content):
+            return None
+        if indent > 4 or (
+            indent >= 4
+            and not any(parent_indent < indent for parent_indent in list_indents)
+        ):
+            return None
+
+        canonical.append(
+            f"{match.group(1)}* {content}{match.group(4) or ''}"
+        )
+        list_indents.append(indent)
+        changed = True
+
+    return "".join(canonical) if changed else None
+
+
+def description_matches(desired: str, live: Any) -> bool:
+    """Match exact text or a narrowly confirmed Linear serialization.
+
+    Mutation payloads stay byte-for-byte unchanged. Accepted alternate whole-
+    value serializations are deterministic plain-URL autolinking and unordered
+    Markdown list markers changing from ``- `` to ``* ``.
     """
     if live == desired:
         return True
     if not isinstance(live, str):
         return False
+
+    canonical_list = _canonicalize_unordered_list_markers(desired)
+    if canonical_list is not None and live == canonical_list:
+        return True
+
     urls = list(re.finditer(r"https?://[^\s\[\]<>]+", desired))
     if not urls or any(
         match.group(0).endswith(

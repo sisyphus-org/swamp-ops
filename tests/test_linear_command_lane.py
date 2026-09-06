@@ -3737,6 +3737,73 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(replay["result"], "no_op")
             self.assertEqual(len(client.writes), 1)
 
+    def test_update_issue_accepts_linear_unordered_list_markers_and_replays(self):
+        desired = (
+            "## Вывод: кит как образ мира и человеческой потребности в цели\n\n"
+            "- На протяжении всего романа Мелвилл показывает мир через кита.\n"
+            "- Человек способен наделить отдельный предмет значением целого мира."
+        )
+        observed = (
+            "## Вывод: кит как образ мира и человеческой потребности в цели\n\n"
+            "* На протяжении всего романа Мелвилл показывает мир через кита.\n"
+            "* Человек способен наделить отдельный предмет значением целого мира."
+        )
+
+        class CanonicalizingListClient(FakeClient):
+            def update_issue_fields(self, issue_id, **fields):
+                sent_description = fields.get("description")
+                super().update_issue_fields(issue_id, **fields)
+                if sent_description is not None:
+                    self.current["description"] = observed
+
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Path(tmp) / "journal.json"
+            client = CanonicalizingListClient()
+            raw = command(
+                "update_issue",
+                {"description": desired},
+                key="linear:SIS-70:update:list-marker-fixture",
+            )
+
+            applied = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+            self.assertEqual(applied["result"], "applied")
+            self.assertEqual(applied["after"]["description"], observed)
+            self.assertEqual(
+                client.writes,
+                [("fields", "issue-uuid", {"description": desired})],
+            )
+
+            replay = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+            self.assertEqual(replay["result"], "no_op")
+            self.assertEqual(len(client.writes), 1)
+
+    def test_linear_unordered_list_marker_equivalence_is_exact_and_narrow(self):
+        matches = lane._COMPARISON.description_matches
+        nested = "- parent\n  - child\n    - grandchild"
+        self.assertTrue(matches(nested, "* parent\n  * child\n    * grandchild"))
+        self.assertTrue(matches("before - inline\n- item\n---", "before - inline\n* item\n---"))
+
+        for desired, observed in (
+            ("- one\n- two", "* one\n- two"),
+            ("- one", "* changed"),
+            ("- one", "*  one"),
+            ("## Heading\n- one", "# Heading\n* one"),
+            ("- *one*", "* _one_"),
+            ("- [one](https://example.com)", "* [one](https://changed.example)"),
+            ("- [ ] task", "* [ ] task"),
+            ("```text\n- code\n```", "```text\n* code\n```"),
+            ("    - indented code", "    * indented code"),
+            ("- parent\n\n        - code", "* parent\n\n        * code"),
+            ("- - -", "* - -"),
+            ("+ item", "* item"),
+        ):
+            with self.subTest(desired=desired, observed=observed):
+                self.assertFalse(matches(desired, observed))
+
     def test_update_issue_moves_to_exact_project_and_milestone_with_safe_projection(self):
         with tempfile.TemporaryDirectory() as tmp:
             client = FakeClient()
