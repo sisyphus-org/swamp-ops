@@ -3797,6 +3797,7 @@ class ExecutionTests(unittest.TestCase):
             ("- [ ] task", "* [ ] task"),
             ("```text\n- code\n```", "```text\n* code\n```"),
             ("    - indented code", "    * indented code"),
+            ("- parent\n\n        - code", "* parent\n\n        * code"),
             ("- - -", "* - -"),
             ("+ item", "* item"),
         ):

@@ -48,7 +48,10 @@ def _canonicalize_unordered_list_markers(desired: str) -> str | None:
             return None
         if re.fullmatch(r"(?:-\s*){2,}", content):
             return None
-        if indent >= 4 and not any(parent_indent < indent for parent_indent in list_indents):
+        if indent > 4 or (
+            indent >= 4
+            and not any(parent_indent < indent for parent_indent in list_indents)
+        ):
             return None
 
         canonical.append(
