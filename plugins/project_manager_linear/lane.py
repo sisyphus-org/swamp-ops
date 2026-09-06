@@ -26,6 +26,7 @@ OPERATIONS = {
     "bulk_linear_operations",
     "read_issue",
     "change_state",
+    "move_issue",
     "update_issue",
     "inventory_sub_issues",
     "update_sub_issues",
@@ -1463,7 +1464,43 @@ def validate_command(raw: Any) -> dict[str, Any]:
         state = change["state"]
         if state not in SAFE_STATES and state not in TERMINAL_STATES:
             raise ContractError("requested state is not in the exact safe-state allowlist")
+    elif operation == "move_issue":
+        expected = {
+            "expected_project",
+            "expected_milestone",
+            "project",
+            "milestone",
+        }
+        if set(change) != expected:
+            raise ContractError(
+                "move_issue requires exact expected and target project/milestone"
+            )
+        expected_project = change["expected_project"]
+        expected_milestone = change["expected_milestone"]
+        if (expected_project is None) != (expected_milestone is None):
+            raise ContractError(
+                "move_issue expected project and milestone must both be exact names or null"
+            )
+        values = (change["project"], change["milestone"])
+        if expected_project is not None:
+            values += (expected_project, expected_milestone)
+        if any(
+            not isinstance(value, str)
+            or not value.strip()
+            or len(value) > MAX_TITLE_LENGTH
+            or any(ord(char) < 32 for char in value)
+            or _VALIDATION.RESERVED_MARKER in value
+            or any(pattern.search(value) for pattern in CREDENTIAL_SHAPES)
+            for value in values
+        ):
+            raise ContractError(
+                "move_issue scope names must be exact safe 1-200 character names"
+            )
     elif operation == "update_issue":
+        if "project" in change or "milestone" in change:
+            raise ContractError(
+                "update_issue project/milestone scope changes must use move_issue"
+            )
         allowed = {
             "title",
             "description",
@@ -1475,12 +1512,10 @@ def validate_command(raw: Any) -> dict[str, Any]:
             "due_date",
             "estimate",
             "parent_identifier",
-            "project",
-            "milestone",
         }
         if not change or not set(change).issubset(allowed):
             raise ContractError(
-                "update_issue supports title, description, description_transform, state, priority, assignee, labels, due_date, estimate, parent_identifier, project, and milestone"
+                "update_issue supports title, description, description_transform, state, priority, assignee, labels, due_date, estimate, and parent_identifier"
             )
         if "description" in change and "description_transform" in change:
             raise ContractError(
@@ -1561,37 +1596,6 @@ def validate_command(raw: Any) -> dict[str, Any]:
                 raise ContractError(
                     "update_issue parent_identifier must be an exact SIS-N identifier or null"
                 )
-        if ("project" in change) != ("milestone" in change):
-            raise ContractError(
-                "update_issue project and milestone must be supplied together"
-            )
-        if "project" in change:
-            project = change["project"]
-            milestone = change["milestone"]
-            if (project is None) != (milestone is None):
-                raise ContractError(
-                    "update_issue project and milestone must both be exact names or null"
-                )
-            if project is not None:
-                values = (project, milestone)
-                if any(
-                    not isinstance(value, str)
-                    or not value.strip()
-                    or len(value) > MAX_TITLE_LENGTH
-                    for value in values
-                ):
-                    raise ContractError(
-                        "update_issue project and milestone must both be exact 1-200 character names or null"
-                    )
-                if any(
-                    any(ord(char) < 32 for char in value)
-                    or _VALIDATION.RESERVED_MARKER in value
-                    or any(pattern.search(value) for pattern in CREDENTIAL_SHAPES)
-                    for value in values
-                ):
-                    raise ContractError(
-                        "update_issue project or milestone name contains unsafe data"
-                    )
     elif operation == "inventory_sub_issues":
         if change:
             raise ContractError("inventory_sub_issues change must be empty")
@@ -3428,8 +3432,10 @@ def execute_command(
                 "verified": True,
             }
         )
-    if command["operation"] == "update_issue":
+    if command["operation"] in {"update_issue", "move_issue"}:
         change = dict(command["change"])
+        expected_project_name = change.pop("expected_project", ...)
+        expected_milestone_name = change.pop("expected_milestone", ...)
         description_transform = change.pop("description_transform", None)
         description_recovery_path = (
             journal_path.with_name(journal_path.name + ".description-transforms")
@@ -3455,6 +3461,30 @@ def execute_command(
             "intent_hash": request_hash,
             "command_hash": command_hash,
         }
+        move_recovery_path = (
+            journal_path.with_name(journal_path.name + ".issue-moves")
+            if command["operation"] == "move_issue" and journal_path is not None
+            else None
+        )
+        move_recovery_entries = (
+            load_relation_recovery_journal(move_recovery_path)
+            if move_recovery_path is not None
+            else {}
+        )
+        move_recovery = move_recovery_entries.get(key_hash)
+        move_binding = {
+            "approval_checksum": command_hash,
+            "intent_hash": request_hash,
+            "command_hash": command_hash,
+        }
+        if move_recovery is not None and (
+            move_recovery["request_hash"] != request_hash
+            or any(
+                move_recovery[field] != value
+                for field, value in move_binding.items()
+            )
+        ):
+            raise ContractError("move_issue recovery journal request conflict")
 
         def description_state_hash(value: Any) -> str:
             return hashlib.sha256(
@@ -3755,6 +3785,18 @@ def execute_command(
                         )
                     current_milestone_name = current_milestone_node["name"]
 
+            if command["operation"] == "move_issue":
+                expected_scope = (
+                    expected_project_name,
+                    expected_milestone_name,
+                )
+                target_scope = (change["project"], change["milestone"])
+                current_scope = (current_project_name, current_milestone_name)
+                if current_scope not in {expected_scope, target_scope}:
+                    raise ContractError(
+                        "move_issue current scope does not match expected project/milestone"
+                    )
+
             if change["project"] is None:
                 desired_project_id = None
                 desired_milestone_id = None
@@ -3879,6 +3921,10 @@ def execute_command(
                     fields.append("parent")
             elif live.get("parent") != issue.get("parent"):
                 fields.append("parent")
+            if live.get("url") != issue.get("url"):
+                fields.append("url")
+            if live.get("archivedAt") != issue.get("archivedAt"):
+                fields.append("archived")
             if "project" in change:
                 live_project = live.get("project")
                 live_project_id = (
@@ -3890,9 +3936,27 @@ def execute_command(
                     if isinstance(live_milestone, dict)
                     else None
                 )
-                if live_project_id != desired_project_id:
+                if (
+                    live_project_id != desired_project_id
+                    or (
+                        desired_project_id is not None
+                        and (
+                            not isinstance(live_project, dict)
+                            or live_project.get("name") != change["project"]
+                        )
+                    )
+                ):
                     fields.append("project")
-                if live_milestone_id != desired_milestone_id:
+                if (
+                    live_milestone_id != desired_milestone_id
+                    or (
+                        desired_milestone_id is not None
+                        and (
+                            not isinstance(live_milestone, dict)
+                            or live_milestone.get("name") != change["milestone"]
+                        )
+                    )
+                ):
                     fields.append("milestone")
             else:
                 if live.get("project") != issue.get("project"):
@@ -3967,6 +4031,95 @@ def execute_command(
 
         fields = update_mismatches(issue)
         before_update = update_snapshot(issue)
+
+        def move_state_hash(
+            value: dict[str, Any],
+            project_name: str | None,
+            milestone_name: str | None,
+        ) -> str:
+            snapshot = {
+                "issue": {
+                    key: item
+                    for key, item in value.items()
+                    if key not in {"project", "projectMilestone"}
+                },
+                "project": project_name,
+                "milestone": milestone_name,
+            }
+            return hashlib.sha256(
+                json.dumps(
+                    snapshot,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+
+        move_before_hash = move_state_hash(
+            issue, current_project_name, current_milestone_name
+        )
+        move_after_hash = move_state_hash(
+            issue, change.get("project"), change.get("milestone")
+        )
+
+        def move_recovery_evidence(entry: dict[str, str]) -> dict[str, str]:
+            return {
+                "schema_version": "linear-move-recovery.v1",
+                "command_hash": entry["command_hash"],
+                "before_state_hash": entry["before_state_hash"],
+                "after_state_hash": entry["after_state_hash"],
+                "phase": entry["phase"],
+            }
+
+        def record_move_recovery(phase: str) -> dict[str, str] | None:
+            if move_recovery_path is None or mode != "apply":
+                return None
+            entry = {
+                "request_hash": request_hash,
+                **move_binding,
+                "before_state_hash": (
+                    move_recovery["before_state_hash"]
+                    if move_recovery is not None
+                    else move_before_hash
+                ),
+                "after_state_hash": (
+                    move_recovery["after_state_hash"]
+                    if move_recovery is not None
+                    else move_after_hash
+                ),
+                "phase": phase,
+            }
+            move_recovery_entries[key_hash] = entry
+            write_relation_recovery_journal(
+                move_recovery_path, move_recovery_entries
+            )
+            return entry
+
+        if move_recovery is not None:
+            if move_before_hash == move_recovery["after_state_hash"]:
+                completed_move = (
+                    record_move_recovery("completed")
+                    if mode == "apply"
+                    else move_recovery
+                )
+                assert completed_move is not None
+                return finish(
+                    {
+                        **base,
+                        "result": "no_op",
+                        "before": before_update,
+                        "after": before_update,
+                        "plan": [],
+                        "no_op": True,
+                        "verified": True,
+                        "recovered": True,
+                        "recovery_evidence": move_recovery_evidence(
+                            completed_move
+                        ),
+                    }
+                )
+            if move_before_hash != move_recovery["before_state_hash"]:
+                raise ContractError("move_issue recovery state drifted")
         owner_parent_recovery = (
             command["policy"].get("mode") == "owner_approved"
             and "parent_identifier" in change
@@ -4170,21 +4323,75 @@ def execute_command(
                 raise ContractError(
                     "description transform pre-write description drifted"
                 )
+        if command["operation"] == "move_issue":
+            fresh_issue = client.get_issue(identifier)
+            if fresh_issue != issue:
+                raise ContractError("move_issue pre-write issue state drifted")
+            fresh_projects = client.list_team_projects(team["id"])
+            if not isinstance(fresh_projects, list) or len(fresh_projects) > 100:
+                raise ContractError("move_issue pre-write target scope drifted")
+            fresh_project_matches = [
+                candidate
+                for candidate in fresh_projects
+                if isinstance(candidate, dict)
+                and candidate.get("name") == change["project"]
+            ]
+            if (
+                len(fresh_project_matches) != 1
+                or fresh_project_matches[0].get("id") != desired_project_id
+            ):
+                raise ContractError("move_issue pre-write target scope drifted")
+            fresh_project = fresh_project_matches[0]
+            fresh_teams = fresh_project.get("teams")
+            fresh_team_nodes = (
+                fresh_teams.get("nodes") if isinstance(fresh_teams, dict) else None
+            )
+            if (
+                not isinstance(fresh_team_nodes, list)
+                or team["id"]
+                not in {
+                    node.get("id")
+                    for node in fresh_team_nodes
+                    if isinstance(node, dict)
+                }
+            ):
+                raise ContractError("move_issue pre-write target scope drifted")
+            fresh_milestones = client.list_project_milestones(desired_project_id)
+            if not isinstance(fresh_milestones, list) or len(fresh_milestones) > 100:
+                raise ContractError("move_issue pre-write target scope drifted")
+            fresh_milestone_matches = [
+                candidate
+                for candidate in fresh_milestones
+                if isinstance(candidate, dict)
+                and candidate.get("name") == change["milestone"]
+                and isinstance(candidate.get("project"), dict)
+                and candidate["project"].get("id") == desired_project_id
+            ]
+            if (
+                len(fresh_milestone_matches) != 1
+                or fresh_milestone_matches[0].get("id") != desired_milestone_id
+            ):
+                raise ContractError("move_issue pre-write target scope drifted")
         record_description_recovery("prepared")
         record_owner_recovery("prepared")
+        record_move_recovery("prepared")
         client.update_issue_fields(issue["id"], **mutation)
         verified_issue = client.get_issue(identifier)
+        mismatch_operation = command["operation"]
         if not isinstance(verified_issue, dict):
             raise ContractError(
-                _COMPARISON.mismatch_message("update_issue", ["id/title"])
+                _COMPARISON.mismatch_message(mismatch_operation, ["id/title"])
             )
         fields = update_mismatches(verified_issue)
         if fields:
-            raise ContractError(_COMPARISON.mismatch_message("update_issue", fields))
+            raise ContractError(
+                _COMPARISON.mismatch_message(mismatch_operation, fields)
+            )
         record_description_recovery(
             "completed", after_description=verified_issue.get("description")
         )
         completed_recovery = record_owner_recovery("completed")
+        completed_move = record_move_recovery("completed")
         result = {
             **base,
             "result": "applied",
@@ -4198,6 +4405,8 @@ def execute_command(
             result["recovery_evidence"] = owner_recovery_evidence(
                 completed_recovery
             )
+        if completed_move is not None:
+            result["recovery_evidence"] = move_recovery_evidence(completed_move)
         return finish(result)
     if command["operation"] == "change_state":
         requested = command["change"]["state"]

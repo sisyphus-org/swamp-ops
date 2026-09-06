@@ -19,6 +19,8 @@ SAFE_MISMATCH_FIELDS = (
     "project",
     "milestone",
     "team",
+    "url",
+    "archived",
 )
 
 

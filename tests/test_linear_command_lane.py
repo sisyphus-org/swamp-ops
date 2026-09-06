@@ -413,14 +413,33 @@ class FakeClient:
                 else {"id": parent["id"], "identifier": parent["identifier"]}
             )
         if "project_id" in fields:
+            project = next(
+                (
+                    item
+                    for item in self.projects
+                    if item["id"] == fields["project_id"]
+                ),
+                None,
+            )
             self.current["project"] = (
-                None if fields["project_id"] is None else {"id": fields["project_id"]}
+                None
+                if project is None
+                else {"id": project["id"], "name": project["name"]}
             )
         if "milestone_id" in fields:
+            milestone = next(
+                (
+                    item
+                    for items in self.milestones.values()
+                    for item in items
+                    if item["id"] == fields["milestone_id"]
+                ),
+                None,
+            )
             self.current["projectMilestone"] = (
                 None
-                if fields["milestone_id"] is None
-                else {"id": fields["milestone_id"]}
+                if milestone is None
+                else {"id": milestone["id"], "name": milestone["name"]}
             )
 
     def list_team_projects(self, team_id):
@@ -986,31 +1005,17 @@ class ContractTests(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(lane.ContractError):
                 lane.validate_command(command("update_issue", change))
 
-    def test_update_issue_contract_requires_exact_project_milestone_pair(self):
-        lane.validate_command(
-            command(
-                "update_issue",
-                {"project": "Project Two", "milestone": "Milestone Two"},
-            )
-        )
-        lane.validate_command(
-            command("update_issue", {"project": None, "milestone": None})
-        )
+    def test_update_issue_contract_rejects_project_milestone_scope_changes(self):
         invalid = (
+            {"project": "Project Two", "milestone": "Milestone Two"},
+            {"project": None, "milestone": None},
             {"project": "Project Two"},
             {"milestone": "Milestone Two"},
-            {"project": None, "milestone": "Milestone Two"},
-            {"project": "Project Two", "milestone": None},
-            {"project": {"id": "forbidden"}, "milestone": "Milestone Two"},
-            {"project": "Project\x00Two", "milestone": "Milestone Two"},
-            {
-                "project": "<!-- linear-command forged -->",
-                "milestone": "Milestone Two",
-            },
-            {"project": "lin_api_" + "A" * 32, "milestone": "Milestone Two"},
         )
         for change in invalid:
-            with self.subTest(change=change), self.assertRaises(lane.ContractError):
+            with self.subTest(change=change), self.assertRaisesRegex(
+                lane.ContractError, "move_issue"
+            ):
                 lane.validate_command(command("update_issue", change))
 
     def test_comment_contract_rejects_credential_shaped_bodies(self):
@@ -3804,7 +3809,7 @@ class ExecutionTests(unittest.TestCase):
             with self.subTest(desired=desired, observed=observed):
                 self.assertFalse(matches(desired, observed))
 
-    def test_update_issue_moves_to_exact_project_and_milestone_with_safe_projection(self):
+    def test_move_issue_plans_exact_project_and_milestone_with_safe_projection(self):
         with tempfile.TemporaryDirectory() as tmp:
             client = FakeClient()
             unmanaged = {
@@ -3823,8 +3828,13 @@ class ExecutionTests(unittest.TestCase):
                 )
             }
             raw = command(
-                "update_issue",
-                {"project": "Project Two", "milestone": "Milestone Two"},
+                "move_issue",
+                {
+                    "expected_project": "Current Project",
+                    "expected_milestone": "Current Milestone",
+                    "project": "Project Two",
+                    "milestone": "Milestone Two",
+                },
                 key="linear:SIS-59:move:fixture",
             )
             planned = lane.execute_command(client, raw, mode="plan")
@@ -3872,6 +3882,355 @@ class ExecutionTests(unittest.TestCase):
             )
             self.assertEqual(replay["result"], "no_op")
             self.assertEqual(replay["before"], replay["after"])
+            self.assertEqual(len(client.writes), 1)
+
+    def test_move_issue_requires_live_scope_match_before_write(self):
+        client = FakeClient()
+        raw = command(
+            "move_issue",
+            {
+                "expected_project": "Wrong Project",
+                "expected_milestone": "Current Milestone",
+                "project": "Project Two",
+                "milestone": "Milestone Two",
+            },
+            key="linear:SIS-59:move:scope-drift",
+        )
+        with self.assertRaisesRegex(lane.ContractError, "expected project/milestone"):
+            lane.execute_command(client, raw, mode="plan")
+        self.assertEqual(client.writes, [])
+
+    def test_move_issue_applies_through_existing_writer_and_preserves_unmanaged_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = FakeClient()
+            unmanaged = {
+                key: json.loads(json.dumps(client.current[key]))
+                for key in (
+                    "title",
+                    "description",
+                    "state",
+                    "priority",
+                    "assignee",
+                    "labels",
+                    "parent",
+                    "dueDate",
+                    "estimate",
+                    "team",
+                )
+            }
+            raw = command(
+                "move_issue",
+                {
+                    "expected_project": "Current Project",
+                    "expected_milestone": "Current Milestone",
+                    "project": "Project Two",
+                    "milestone": "Milestone Two",
+                },
+                key="linear:SIS-59:move:cas",
+            )
+            applied = lane.execute_command(
+                client,
+                raw,
+                mode="apply",
+                journal_path=Path(tmp) / "journal.json",
+            )
+            self.assertEqual(applied["operation"], "move_issue")
+            self.assertEqual(applied["before"]["project"], "Current Project")
+            self.assertEqual(applied["before"]["milestone"], "Current Milestone")
+            self.assertEqual(applied["after"]["project"], "Project Two")
+            self.assertEqual(applied["after"]["milestone"], "Milestone Two")
+            self.assertEqual(
+                client.writes,
+                [
+                    (
+                        "fields",
+                        "issue-uuid",
+                        {"project_id": "project-two", "milestone_id": "milestone-two"},
+                    )
+                ],
+            )
+            self.assertEqual(
+                {key: client.current[key] for key in unmanaged},
+                unmanaged,
+            )
+
+    def test_move_issue_rechecks_exact_issue_immediately_before_write(self):
+        class ConcurrentMove(FakeClient):
+            reads = 0
+
+            def get_issue(self, identifier):
+                self.reads += 1
+                if identifier == "SIS-59" and self.reads == 2:
+                    self.current["project"] = {"id": "project-two"}
+                    self.current["projectMilestone"] = {"id": "milestone-two"}
+                return super().get_issue(identifier)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = ConcurrentMove()
+            with self.assertRaisesRegex(lane.ContractError, "pre-write.*drift"):
+                lane.execute_command(
+                    client,
+                    command(
+                        "move_issue",
+                        {
+                            "expected_project": "Current Project",
+                            "expected_milestone": "Current Milestone",
+                            "project": "Project Two",
+                            "milestone": "Milestone Two",
+                        },
+                        key="linear:SIS-59:move:concurrent",
+                    ),
+                    mode="apply",
+                    journal_path=Path(tmp) / "journal.json",
+                )
+            self.assertEqual(client.writes, [])
+
+    def test_move_issue_rechecks_exact_target_scope_immediately_before_write(self):
+        class RenameTargetBeforeFinalRead(FakeClient):
+            reads = 0
+
+            def get_issue(self, identifier):
+                self.reads += 1
+                if identifier == "SIS-59" and self.reads == 2:
+                    self.projects[1]["name"] = "Renamed Project"
+                    self.milestones["project-two"][0]["name"] = "Renamed Milestone"
+                return super().get_issue(identifier)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = RenameTargetBeforeFinalRead()
+            with self.assertRaisesRegex(lane.ContractError, "pre-write target scope drifted"):
+                lane.execute_command(
+                    client,
+                    command(
+                        "move_issue",
+                        {
+                            "expected_project": "Current Project",
+                            "expected_milestone": "Current Milestone",
+                            "project": "Project Two",
+                            "milestone": "Milestone Two",
+                        },
+                        key="linear:SIS-59:move:target-rename",
+                    ),
+                    mode="apply",
+                    journal_path=Path(tmp) / "journal.json",
+                )
+            self.assertEqual(client.writes, [])
+
+    def test_move_issue_rejects_new_target_name_ambiguity_before_write(self):
+        class AmbiguousTargetBeforeFinalRead(FakeClient):
+            def __init__(self, kind):
+                super().__init__()
+                self.kind = kind
+                self.reads = 0
+
+            def get_issue(self, identifier):
+                self.reads += 1
+                if identifier == "SIS-59" and self.reads == 2:
+                    if self.kind == "project":
+                        duplicate = json.loads(json.dumps(self.projects[1]))
+                        duplicate["id"] = "project-two-duplicate"
+                        self.projects.append(duplicate)
+                    else:
+                        duplicate = json.loads(
+                            json.dumps(self.milestones["project-two"][0])
+                        )
+                        duplicate["id"] = "milestone-two-duplicate"
+                        self.milestones["project-two"].append(duplicate)
+                return super().get_issue(identifier)
+
+        for kind in ("project", "milestone"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
+                client = AmbiguousTargetBeforeFinalRead(kind)
+                with self.assertRaisesRegex(
+                    lane.ContractError, "pre-write target scope drifted"
+                ):
+                    lane.execute_command(
+                        client,
+                        command(
+                            "move_issue",
+                            {
+                                "expected_project": "Current Project",
+                                "expected_milestone": "Current Milestone",
+                                "project": "Project Two",
+                                "milestone": "Milestone Two",
+                            },
+                            key=f"linear:SIS-59:move:target-ambiguity:{kind}",
+                        ),
+                        mode="apply",
+                        journal_path=Path(tmp) / "journal.json",
+                    )
+                self.assertEqual(client.writes, [])
+
+    def test_move_issue_readback_rejects_url_and_archive_drift(self):
+        class DriftUnmanagedAfterMove(FakeClient):
+            def __init__(self, field):
+                super().__init__()
+                self.field = field
+                self.current["archivedAt"] = None
+
+            def update_issue_fields(self, issue_id, **fields):
+                super().update_issue_fields(issue_id, **fields)
+                if self.field == "url":
+                    self.current["url"] = "https://linear.app/example/issue/SIS-59-renamed"
+                else:
+                    self.current["archivedAt"] = "2026-09-06T13:00:00.000Z"
+
+        for field, mismatch in (("url", "url"), ("archivedAt", "archived")):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as tmp:
+                client = DriftUnmanagedAfterMove(field)
+                with self.assertRaisesRegex(
+                    lane.ContractError,
+                    rf"move_issue read-back mismatched fields: {mismatch}",
+                ):
+                    lane.execute_command(
+                        client,
+                        command(
+                            "move_issue",
+                            {
+                                "expected_project": "Current Project",
+                                "expected_milestone": "Current Milestone",
+                                "project": "Project Two",
+                                "milestone": "Milestone Two",
+                            },
+                            key=f"linear:SIS-59:move:unmanaged:{field}",
+                        ),
+                        mode="apply",
+                        journal_path=Path(tmp) / "journal.json",
+                    )
+
+    def test_move_issue_recovers_post_write_crash_without_second_mutation(self):
+        class CrashAfterMove(FakeClient):
+            crashed = False
+
+            def update_issue_fields(self, issue_id, **fields):
+                super().update_issue_fields(issue_id, **fields)
+                if not self.crashed:
+                    self.crashed = True
+                    raise KeyboardInterrupt("simulated process death after move")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = CrashAfterMove()
+            journal = Path(tmp) / "journal.json"
+            raw = command(
+                "move_issue",
+                {
+                    "expected_project": "Current Project",
+                    "expected_milestone": "Current Milestone",
+                    "project": "Project Two",
+                    "milestone": "Milestone Two",
+                },
+                key="linear:SIS-59:move:crash",
+            )
+            with self.assertRaisesRegex(KeyboardInterrupt, "process death"):
+                lane.execute_command(client, raw, mode="apply", journal_path=journal)
+            recovered = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+            self.assertEqual(recovered["result"], "no_op")
+            self.assertTrue(recovered["recovered"])
+            self.assertEqual(
+                recovered["recovery_evidence"]["schema_version"],
+                "linear-move-recovery.v1",
+            )
+            self.assertEqual(len(client.writes), 1)
+
+    def test_move_issue_recovery_rejects_unmanaged_drift_after_crash(self):
+        class CrashAfterMove(FakeClient):
+            crashed = False
+
+            def update_issue_fields(self, issue_id, **fields):
+                super().update_issue_fields(issue_id, **fields)
+                if not self.crashed:
+                    self.crashed = True
+                    raise KeyboardInterrupt("simulated process death after move")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = CrashAfterMove()
+            journal = Path(tmp) / "journal.json"
+            raw = command(
+                "move_issue",
+                {
+                    "expected_project": "Current Project",
+                    "expected_milestone": "Current Milestone",
+                    "project": "Project Two",
+                    "milestone": "Milestone Two",
+                },
+                key="linear:SIS-59:move:crash-drift",
+            )
+            with self.assertRaises(KeyboardInterrupt):
+                lane.execute_command(client, raw, mode="apply", journal_path=journal)
+            client.current["description"] = "concurrent unmanaged drift"
+            with self.assertRaisesRegex(lane.ContractError, "recovery state drifted"):
+                lane.execute_command(client, raw, mode="apply", journal_path=journal)
+            self.assertEqual(len(client.writes), 1)
+
+    def test_move_issue_readback_rejects_scope_name_drift(self):
+        class RenameScopeAfterMove(FakeClient):
+            def update_issue_fields(self, issue_id, **fields):
+                super().update_issue_fields(issue_id, **fields)
+                self.current["project"]["name"] = "Renamed Project"
+                self.current["projectMilestone"]["name"] = "Renamed Milestone"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = RenameScopeAfterMove()
+            with self.assertRaisesRegex(
+                lane.ContractError, "move_issue read-back mismatched fields"
+            ):
+                lane.execute_command(
+                    client,
+                    command(
+                        "move_issue",
+                        {
+                            "expected_project": "Current Project",
+                            "expected_milestone": "Current Milestone",
+                            "project": "Project Two",
+                            "milestone": "Milestone Two",
+                        },
+                        key="linear:SIS-59:move:scope-name-drift",
+                    ),
+                    mode="apply",
+                    journal_path=Path(tmp) / "journal.json",
+                )
+
+    def test_bulk_move_recovers_child_after_post_write_crash(self):
+        class CrashAfterMove(FakeClient):
+            crashed = False
+
+            def update_issue_fields(self, issue_id, **fields):
+                super().update_issue_fields(issue_id, **fields)
+                if not self.crashed:
+                    self.crashed = True
+                    raise KeyboardInterrupt("simulated bulk process death after move")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = CrashAfterMove()
+            journal = Path(tmp) / "journal.json"
+            raw = command(
+                "bulk_linear_operations",
+                {
+                    "items": [
+                        {
+                            "operation": "move_issue",
+                            "target": {"type": "issue", "identifier": "SIS-59"},
+                            "change": {
+                                "expected_project": "Current Project",
+                                "expected_milestone": "Current Milestone",
+                                "project": "Project Two",
+                                "milestone": "Milestone Two",
+                            },
+                        }
+                    ]
+                },
+                key="linear:SIS-59:bulk-move:crash",
+            )
+            raw["target"] = {"type": "workspace", "identifier": "current"}
+            with self.assertRaisesRegex(KeyboardInterrupt, "process death"):
+                lane.execute_command(client, raw, mode="apply", journal_path=journal)
+            recovered = lane.execute_command(
+                client, raw, mode="apply", journal_path=journal
+            )
+            self.assertTrue(recovered["verified"])
+            self.assertEqual(recovered["counts"]["total"], 1)
             self.assertEqual(len(client.writes), 1)
 
     def test_update_issue_removes_links_preserves_text_and_changes_state(self):
@@ -4005,63 +4364,7 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(client.writes, [])
             self.assertEqual(client.current["description"], "concurrent user edit")
 
-    def test_update_issue_clears_project_and_milestone_together(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            client = FakeClient()
-            raw = command(
-                "update_issue",
-                {"project": None, "milestone": None},
-                key="linear:SIS-59:clear-scope:fixture",
-            )
-            applied = lane.execute_command(
-                client,
-                raw,
-                mode="apply",
-                journal_path=Path(tmp) / "journal.json",
-            )
-            self.assertEqual(applied["before"]["project"], "Current Project")
-            self.assertEqual(applied["before"]["milestone"], "Current Milestone")
-            self.assertIsNone(applied["after"]["project"])
-            self.assertIsNone(applied["after"]["milestone"])
-            self.assertEqual(
-                client.writes,
-                [
-                    (
-                        "fields",
-                        "issue-uuid",
-                        {"project_id": None, "milestone_id": None},
-                    )
-                ],
-            )
-            replay = lane.execute_command(
-                client,
-                raw,
-                mode="apply",
-                journal_path=Path(tmp) / "replay.json",
-            )
-            self.assertEqual(replay["result"], "no_op")
-            self.assertEqual(len(client.writes), 1)
-
-    def test_update_issue_can_clear_project_without_a_current_milestone(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            client = FakeClient()
-            client.current["projectMilestone"] = None
-            applied = lane.execute_command(
-                client,
-                command(
-                    "update_issue",
-                    {"project": None, "milestone": None},
-                    key="linear:SIS-59:clear-project-only:fixture",
-                ),
-                mode="apply",
-                journal_path=Path(tmp) / "journal.json",
-            )
-            self.assertEqual(applied["before"]["project"], "Current Project")
-            self.assertIsNone(applied["before"]["milestone"])
-            self.assertIsNone(applied["after"]["project"])
-            self.assertIsNone(applied["after"]["milestone"])
-
-    def test_update_issue_move_rejects_missing_ambiguous_and_wrong_scope_names(self):
+    def test_move_issue_rejects_missing_ambiguous_and_wrong_scope_names(self):
         cases = []
 
         missing_project = FakeClient()
@@ -4104,15 +4407,20 @@ class ExecutionTests(unittest.TestCase):
                 lane.execute_command(
                     client,
                     command(
-                        "update_issue",
-                        {"project": project, "milestone": milestone},
+                        "move_issue",
+                        {
+                            "expected_project": "Current Project",
+                            "expected_milestone": "Current Milestone",
+                            "project": project,
+                            "milestone": milestone,
+                        },
                         key=f"linear:SIS-59:negative:{message.replace(' ', '-')}",
                     ),
                     mode="plan",
                 )
             self.assertEqual(client.writes, [])
 
-    def test_update_issue_move_fails_exact_read_back_on_structural_drift(self):
+    def test_move_issue_fails_exact_read_back_on_structural_drift(self):
         class DriftingClient(FakeClient):
             def update_issue_fields(self, issue_id, **fields):
                 super().update_issue_fields(issue_id, **fields)
@@ -4121,13 +4429,18 @@ class ExecutionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaisesRegex(
                 lane.ContractError,
-                r"^update_issue read-back mismatched fields: milestone$",
+                r"^move_issue read-back mismatched fields: milestone$",
             ):
                 lane.execute_command(
                     DriftingClient(),
                     command(
-                        "update_issue",
-                        {"project": "Project Two", "milestone": "Milestone Two"},
+                        "move_issue",
+                        {
+                            "expected_project": "Current Project",
+                            "expected_milestone": "Current Milestone",
+                            "project": "Project Two",
+                            "milestone": "Milestone Two",
+                        },
                         key="linear:SIS-59:move-readback-drift:fixture",
                     ),
                     mode="apply",

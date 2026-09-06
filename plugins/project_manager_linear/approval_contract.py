@@ -103,7 +103,7 @@ def validate_intent(value: Any) -> dict[str, Any]:
             raise ContractError("bulk intent change must contain exactly items")
         items = change.get("items")
         mutating = {
-            "change_state", "update_issue", "update_sub_issues", "add_comment",
+            "change_state", "move_issue", "update_issue", "update_sub_issues", "add_comment",
             "create_issue", "converge_hierarchy", "create_standalone_issue",
             "converge_issue_tree", "create_issue_relation", "remove_issue_relation",
             "replace_issue_relation", "create_project", "create_milestone",

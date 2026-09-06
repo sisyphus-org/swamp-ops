@@ -195,6 +195,24 @@ class ExecutionTests(unittest.TestCase):
         self.assertIn("создана", summary)
         self.assertIn("https://linear.app/example/issue/SIS-99/fixture", summary)
 
+    def test_human_summary_distinguishes_issue_move(self):
+        summary = human_summary(
+            {
+                "operation": "move_issue",
+                "result": "applied",
+                "verified": True,
+                "target": {
+                    "identifier": "SIS-99",
+                    "url": "https://linear.app/example/issue/SIS-99/fixture",
+                },
+            }
+        )
+        self.assertEqual(
+            summary,
+            "Задача Linear перенесена в указанные проект и milestone.\n"
+            "https://linear.app/example/issue/SIS-99/fixture",
+        )
+
     def test_human_summary_distinguishes_standalone_and_issue_tree(self):
         base = {
             "result": "applied",
