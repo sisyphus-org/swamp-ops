@@ -145,6 +145,34 @@ class BulkContractTests(unittest.TestCase):
         )
         lane.validate_command(parent(directional))
 
+    def test_source_rejects_malformed_move_targets_before_reconstruction(self):
+        change = {
+            "expected_project": "Old",
+            "expected_milestone": "Old M",
+            "project": "New",
+            "milestone": "New M",
+        }
+        for target in (
+            {},
+            {"type": "issue"},
+            {"type": "workspace", "identifier": "SIS-14"},
+        ):
+            with self.subTest(target=target), self.assertRaisesRegex(
+                route.RouteError, "exact issue target"
+            ):
+                route.parse_linear_request(
+                    {
+                        "operation": "bulk_linear_operations",
+                        "items": [
+                            {
+                                "operation": "move_issue",
+                                "target": target,
+                                "change": change,
+                            }
+                        ],
+                    }
+                )
+
     def test_derives_stable_domain_separated_child_identities_and_binds_order(self):
         team = {"type": "team", "identifier": "SIS"}
         workspace = {"type": "workspace", "identifier": "current"}
@@ -197,6 +225,7 @@ class BulkContractTests(unittest.TestCase):
         families = [
             item(0),
             {"operation": "change_state", "target": {"type": "issue", "identifier": "SIS-8"}, "change": {"state": "In Review"}},
+            {"operation": "move_issue", "target": {"type": "issue", "identifier": "SIS-14"}, "change": {"expected_project": "Old", "expected_milestone": "Old M", "project": "New", "milestone": "New M"}},
             {"operation": "add_comment", "target": {"type": "issue", "identifier": "SIS-9"}, "change": {"body": "bounded"}},
             {"operation": "create_issue_relation", "target": {"type": "issue", "identifier": "SIS-10"}, "change": {"related_identifier": "SIS-11", "relation_type": "related"}},
             {"operation": "create_issue", "target": team, "change": {"title": "Bulk issue", "description": "", "parent_identifier": "SIS-12", "state": "Todo", "priority": "Medium"}},

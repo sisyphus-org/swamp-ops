@@ -42,7 +42,7 @@ MAX_SEARCH_QUERY = 500
 MAX_BULK_ITEMS = 50
 MAX_BULK_BYTES = 24_576
 BULK_MUTATING_OPERATIONS = {
-    "change_state", "update_issue", "update_sub_issues", "add_comment", "create_issue",
+    "change_state", "move_issue", "update_issue", "update_sub_issues", "add_comment", "create_issue",
     "converge_hierarchy", "create_standalone_issue", "converge_issue_tree",
     "create_issue_relation", "remove_issue_relation", "replace_issue_relation",
     "create_project", "create_milestone", "update_project", "update_milestone",
@@ -441,7 +441,7 @@ def _validate_canonical_bulk_item(item: dict[str, Any], index: int) -> None:
     team_target = target == {"type": "team", "identifier": "SIS"}
     workspace_target = target == {"type": "workspace", "identifier": "current"}
     issue_ops = {
-        "change_state", "update_issue", "update_sub_issues", "add_comment",
+        "change_state", "move_issue", "update_issue", "update_sub_issues", "add_comment",
         "create_issue_relation", "remove_issue_relation", "replace_issue_relation",
     }
     team_ops = {
@@ -487,6 +487,13 @@ def _validate_canonical_bulk_item(item: dict[str, Any], index: int) -> None:
     if operation == "change_state":
         if set(change) != {"state"} or change.get("state") not in SAFE_STATES | TERMINAL_STATES:
             raise RouteError(f"bulk item {index} has an invalid state change")
+    elif operation == "move_issue":
+        reconstructed = {
+            "operation": operation,
+            "identifier": target["identifier"],
+            **change,
+        }
+        parse_linear_request(reconstructed)
     elif operation == "update_issue":
         reconstructed = {"operation": operation, "identifier": target["identifier"], **change}
         # Source approval belongs only to the parent; validate the managed fields
@@ -757,7 +764,53 @@ def parse_linear_request(
             )
             target = {"type": "issue", "identifier": identifier}
             change = {"body": request["body"]}
+        elif operation == "move_issue":
+            identifier = _issue_identifier(request)
+            target_field = "identifier" if "identifier" in request else "issue_number"
+            expected_fields = {
+                "operation",
+                target_field,
+                "expected_project",
+                "expected_milestone",
+                "project",
+                "milestone",
+            }
+            if set(request) != expected_fields:
+                raise RouteError("move_issue requires exact expected and target scope")
+            expected_project = request["expected_project"]
+            expected_milestone = request["expected_milestone"]
+            if (expected_project is None) != (expected_milestone is None):
+                raise RouteError(
+                    "expected_project and expected_milestone must both be exact names or null"
+                )
+            if expected_project is not None:
+                _validate_clean_text(
+                    expected_project, "expected_project", maximum=200, required=True
+                )
+                _validate_clean_text(
+                    expected_milestone,
+                    "expected_milestone",
+                    maximum=200,
+                    required=True,
+                )
+            _validate_clean_text(
+                request.get("project"), "project", maximum=200, required=True
+            )
+            _validate_clean_text(
+                request.get("milestone"), "milestone", maximum=200, required=True
+            )
+            target = {"type": "issue", "identifier": identifier}
+            change = {
+                "expected_project": expected_project,
+                "expected_milestone": expected_milestone,
+                "project": request["project"],
+                "milestone": request["milestone"],
+            }
         elif operation == "update_issue":
+            if "project" in request or "milestone" in request:
+                raise RouteError(
+                    "project/milestone scope changes must use move_issue with exact expected scope"
+                )
             allowed = {
                 "operation",
                 "identifier",
@@ -772,8 +825,6 @@ def parse_linear_request(
                 "due_date",
                 "estimate",
                 "parent_identifier",
-                "project",
-                "milestone",
                 "approval",
             }
             if not set(request).issubset(allowed) or len(request) < 3:
@@ -792,8 +843,6 @@ def parse_linear_request(
                     "due_date",
                     "estimate",
                     "parent_identifier",
-                    "project",
-                    "milestone",
                 )
                 if key in request
             }
@@ -882,20 +931,6 @@ def parse_linear_request(
                 ):
                     raise RouteError(
                         "parent_identifier must be an exact SIS-N identifier or null"
-                    )
-            if ("project" in change) != ("milestone" in change):
-                raise RouteError("project and milestone must be supplied together")
-            if "project" in change:
-                project = change["project"]
-                milestone = change["milestone"]
-                if (project is None) != (milestone is None):
-                    raise RouteError("project and milestone must both be exact names or null")
-                if project is not None:
-                    _validate_clean_text(
-                        project, "project", maximum=200, required=True
-                    )
-                    _validate_clean_text(
-                        milestone, "milestone", maximum=200, required=True
                     )
             target = {"type": "issue", "identifier": identifier}
         elif operation == "inventory_sub_issues":

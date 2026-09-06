@@ -797,53 +797,17 @@ class ParseTests(unittest.TestCase):
                     uuid_factory=uuid_factory(),
                 )
 
-    def test_structured_issue_update_preserves_exact_project_and_milestone_names(self):
-        parsed = route.parse_linear_request(
-            {
-                "operation": "update_issue",
-                "identifier": "SIS-94",
-                "project": "Hermes Experience",
-                "milestone": "Personal productivity integrations",
-            },
-            source_profile="default",
-            uuid_factory=uuid_factory(),
-        )
-        self.assertEqual(
-            parsed.command["change"],
-            {
-                "project": "Hermes Experience",
-                "milestone": "Personal productivity integrations",
-            },
-        )
-
-    def test_structured_issue_update_preserves_null_project_and_milestone_clear(self):
-        parsed = route.parse_linear_request(
-            {
-                "operation": "update_issue",
-                "identifier": "SIS-94",
-                "project": None,
-                "milestone": None,
-            },
-            source_profile="default",
-            uuid_factory=uuid_factory(),
-        )
-        self.assertEqual(
-            parsed.command["change"],
-            {"project": None, "milestone": None},
-        )
-
-    def test_structured_issue_update_requires_a_complete_project_milestone_pair(self):
+    def test_structured_issue_update_rejects_project_and_milestone_scope_changes(self):
         invalid = (
+            {"project": "Hermes Experience", "milestone": "Personal productivity integrations"},
+            {"project": None, "milestone": None},
             {"project": "Hermes Experience"},
             {"milestone": "Personal productivity integrations"},
-            {"project": None, "milestone": "Personal productivity integrations"},
-            {"project": "Hermes Experience", "milestone": None},
-            {"project": "", "milestone": "Personal productivity integrations"},
-            {"project": "Hermes Experience", "milestone": ""},
-            {"project": {"id": "forbidden"}, "milestone": "Exact Name"},
         )
         for change in invalid:
-            with self.subTest(change=change), self.assertRaises(route.RouteError):
+            with self.subTest(change=change), self.assertRaisesRegex(
+                route.RouteError, "move_issue"
+            ):
                 route.parse_linear_request(
                     {
                         "operation": "update_issue",
@@ -851,6 +815,53 @@ class ParseTests(unittest.TestCase):
                         **change,
                     },
                     source_profile="default",
+                    uuid_factory=uuid_factory(),
+                )
+
+    def test_move_issue_preserves_exact_compare_and_set_scope(self):
+        parsed = route.parse_linear_request(
+            {
+                "operation": "move_issue",
+                "identifier": "SIS-94",
+                "expected_project": "Книги",
+                "expected_milestone": "Английская литература",
+                "project": "Великие книги: история идей",
+                "milestone": "Английская",
+            },
+            source_profile="books",
+            uuid_factory=uuid_factory(),
+        )
+        self.assertEqual(parsed.command["operation"], "move_issue")
+        self.assertEqual(
+            parsed.command["change"],
+            {
+                "expected_project": "Книги",
+                "expected_milestone": "Английская литература",
+                "project": "Великие книги: история идей",
+                "milestone": "Английская",
+            },
+        )
+        self.assertEqual(parsed.command["policy"], {"mode": "standard"})
+
+    def test_move_issue_rejects_missing_compare_and_set_fields(self):
+        base = {
+            "operation": "move_issue",
+            "identifier": "SIS-94",
+            "expected_project": "Книги",
+            "expected_milestone": "Английская литература",
+            "project": "Великие книги: история идей",
+            "milestone": "Английская",
+        }
+        for field in (
+            "expected_project",
+            "expected_milestone",
+            "project",
+            "milestone",
+        ):
+            with self.subTest(field=field), self.assertRaises(route.RouteError):
+                route.parse_linear_request(
+                    {key: value for key, value in base.items() if key != field},
+                    source_profile="books",
                     uuid_factory=uuid_factory(),
                 )
 

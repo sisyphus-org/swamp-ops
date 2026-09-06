@@ -498,6 +498,8 @@ def human_summary(result: dict[str, Any]) -> str:
         lead = "Объект Linear удалён в соответствии с семантикой Linear."
     elif operation == "change_state":
         lead = "Статус Linear изменён."
+    elif operation == "move_issue":
+        lead = "Задача Linear перенесена в указанные проект и milestone."
     elif operation == "update_issue":
         lead = "Поля задачи Linear обновлены."
     else:

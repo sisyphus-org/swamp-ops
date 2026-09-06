@@ -44,7 +44,7 @@ PUBLIC_STATES = {
     "Duplicate",
 }
 PUBLIC_MISMATCH_FIELDS = (
-    r"(?:id/title|description|state|priority|assignee|labels|due_date|estimate|parent|project|milestone|team)"
+    r"(?:id/title|description|state|priority|assignee|labels|due_date|estimate|parent|project|milestone|team|url|archived)"
 )
 PUBLIC_MISMATCH_LIST = rf"{PUBLIC_MISMATCH_FIELDS}(?:, {PUBLIC_MISMATCH_FIELDS})*"
 PUBLIC_BLOCK_REASON_PATTERNS = {
@@ -85,6 +85,15 @@ PUBLIC_BLOCK_REASON_PATTERNS = {
         re.compile(r"^current issue parent is malformed$"),
         re.compile(r"^owner approval required: clearing or replacing an issue parent$"),
         re.compile(rf"^update_issue read-back mismatched fields: {PUBLIC_MISMATCH_LIST}$"),
+    ),
+    "move_issue": (
+        re.compile(r"^exact Linear issue not found: SIS-[1-9][0-9]*$"),
+        re.compile(r"^exact target is not in the SIS team: SIS-[1-9][0-9]*$"),
+        re.compile(r"^exact Linear (?:project|milestone) not found or ambiguous$"),
+        re.compile(r"^project is not in the SIS team$"),
+        re.compile(r"^milestone does not belong to the selected project$"),
+        re.compile(r"^move_issue current scope does not match expected project/milestone$"),
+        re.compile(rf"^move_issue read-back mismatched fields: {PUBLIC_MISMATCH_LIST}$"),
     ),
     "create_issue": (
         re.compile(rf"^create_issue read-back mismatched fields: {PUBLIC_MISMATCH_LIST}$"),
@@ -182,7 +191,7 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
     "description": (
         "Route one bounded Linear request from an allowed user-facing profile "
         "through the project-manager Kanban lane. Accepts a structured bounded "
-        "comment or state/field/child request targeting either exact SIS-N or a "
+        "comment, state/field/child request, or compare-before-set issue move targeting either exact SIS-N or a "
         "positive issue_number in the single SIS team, deterministic description "
         "link removal, one bounded hierarchy request, one "
         "standalone issue in an exact existing scope, one exact project or milestone "
@@ -214,6 +223,7 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                     "bulk_linear_operations",
                     "add_comment",
                     "change_state",
+                    "move_issue",
                     "update_issue",
                     "inventory_sub_issues",
                     "update_sub_issues",
@@ -250,6 +260,18 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                 },
             },
             "include_archived": {"type": "boolean"},
+            "expected_project": {
+                "oneOf": [
+                    {"type": "string", "minLength": 1, "maxLength": 200},
+                    {"type": "null"},
+                ]
+            },
+            "expected_milestone": {
+                "oneOf": [
+                    {"type": "string", "minLength": 1, "maxLength": 200},
+                    {"type": "null"},
+                ]
+            },
             "items": {
                 "type": "array",
                 "minItems": 1,
@@ -542,14 +564,67 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                 ],
             },
             {
+                "required": [
+                    "operation",
+                    "expected_project",
+                    "expected_milestone",
+                    "project",
+                    "milestone",
+                ],
+                "minProperties": 6,
+                "maxProperties": 6,
+                "oneOf": [
+                    {"required": ["identifier"]},
+                    {"required": ["issue_number"]},
+                ],
+                "properties": {
+                    "operation": {"const": "move_issue"},
+                    "expected_project": {
+                        "oneOf": [
+                            {"type": "string", "minLength": 1, "maxLength": 200},
+                            {"type": "null"},
+                        ]
+                    },
+                    "expected_milestone": {
+                        "oneOf": [
+                            {"type": "string", "minLength": 1, "maxLength": 200},
+                            {"type": "null"},
+                        ]
+                    },
+                    "project": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200,
+                    },
+                    "milestone": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200,
+                    },
+                },
+                "not": {"required": ["approval"]},
+            },
+            {
                 "required": ["operation"],
                 "oneOf": [
                     {"required": ["identifier"]},
                     {"required": ["issue_number"]},
                 ],
-                "not": {
-                    "required": ["description", "description_transform"]
-                },
+                "allOf": [
+                    {
+                        "not": {
+                            "required": ["description", "description_transform"]
+                        }
+                    },
+                    {
+                        "not": {
+                            "anyOf": [
+                                {"required": ["project"]},
+                                {"required": ["milestone"]},
+                            ]
+                        }
+                    },
+                ],
                 "anyOf": [
                     {"required": ["title"]},
                     {"required": ["description"]},
@@ -561,7 +636,6 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                     {"required": ["due_date"]},
                     {"required": ["estimate"]},
                     {"required": ["parent_identifier"]},
-                    {"required": ["project", "milestone"]},
                 ],
                 "properties": {
                     "operation": {"const": "update_issue"},
@@ -571,18 +645,6 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                                 "type": "string",
                                 "pattern": "^SIS-[1-9][0-9]*$",
                             },
-                            {"type": "null"},
-                        ]
-                    },
-                    "project": {
-                        "oneOf": [
-                            {"type": "string", "minLength": 1, "maxLength": 200},
-                            {"type": "null"},
-                        ]
-                    },
-                    "milestone": {
-                        "oneOf": [
-                            {"type": "string", "minLength": 1, "maxLength": 200},
                             {"type": "null"},
                         ]
                     },
@@ -1217,7 +1279,7 @@ def _public_target(result: dict[str, Any]) -> tuple[dict[str, Any], dict[str, An
         items = result.get("items")
         counts = result.get("counts")
         allowed_operations = {
-            "change_state", "update_issue", "update_sub_issues", "add_comment",
+            "change_state", "move_issue", "update_issue", "update_sub_issues", "add_comment",
             "create_issue", "converge_hierarchy", "create_standalone_issue",
             "converge_issue_tree", "create_issue_relation", "remove_issue_relation",
             "replace_issue_relation", "create_project", "create_milestone",
@@ -1562,7 +1624,7 @@ def _public_target(result: dict[str, Any]) -> tuple[dict[str, Any], dict[str, An
     public_target = _public_issue_target(result.get("target"))
     if not isinstance(after, dict):
         raise RouteError("verified result lacks public completion facts")
-    if operation in {"change_state", "update_issue"}:
+    if operation in {"change_state", "update_issue", "move_issue"}:
         state = after.get("state")
         if operation == "change_state" and state not in PUBLIC_STATES:
             raise RouteError("verified state result lacks a public state")
@@ -1627,7 +1689,7 @@ def _public_target(result: dict[str, Any]) -> tuple[dict[str, Any], dict[str, An
             raise RouteError(
                 "verified issue update lacks a complete public project/milestone pair"
             )
-        if operation == "update_issue" and "project" in after:
+        if operation in {"update_issue", "move_issue"} and "project" in after:
             project = after.get("project")
             milestone = after.get("milestone")
             if (project is None) != (milestone is None):
@@ -1818,6 +1880,20 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
         ):
             request = dict(args)
         elif (
+            args.get("operation") == "move_issue"
+            and (("identifier" in args) != ("issue_number" in args))
+            and set(args)
+            == {
+                "operation",
+                "identifier" if "identifier" in args else "issue_number",
+                "expected_project",
+                "expected_milestone",
+                "project",
+                "milestone",
+            }
+        ):
+            request = dict(args)
+        elif (
             args.get("operation") == "update_issue"
             and bool(set(args) & {"identifier", "issue_number"})
             and bool(
@@ -1833,8 +1909,6 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
                     "due_date",
                     "estimate",
                     "parent_identifier",
-                    "project",
-                    "milestone",
                 }
             )
             and set(args).issubset(
@@ -1852,8 +1926,6 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
                     "due_date",
                     "estimate",
                     "parent_identifier",
-                    "project",
-                    "milestone",
                     "approval",
                 }
             )
@@ -1900,6 +1972,11 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
             )
         ):
             request = dict(args)
+        elif (
+            args.get("operation") == "update_issue"
+            and bool(set(args) & {"project", "milestone"})
+        ):
+            raise RouteError("legacy issue move must use move_issue")
         else:
             raise RouteError("tool input does not match a bounded request shape")
         session_getter = kwargs.get("session_getter") or _default_session_getter
@@ -1918,6 +1995,28 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
             _public_result(internal_result), ensure_ascii=False, sort_keys=True
         )
     except RouteError as exc:
+        if (
+            isinstance(args, dict)
+            and args.get("operation") == "update_issue"
+            and bool(set(args) & {"project", "milestone"})
+            and str(exc)
+            in {
+                "legacy issue move must use move_issue",
+                "project/milestone scope changes must use move_issue with exact expected scope",
+            }
+        ):
+            return json.dumps(
+                {
+                    "status": "rejected",
+                    "message": (
+                        "Для переноса задачи вызовите move_issue с operation, ровно "
+                        "одним из identifier/issue_number, expected_project, "
+                        "expected_milestone, project и milestone."
+                    ),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
         if (
             isinstance(args, dict)
             and set(args) == {"request"}

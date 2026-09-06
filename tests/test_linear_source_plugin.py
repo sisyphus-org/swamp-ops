@@ -131,7 +131,7 @@ def set_existing_task(board, task):
                 {"state": command["change"]["state"]}
                 if operation == "change_state"
                 else dict(command["change"])
-                if operation == "update_issue"
+                if operation in {"update_issue", "move_issue"}
                 else {}
             )
         result = {
@@ -716,6 +716,8 @@ class PluginTests(unittest.TestCase):
                 "query",
                 "entity_types",
                 "include_archived",
+                "expected_project",
+                "expected_milestone",
                 "items",
                 "entity_type",
                 "selector",
@@ -783,7 +785,7 @@ class PluginTests(unittest.TestCase):
             if branch.get("properties", {}).get("operation", {}).get("const")
             == "update_issue"
         )
-        self.assertIn(
+        self.assertNotIn(
             {"required": ["project", "milestone"]},
             update_branch["anyOf"],
         )
@@ -821,7 +823,72 @@ class PluginTests(unittest.TestCase):
             create_branch["properties"]["parent_identifier"],
             {"type": "string", "pattern": "^SIS-[1-9][0-9]*$"},
         )
-        self.assertEqual(len(parameters["oneOf"]), 24)
+        move_branch = next(
+            branch
+            for branch in parameters["oneOf"]
+            if branch.get("properties", {}).get("operation", {}).get("const")
+            == "move_issue"
+        )
+        self.assertEqual(
+            set(move_branch["required"]),
+            {
+                "operation",
+                "expected_project",
+                "expected_milestone",
+                "project",
+                "milestone",
+            },
+        )
+        self.assertNotIn("approval", move_branch["required"])
+        self.assertEqual(
+            move_branch["properties"]["project"],
+            {"type": "string", "minLength": 1, "maxLength": 200},
+        )
+        self.assertEqual(
+            move_branch["properties"]["expected_project"],
+            {
+                "oneOf": [
+                    {"type": "string", "minLength": 1, "maxLength": 200},
+                    {"type": "null"},
+                ]
+            },
+        )
+        with self.assertRaises(jsonschema.ValidationError):
+            jsonschema.validate(
+                {
+                    "operation": "move_issue",
+                    "identifier": "SIS-94",
+                    "expected_project": "Old",
+                    "expected_milestone": "Old M",
+                    "project": "New",
+                    "milestone": "New M",
+                    "approval": {
+                        "workflow": "linear-destructive-owner-approval-attest",
+                        "model": "linear-destructive-owner-approval-attest",
+                        "run_id": "55555555-5555-4555-8555-555555555555",
+                        "artifact_version": 1,
+                        "checksum": "a" * 64,
+                        "intent_hash": "b" * 64,
+                        "before_state_hash": "c" * 64,
+                        "expires_at": "2026-09-01T23:00:00Z",
+                    },
+                },
+                parameters,
+            )
+        with self.assertRaises(jsonschema.ValidationError):
+            jsonschema.validate(
+                {
+                    "operation": "move_issue",
+                    "identifier": "SIS-94",
+                    "expected_project": "Old",
+                    "expected_milestone": "Old M",
+                    "project": "New",
+                    "milestone": "New M",
+                    "body": "unrelated",
+                },
+                parameters,
+            )
+        self.assertEqual(len(parameters["oneOf"]), 25)
         self.assertEqual(
             parameters["properties"]["description_transform"]["enum"],
             ["remove_links"],
@@ -832,6 +899,7 @@ class PluginTests(unittest.TestCase):
                 "bulk_linear_operations",
                 "add_comment",
                 "change_state",
+                "move_issue",
                 "update_issue",
                 "inventory_sub_issues",
                 "update_sub_issues",
@@ -865,6 +933,7 @@ class PluginTests(unittest.TestCase):
                 "inventory_linear",
                 None,
                 "change_state",
+                "move_issue",
                 "update_issue",
                 "inventory_sub_issues",
                 "create_issue_relation",
@@ -1381,6 +1450,31 @@ class PluginTests(unittest.TestCase):
         self.assertIsNone(cleared["target"]["project"])
         self.assertIsNone(cleared["target"]["milestone"])
 
+        moved = _public_result(
+            {
+                "status": "verified_no_op",
+                "linear_result": {
+                    "verified": True,
+                    "result": "applied",
+                    "operation": "move_issue",
+                    "target": {
+                        "type": "issue",
+                        "identifier": "SIS-94",
+                        "url": "https://linear.app/example/issue/SIS-94/fixture",
+                    },
+                    "after": {
+                        "project": "Project Two",
+                        "milestone": "Milestone Two",
+                        "project_id": "must-not-leak",
+                        "milestone_id": "must-not-leak",
+                    },
+                },
+            }
+        )
+        self.assertEqual(moved["target"]["project"], "Project Two")
+        self.assertEqual(moved["target"]["milestone"], "Milestone Two")
+        self.assertNotIn("must-not-leak", json.dumps(moved))
+
     def test_public_result_rejects_invalid_due_date_or_estimate(self):
         for after in (
             {"due_date": "2026-02-30"},
@@ -1569,8 +1663,10 @@ class PluginTests(unittest.TestCase):
         result = json.loads(
             handle_linear_source_request(
                 {
-                    "operation": "update_issue",
+                    "operation": "move_issue",
                     "identifier": "SIS-94",
+                    "expected_project": "Current Project",
+                    "expected_milestone": "Current Milestone",
                     "project": "Project Two",
                     "milestone": "Milestone Two",
                 },
@@ -1583,6 +1679,25 @@ class PluginTests(unittest.TestCase):
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["target"]["project"], "Project Two")
         self.assertEqual(result["target"]["milestone"], "Milestone Two")
+
+        stale = json.loads(
+            handle_linear_source_request(
+                {
+                    "operation": "update_issue",
+                    "identifier": "SIS-94",
+                    "project": "Project Two",
+                    "milestone": "Milestone Two",
+                },
+                session_id="20260828_120000_abcdef12",
+                board_factory=lambda **_kwargs: fake_board,
+                session_getter=lambda name, default="": session_values.get(name, default),
+                runtime_profile_getter=lambda: "default",
+            )
+        )
+        self.assertEqual(stale["status"], "rejected")
+        self.assertIn("move_issue", stale["message"])
+        self.assertIn("expected_project", stale["message"])
+        self.assertIn("expected_milestone", stale["message"])
 
     def test_tool_schema_rejects_conflicting_issue_targets_and_description_modes(self):
         invalid = (
@@ -2330,6 +2445,7 @@ class PluginTests(unittest.TestCase):
     def test_public_block_reason_preserves_only_allowlisted_mismatch_fields(self):
         cases = (
             ("create_issue", "create_issue read-back mismatched fields: description, priority"),
+            ("move_issue", "move_issue read-back mismatched fields: url, archived"),
             ("converge_hierarchy", "converge_hierarchy read-back mismatched fields: state"),
             (
                 "create_standalone_issue",

@@ -1,7 +1,7 @@
 ---
 name: linear-source-request-routing
 description: Route Linear reads/writes through broker and Project Manager.
-version: 1.3.3
+version: 1.4.0
 author: Alexey Petrov, Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -21,6 +21,7 @@ Use the typed Project Manager lane for every Linear read, creation, or mutation.
 - Change one exact `SIS-N` issue, or one positive issue number in the single `SIS` team, from any current state to any directly writable state: `Backlog`, `Todo`, `Research`, `In Progress`, `In Review`, `Done`, or `Canceled`, under standard policy.
 - Mark one exact `SIS-N` issue as a duplicate of one exact canonical `SIS-N` issue with `create_issue_relation` and `relation_type=duplicate`; Linear applies its reserved `Duplicate` status automatically and PM verifies both relation and state.
 - Update one exact `SIS-N` issue, or one positive issue number in the single `SIS` team, with any non-empty bounded managed-field subset, including deterministic link removal.
+- Move one existing issue to one exact project/milestone with `move_issue`. The request binds the exact expected current project/milestone, performs a final full-issue compare immediately before Linear's non-conditional update, and fails before mutation if live state drifted; replay accepts the already-converged target scope. Linear exposes no atomic revision precondition, so this is compare-before-set with a minimal residual provider TOCTOU window, not an atomic CAS claim. The move never changes issue identity, history, state, parent, assignee, or other unmanaged fields.
 - Create one bounded issue in the `SIS` team under one exact uppercase `SIS-N` parent, with bounded title/description, safe state, and High/Medium/Low priority.
 - Converge one bounded create-only `SIS` hierarchy: one exact project, one milestone, and one top-level issue, with optional descriptions and a safe issue state.
 - Create one standalone top-level issue in one exact existing project/milestone with explicit description, safe state, and priority.
@@ -80,6 +81,7 @@ If authoritative mutation-scoped provenance identifies one exact compatible resu
    - comment: `operation=add_comment`, exactly one of exact `identifier` or positive `issue_number`, and exact non-empty `body` (maximum 4,000 characters). Never encode the target or action into a natural-language `request` string. The old exact Russian string form remains accepted only for backward-compatible replay;
    - state: `operation=change_state`, exactly one of exact `identifier` or positive `issue_number`, and one exact directly writable `state`. Never attach approval to a state transition. `Duplicate` is not writable through `change_state`;
    - issue fields: `operation=update_issue`, exactly one of exact `identifier` or positive `issue_number`, and a bounded managed-field subset. A standard top-level parent attach uses exact `parent_identifier`. Parent replacement or clear must contain only `parent_identifier` (exact `SIS-N` or `null`) plus the exact fixed `approval` reference;
+   - issue move: `operation=move_issue`, exactly one issue target, exact `expected_project`/`expected_milestone` (both names or both `null`), and exact target `project`/`milestone` names. Resolve all names first. Never attach approval: this is a standard compare-before-set move through the existing fixed issue writer;
    - when the owner says to remove links from the description, use `description_transform=remove_links`; this preserves visible text (including Markdown labels) and removes HTTP(S) destinations. Do not ask whether to clear the whole description unless the owner explicitly asked to clear it;
    - create: `operation=create_issue`, bounded `title`, `description`, exact `parent_identifier`, safe `state`, and bounded `priority`.
    - hierarchy: `operation=converge_hierarchy` with exact `project`, `milestone`, and `issue` objects; names/titles are required, descriptions and a safe issue state are optional, and IDs are never supplied by the source.
@@ -94,7 +96,7 @@ If authoritative mutation-scoped provenance identifies one exact compatible resu
    - relation creation: `operation=create_issue_relation`, exact `identifier`, exact `related_identifier`, and `blocks|blocked_by|related|duplicate`. For `duplicate`, `identifier` is the duplicate issue and `related_identifier` is the canonical issue;
    - relation removal: `operation=remove_issue_relation`, exact `identifier`, exact `related_identifier`, exact `relation_type`, and the existing fixed `approval` object;
    - relation replacement: `operation=replace_issue_relation`, exact target `identifier`, exact `old_related_identifier`/`old_relation_type`, exact `new_related_identifier`/`new_relation_type`, and the existing fixed `approval` object;
-   - archive/delete: `operation=archive_linear_entity` or `delete_linear_entity`, exact singular `entity_type`, exact typed `selector`, and the existing fixed `approval`. Delete selectors are issue `{identifier}`, project `{name}`, milestone `{project,name}`, and initiative `{name}`; do not translate trash-style delete requests into archive.
+   - archive/delete: `operation=archive_linear_entity` or `delete_linear_entity`, exact singular `entity_type`, exact typed `selector`, and the existing fixed `approval`. Delete selectors are issue `{identifier}`, project `{name}`, milestone `{project,name}`, and initiative `{name}`; do not translate trash-style delete requests into archive. Never infer deletion from cleanup, migration, duplication, or inactivity. Proceed only when the owner directly ordered that exact deletion, or after showing the exact target/impact preview and receiving explicit confirmation; a boolean or model assertion never replaces the bound approval reference.
    - ordered batch: `operation=bulk_linear_operations`, `items=[...]`, and optionally the one parent `approval` only when at least one item requires it. Preserve item order literally; reject duplicate items and repeated operation-specific complete entity selectors instead of trying to merge them.
 3. Do not call Linear MCP, GraphQL, `terminal`, a direct read client, Kanban inspection commands, or another Linear tool from the source profile.
 4. After `queued`, reply only that the requested action is being handled, then stop. Do not inspect the task, worker, protocol, or board while it runs.

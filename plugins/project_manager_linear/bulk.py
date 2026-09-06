@@ -20,6 +20,7 @@ from typing import Any, Callable
 MAX_ITEMS = 50
 MUTATING_OPERATIONS = {
     "change_state",
+    "move_issue",
     "update_issue",
     "update_sub_issues",
     "add_comment",
@@ -403,7 +404,7 @@ def _matches_exact_recovered_after(
 ) -> bool:
     evidence = plan.get("recovery_evidence")
     reference = child.get("policy", {}).get("approval")
-    return bool(
+    common = bool(
         plan.get("operation") == child.get("operation")
         and _hash(plan.get("operation")) == item_state["operation_hash"]
         and _hash(plan.get("target")) == item_state["target_hash"]
@@ -414,14 +415,24 @@ def _matches_exact_recovered_after(
         and plan.get("recovered") is True
         and plan.get("plan") == []
         and isinstance(evidence, dict)
-        and evidence.get("schema_version") == "linear-owner-recovery.v1"
         and evidence.get("command_hash") == _hash(child)
         and evidence.get("phase") in {"prepared", "completed"}
         and isinstance(evidence.get("before_state_hash"), str)
         and len(evidence["before_state_hash"]) == 64
         and isinstance(evidence.get("after_state_hash"), str)
         and len(evidence["after_state_hash"]) == 64
-        and isinstance(reference, dict)
+    )
+    if not common or not isinstance(evidence, dict):
+        return False
+    if (
+        child.get("operation") == "move_issue"
+        and child.get("policy") == {"mode": "standard"}
+    ):
+        return evidence.get("schema_version") == "linear-move-recovery.v1"
+    if not isinstance(reference, dict):
+        return False
+    return bool(
+        evidence.get("schema_version") == "linear-owner-recovery.v1"
         and evidence.get("approval_checksum") == reference.get("checksum")
         and evidence.get("intent_hash") == reference.get("intent_hash")
     )
