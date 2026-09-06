@@ -1,5 +1,5 @@
 name: project-manager-linear
-version: 1.4.0
+version: 1.4.1
 description: >-
   Deterministic PM Linear lane with direct writable-state transitions, reserved
   duplicate relation handling, owner-approved destructive mutations, and
