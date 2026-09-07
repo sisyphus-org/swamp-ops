@@ -6,10 +6,12 @@ import json
 import os
 import re
 import sqlite3
+import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from . import linear_approval_contract as linear_approval
 
@@ -32,6 +34,7 @@ ALLOWED_OPERATIONS = {
     ("swamp", "plan_linear_destructive_owner_approval"),
     ("swamp", "start_linear_destructive_owner_approval_attest"),
     ("swamp", "approve_linear_destructive_owner_approval_attest"),
+    ("swamp", "approve_linear_delete_preview"),
     ("swamp", "get_result"),
 }
 
@@ -40,6 +43,75 @@ PLAN_WORKFLOW = "github-cloudflare-repo-bootstrap"
 APPLY_WORKFLOW = "github-cloudflare-repo-bootstrap-apply"
 REPOSITORY_PATTERN = re.compile(r"^[a-z][a-z0-9-]{1,54}$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_LINEAR_DELETE_APPROVAL_FIELDS = {
+    "workflow", "model", "run_id", "artifact_version", "checksum",
+    "intent_hash", "before_state_hash", "expires_at",
+}
+_LINEAR_DELETE_THREAD_LOCKS: dict[str, threading.Lock] = {}
+_LINEAR_DELETE_THREAD_LOCKS_GUARD = threading.Lock()
+
+
+def _validate_linear_delete_granted_policy(
+    granted_policy: Any,
+    preview: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    approval = (
+        granted_policy.get("approval") if isinstance(granted_policy, dict) else None
+    )
+    version = approval.get("artifact_version") if isinstance(approval, dict) else None
+    if (
+        not isinstance(granted_policy, dict)
+        or set(granted_policy) != {"mode", "approval"}
+        or granted_policy.get("mode") != "owner_approved"
+        or not isinstance(approval, dict)
+        or set(approval) != _LINEAR_DELETE_APPROVAL_FIELDS
+        or approval.get("workflow") != linear_approval.ATTEST_WORKFLOW
+        or approval.get("model") != linear_approval.ATTEST_MODEL
+        or not isinstance(approval.get("run_id"), str)
+        or linear_approval.UUID.fullmatch(approval["run_id"]) is None
+        or not isinstance(version, int)
+        or isinstance(version, bool)
+        or version < 1
+        or any(
+            not isinstance(approval.get(field), str)
+            or linear_approval.SHA256.fullmatch(approval[field]) is None
+            for field in ("checksum", "intent_hash", "before_state_hash")
+        )
+        or approval.get("intent_hash")
+        != linear_approval.canonical_sha256(preview.get("approval_intent"))
+        or approval.get("before_state_hash") != preview.get("before_state_hash")
+        or approval.get("expires_at") != preview.get("expires_at")
+    ):
+        raise BrokerError("Linear delete approval grant binding is invalid")
+    try:
+        linear_approval.validate_expiry_window(
+            approval["expires_at"], now or datetime.now(timezone.utc)
+        )
+    except linear_approval.ContractError as exc:
+        raise BrokerError("Linear delete approval grant is expired or invalid") from exc
+    return granted_policy
+
+
+@contextmanager
+def _linear_delete_confirmation_lock(reference: str, root: Path | None):
+    with _LINEAR_DELETE_THREAD_LOCKS_GUARD:
+        thread_lock = _LINEAR_DELETE_THREAD_LOCKS.setdefault(reference, threading.Lock())
+    with thread_lock:
+        if root is None:
+            yield
+            return
+        root.mkdir(parents=True, exist_ok=True)
+        os.chmod(root, 0o700)
+        lock_path = root / (reference.rsplit(":", 1)[-1] + ".lock")
+        with lock_path.open("a", encoding="utf-8") as handle:
+            os.chmod(lock_path, 0o600)
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def resolve_caller(
@@ -867,6 +939,339 @@ def _approve_registered_apply(
         return result
 
 
+def _task_value(task: Any, field: str) -> Any:
+    return task.get(field) if isinstance(task, dict) else getattr(task, field, None)
+
+
+def _delete_preview_reference(
+    task_id: str,
+    session_id: str,
+    result: dict[str, Any],
+    source: dict[str, Any],
+) -> str:
+    binding = {
+        "task_id": task_id,
+        "session_id": session_id,
+        "source": source,
+        "approval_intent": result.get("approval_intent"),
+        "before_state_hash": result.get("before_state_hash"),
+        "expires_at": result.get("expires_at"),
+    }
+    return "linear-delete-approval:v1:" + linear_approval.canonical_sha256(binding)
+
+
+def _load_linear_delete_preview(
+    reference: str,
+    session_id: str,
+    *,
+    policy: dict[str, Any],
+    kb: Any = None,
+    now: datetime | None = None,
+) -> dict[str, Any] | None:
+    """Load and revalidate one protected PM preview from the shared Kanban DB."""
+    if kb is None:
+        from hermes_cli import kanban_db as kb_module
+
+        kb = kb_module
+    conn = kb.connect(board="default")
+    try:
+        rows = conn.execute(
+            "SELECT task_id, payload FROM task_events WHERE kind = ? AND payload LIKE ?",
+            ("linear_delete_preview_ready", f'%\"approval_reference\": \"{reference}\"%'),
+        ).fetchall()
+        if len(rows) != 1:
+            raise BrokerError("Linear delete preview is missing or ambiguous")
+        task_id = rows[0]["task_id"]
+        preview_event = json.loads(rows[0]["payload"])
+        task = kb.get_task(conn, task_id)
+        grant_rows = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id = ? AND kind = ?",
+            (task_id, "linear_delete_approval_granted"),
+        ).fetchall()
+        attempt_rows = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id = ? AND kind = ?",
+            (task_id, "linear_delete_approval_attempted"),
+        ).fetchall()
+    finally:
+        conn.close()
+    if task is None:
+        raise BrokerError("Linear delete preview task is missing")
+    try:
+        envelope = json.loads(_task_value(task, "body"))
+        result = json.loads(_task_value(task, "result"))
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise BrokerError("Linear delete preview task is malformed") from exc
+    source = preview_event.get("source") if isinstance(preview_event, dict) else None
+    owner_identities = policy.get("ownerIdentities", [])
+    owner_user_ids = {
+        str(item.get("user_id"))
+        for item in owner_identities
+        if isinstance(item, dict)
+        and item.get("source") == "telegram"
+        and item.get("caller") == "owner"
+    }
+    command = envelope.get("command") if isinstance(envelope, dict) else None
+    if (
+        _task_value(task, "status") != "done"
+        or _task_value(task, "assignee") != "project-manager"
+        or _task_value(task, "session_id") != session_id
+        or not isinstance(source, dict)
+        or source.get("session_id") != session_id
+        or source.get("platform") != "telegram"
+        or source.get("user_id") not in owner_user_ids
+        or not isinstance(command, dict)
+        or command.get("operation") != "preview_delete_linear_entity"
+        or command.get("source_profile") != source.get("profile")
+        or not isinstance(result, dict)
+        or result.get("operation") != "preview_delete_linear_entity"
+        or result.get("verified") is not True
+        or result.get("result") != "read"
+        or result.get("target") != command.get("target")
+        or result.get("approval_intent") != preview_event.get("approval_intent")
+        or result.get("before_state_hash") != preview_event.get("before_state_hash")
+        or result.get("expires_at") != preview_event.get("expires_at")
+        or not isinstance(result.get("before_state_hash"), str)
+        or linear_approval.SHA256.fullmatch(result["before_state_hash"]) is None
+        or preview_event.get("approval_reference") != reference
+        or _delete_preview_reference(task_id, session_id, result, source) != reference
+    ):
+        raise BrokerError("Linear delete preview protected binding is invalid")
+    current = now or datetime.now(timezone.utc)
+    try:
+        linear_approval.validate_expiry_window(
+            result["expires_at"], current
+        )
+    except linear_approval.ContractError as exc:
+        raise BrokerError("Linear delete preview is expired or has an invalid TTL") from exc
+    if len(grant_rows) > 1:
+        raise BrokerError("Linear delete approval grant is ambiguous")
+    if len(attempt_rows) > 1:
+        raise BrokerError("Linear delete approval attempt is ambiguous")
+    approval_attempted = False
+    if attempt_rows:
+        try:
+            attempt = json.loads(attempt_rows[0]["payload"])
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise BrokerError("Linear delete approval attempt is malformed") from exc
+        if attempt != {
+            "schema_version": "linear-delete-approval-attempt.v1",
+            "approval_reference": reference,
+            "preview_hash": linear_approval.canonical_sha256(preview_event),
+        }:
+            raise BrokerError("Linear delete approval attempt binding is invalid")
+        approval_attempted = True
+    granted_policy = None
+    if grant_rows:
+        try:
+            grant = json.loads(grant_rows[0]["payload"])
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise BrokerError("Linear delete approval grant is malformed") from exc
+        if (
+            not isinstance(grant, dict)
+            or set(grant)
+            != {"schema_version", "approval_reference", "preview_hash", "policy"}
+            or grant.get("schema_version") != "linear-delete-approval.v1"
+            or grant.get("approval_reference") != reference
+            or grant.get("preview_hash")
+            != linear_approval.canonical_sha256(preview_event)
+        ):
+            raise BrokerError("Linear delete approval grant binding is invalid")
+        granted_policy = _validate_linear_delete_granted_policy(
+            grant.get("policy"),
+            {
+                "approval_intent": result["approval_intent"],
+                "before_state_hash": result["before_state_hash"],
+                "expires_at": result["expires_at"],
+            },
+            now=current,
+        )
+    loaded = {
+        "task_id": task_id,
+        "session_id": session_id,
+        "source_profile": source["profile"],
+        "approval_reference": reference,
+        "approval_intent": result["approval_intent"],
+        "before_state_hash": result["before_state_hash"],
+        "expires_at": result["expires_at"],
+        "preview_hash": linear_approval.canonical_sha256(preview_event),
+    }
+    if granted_policy is not None:
+        loaded["granted_policy"] = granted_policy
+    if approval_attempted:
+        loaded["approval_attempted"] = True
+    return loaded
+
+
+def _issue_linear_delete_attestation(
+    preview: dict[str, Any],
+    *,
+    policy: dict[str, Any],
+    runner: Callable[..., dict[str, Any]],
+    workspace: Path,
+    audit_path: Path | None,
+) -> dict[str, Any]:
+    """Run the dedicated Swamp plan/start/approve sequence inside the broker."""
+    def invoke(operation: str, arguments: dict[str, Any], mode: str) -> dict[str, Any]:
+        return execute_request(
+            {
+                "request_id": str(uuid4()),
+                "integration": "swamp",
+                "operation": operation,
+                "arguments": arguments,
+                "mode": mode,
+            },
+            caller="owner",
+            policy=policy,
+            runner=runner,
+            workspace=workspace,
+            audit_path=audit_path,
+        )
+
+    base = {
+        "intent": preview["approval_intent"],
+        "before_state_hash": preview["before_state_hash"],
+        "expires_at": preview["expires_at"],
+    }
+    planned = invoke("plan_linear_destructive_owner_approval", base, "plan")["result"]
+    plan = planned.get("plan") if isinstance(planned, dict) else None
+    if not isinstance(plan, dict):
+        raise BrokerError("Linear delete approval plan is invalid")
+    started = invoke(
+        "start_linear_destructive_owner_approval_attest",
+        {
+            **base,
+            "plan_run_id": planned["workflowRunId"],
+            "plan_checksum": plan["checksum"],
+            "plan_artifact_version": planned["artifactVersion"],
+        },
+        "apply",
+    )["result"]
+    attest_run_id = started.get("id") if isinstance(started, dict) else None
+    if not isinstance(attest_run_id, str):
+        raise BrokerError("Linear delete approval attestation run is invalid")
+    approved = invoke(
+        "approve_linear_destructive_owner_approval_attest",
+        {"attest_run_id": attest_run_id},
+        "apply",
+    )["result"]
+    granted = approved.get("policy") if isinstance(approved, dict) else None
+    if not isinstance(granted, dict) or granted.get("mode") != "owner_approved":
+        raise BrokerError("Linear delete approval attestation policy is invalid")
+    return granted
+
+
+def _record_linear_delete_approval(
+    preview: dict[str, Any],
+    granted_policy: dict[str, Any],
+    *,
+    kb: Any = None,
+) -> dict[str, Any]:
+    """Persist one idempotent protected grant on the exact preview task."""
+    if kb is None:
+        from hermes_cli import kanban_db as kb_module
+
+        kb = kb_module
+    task_id = preview.get("task_id")
+    payload = {
+        "schema_version": "linear-delete-approval.v1",
+        "approval_reference": preview.get("approval_reference"),
+        "preview_hash": preview.get("preview_hash"),
+        "policy": granted_policy,
+    }
+    conn = kb.connect(board="default")
+    try:
+        with kb.write_txn(conn):
+            task = kb.get_task(conn, task_id)
+            if (
+                task is None
+                or _task_value(task, "status") != "done"
+                or _task_value(task, "session_id") != preview.get("session_id")
+            ):
+                raise BrokerError("Linear delete approval task binding is invalid")
+            attempts = conn.execute(
+                "SELECT payload FROM task_events WHERE task_id = ? AND kind = ?",
+                (task_id, "linear_delete_approval_attempted"),
+            ).fetchall()
+            expected_attempt = {
+                "schema_version": "linear-delete-approval-attempt.v1",
+                "approval_reference": preview.get("approval_reference"),
+                "preview_hash": preview.get("preview_hash"),
+            }
+            if (
+                len(attempts) != 1
+                or json.loads(attempts[0]["payload"]) != expected_attempt
+            ):
+                raise BrokerError("Linear delete approval attempt is missing or invalid")
+            rows = conn.execute(
+                "SELECT payload FROM task_events WHERE task_id = ? AND kind = ?",
+                (task_id, "linear_delete_approval_granted"),
+            ).fetchall()
+            if rows:
+                if len(rows) != 1 or json.loads(rows[0]["payload"]) != payload:
+                    raise BrokerError("Linear delete approval replay conflicts")
+                return {"ready": True}
+            kb._append_event(
+                conn,
+                task_id,
+                "linear_delete_approval_granted",
+                payload,
+            )
+    finally:
+        conn.close()
+    return {"ready": True}
+
+
+def _record_linear_delete_approval_attempt(
+    preview: dict[str, Any],
+    *,
+    kb: Any = None,
+) -> dict[str, Any]:
+    """Consume one opaque reference before any external approval side effect."""
+    if kb is None:
+        from hermes_cli import kanban_db as kb_module
+
+        kb = kb_module
+    task_id = preview.get("task_id")
+    payload = {
+        "schema_version": "linear-delete-approval-attempt.v1",
+        "approval_reference": preview.get("approval_reference"),
+        "preview_hash": preview.get("preview_hash"),
+    }
+    conn = kb.connect(board="default")
+    try:
+        with kb.write_txn(conn):
+            task = kb.get_task(conn, task_id)
+            if (
+                task is None
+                or _task_value(task, "status") != "done"
+                or _task_value(task, "session_id") != preview.get("session_id")
+            ):
+                raise BrokerError("Linear delete approval attempt task binding is invalid")
+            grants = conn.execute(
+                "SELECT payload FROM task_events WHERE task_id = ? AND kind = ?",
+                (task_id, "linear_delete_approval_granted"),
+            ).fetchall()
+            if grants:
+                raise BrokerError("Linear delete approval was already granted")
+            rows = conn.execute(
+                "SELECT payload FROM task_events WHERE task_id = ? AND kind = ?",
+                (task_id, "linear_delete_approval_attempted"),
+            ).fetchall()
+            if rows:
+                if len(rows) != 1 or json.loads(rows[0]["payload"]) != payload:
+                    raise BrokerError("Linear delete approval attempt conflicts")
+                return {"claimed": True}
+            kb._append_event(
+                conn,
+                task_id,
+                "linear_delete_approval_attempted",
+                payload,
+            )
+    finally:
+        conn.close()
+    return {"claimed": True}
+
+
 def execute_request(
     request: dict[str, Any],
     *,
@@ -875,12 +1280,89 @@ def execute_request(
     runner: Callable[..., dict[str, Any]],
     workspace: Path,
     audit_path: Path | None = None,
+    session_id: str = "",
+    preview_loader: Callable[[str, str], dict[str, Any] | None] | None = None,
+    attestation_issuer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    approval_recorder: Callable[
+        [dict[str, Any], dict[str, Any]], dict[str, Any]
+    ] | None = None,
+    approval_attempt_recorder: Callable[
+        [dict[str, Any]], dict[str, Any]
+    ] | None = None,
+    approval_lock_root: Path | None = None,
 ) -> dict[str, Any]:
     operation_key = f"{request['integration']}.{request['operation']}"
     try:
         peer = policy.get("peers", {}).get(caller, {})
         if operation_key not in peer.get("operations", []):
             raise BrokerError("operation is not allowed for caller")
+        if operation_key == "swamp.approve_linear_delete_preview":
+            if caller != "owner":
+                raise BrokerError("Linear delete approval requires authenticated owner")
+            arguments = request.get("arguments")
+            reference = (
+                arguments.get("approval_reference")
+                if isinstance(arguments, dict) and set(arguments) == {"approval_reference"}
+                else None
+            )
+            if (
+                not isinstance(reference, str)
+                or re.fullmatch(r"linear-delete-approval:v1:[0-9a-f]{64}", reference)
+                is None
+            ):
+                raise BrokerError("Linear delete approval reference is invalid")
+            if not session_id:
+                raise BrokerError("Linear delete approval requires the exact owner session")
+            if audit_path is None:
+                raise BrokerError(
+                    "Linear delete approval requires an immutable audit path"
+                )
+            if (
+                preview_loader is None
+                or attestation_issuer is None
+                or approval_recorder is None
+                or approval_attempt_recorder is None
+            ):
+                raise BrokerError("Linear delete approval trusted route is unavailable")
+            with _linear_delete_confirmation_lock(reference, approval_lock_root):
+                # Reload only after acquiring the per-reference lock so a concurrent
+                # confirmation observes and reuses the first caller's recorded grant.
+                preview = preview_loader(reference, session_id)
+                if not isinstance(preview, dict) or preview.get("session_id") != session_id:
+                    raise BrokerError("Linear delete preview is missing or belongs to another session")
+                granted_policy = preview.get("granted_policy")
+                if granted_policy is None:
+                    if preview.get("approval_attempted") is True:
+                        raise BrokerError(
+                            "Linear delete approval outcome is unknown; request a fresh preview"
+                        )
+                    claimed = approval_attempt_recorder(preview)
+                    if not isinstance(claimed, dict) or claimed.get("claimed") is not True:
+                        raise BrokerError(
+                            "Linear delete approval attempt was not safely recorded"
+                        )
+                    granted_policy = attestation_issuer(preview)
+                granted_policy = _validate_linear_delete_granted_policy(
+                    granted_policy, preview
+                )
+                recorded = approval_recorder(preview, granted_policy)
+                if not isinstance(recorded, dict) or recorded.get("ready") is not True:
+                    raise BrokerError("Linear delete approval was not safely recorded")
+                _append_jsonl(
+                    audit_path,
+                    _audit_base(request, caller, operation_key, "ok"),
+                )
+            return {
+                "request_id": request["request_id"],
+                "caller": caller,
+                "operation": operation_key,
+                "mode": request["mode"],
+                "status": "ok",
+                "result": {
+                    "approval_reference": reference,
+                    "ready": True,
+                },
+            }
         command = build_command(operation_key, request["arguments"], policy)
 
         if operation_key == "swamp.start_github_cloudflare_repository_apply":
@@ -1064,6 +1546,7 @@ def validate_request(payload: dict[str, Any]) -> dict[str, Any]:
         "approve_github_cloudflare_repository_apply",
         "start_linear_destructive_owner_approval_attest",
         "approve_linear_destructive_owner_approval_attest",
+        "approve_linear_delete_preview",
     }
     expected_mode = "apply" if operation in apply_operations else "plan"
     if mode != expected_mode:

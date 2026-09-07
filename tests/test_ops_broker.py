@@ -1,8 +1,13 @@
+import concurrent.futures
+import copy
+import hashlib
 import json
 import sqlite3
 import subprocess
 import tempfile
+import threading
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -13,11 +18,57 @@ from plugins.ops_broker import (
 )
 from plugins.ops_broker.broker import (
     _canonical_plan_checksum,
+    _issue_linear_delete_attestation,
     build_command,
     execute_request,
     resolve_caller,
     validate_request,
 )
+
+
+def delete_preview_fixture():
+    intent = {
+        "operation": "delete_linear_entity",
+        "target": {"type": "issue", "selector": {"identifier": "SIS-77"}},
+        "change": {},
+    }
+    expires_at = (datetime.now(timezone.utc) + timedelta(hours=1)).replace(
+        microsecond=0
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return {
+        "task_id": "t_1234abcd",
+        "session_id": "20260906_120000_abcdef12",
+        "source_profile": "default",
+        "approval_reference": "linear-delete-approval:v1:" + "a" * 64,
+        "approval_intent": intent,
+        "before_state_hash": "b" * 64,
+        "expires_at": expires_at,
+        "preview_hash": "e" * 64,
+    }
+
+
+def delete_grant_fixture(preview):
+    intent_hash = hashlib.sha256(
+        json.dumps(
+            preview["approval_intent"],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    return {
+        "mode": "owner_approved",
+        "approval": {
+            "workflow": "linear-destructive-owner-approval-attest",
+            "model": "linear-destructive-owner-approval-attest",
+            "run_id": "11111111-1111-4111-8111-111111111111",
+            "artifact_version": 1,
+            "checksum": "c" * 64,
+            "intent_hash": intent_hash,
+            "before_state_hash": preview["before_state_hash"],
+            "expires_at": preview["expires_at"],
+        },
+    }
 
 
 def repository_plan(repository="example-site", *, ready=False, blockers=None):
@@ -71,6 +122,363 @@ class RequestValidationTests(unittest.TestCase):
                 "start_linear_destructive_owner_approval_attest",
                 "approve_linear_destructive_owner_approval_attest",
             }.issubset(operations)
+        )
+
+    def test_delete_approval_requires_immutable_audit_before_attempt(self):
+        preview = delete_preview_fixture()
+        issuer = mock.Mock(return_value=delete_grant_fixture(preview))
+        attempt = mock.Mock(return_value={"claimed": True})
+        with self.assertRaisesRegex(Exception, "immutable audit path"):
+            execute_request(
+                {
+                    "request_id": "11111111-1111-4111-8111-111111111111",
+                    "integration": "swamp",
+                    "operation": "approve_linear_delete_preview",
+                    "arguments": {
+                        "approval_reference": preview["approval_reference"]
+                    },
+                    "mode": "apply",
+                },
+                caller="owner",
+                policy={
+                    "peers": {
+                        "owner": {
+                            "operations": ["swamp.approve_linear_delete_preview"]
+                        }
+                    }
+                },
+                runner=mock.Mock(),
+                workspace=Path("/reviewed/runtime"),
+                session_id=preview["session_id"],
+                preview_loader=mock.Mock(return_value=preview),
+                attestation_issuer=issuer,
+                approval_attempt_recorder=attempt,
+                approval_recorder=mock.Mock(return_value={"ready": True}),
+            )
+        issuer.assert_not_called()
+        attempt.assert_not_called()
+
+    def test_opaque_delete_preview_approval_never_returns_attestation_internals(self):
+        preview = delete_preview_fixture()
+        reference = preview["approval_reference"]
+        policy = {
+            "peers": {"owner": {"operations": ["swamp.approve_linear_delete_preview"]}},
+            "swamp": {},
+        }
+        approval_policy = delete_grant_fixture(preview)
+        created = []
+        request = validate_request(
+            {
+                "request_id": "e7ba0358-034b-4f79-9b28-42c9212e7716",
+                "integration": "swamp",
+                "operation": "approve_linear_delete_preview",
+                "arguments": {"approval_reference": reference},
+                "mode": "apply",
+            }
+        )
+
+        result = execute_request(
+            request,
+            caller="owner",
+            policy=policy,
+            runner=mock.Mock(),
+            workspace=Path("/reviewed/runtime"),
+            audit_path=Path("/dev/null"),
+            session_id=preview["session_id"],
+            preview_loader=lambda value, session: (
+                preview if (value, session) == (reference, preview["session_id"]) else None
+            ),
+            attestation_issuer=lambda value: approval_policy,
+            approval_attempt_recorder=lambda _value: {"claimed": True},
+            approval_recorder=lambda value, granted: created.append((value, granted))
+            or {"ready": True},
+        )
+
+        self.assertEqual(
+            result,
+            {
+                "request_id": request["request_id"],
+                "caller": "owner",
+                "operation": "swamp.approve_linear_delete_preview",
+                "mode": "apply",
+                "status": "ok",
+                "result": {"approval_reference": reference, "ready": True},
+            },
+        )
+        self.assertEqual(created, [(preview, approval_policy)])
+        serialized = json.dumps(result, sort_keys=True)
+        for hidden in ("before_state_hash", "checksum", "run_id", "intent_hash"):
+            self.assertNotIn(hidden, serialized)
+
+    def test_delete_approval_replay_reuses_recorded_grant_without_new_attestation(self):
+        preview = delete_preview_fixture()
+        reference = preview["approval_reference"]
+        granted = delete_grant_fixture(preview)
+        preview["granted_policy"] = granted
+        issuer = mock.Mock()
+        recorder = mock.Mock(return_value={"ready": True})
+        result = execute_request(
+            {
+                "request_id": "11111111-1111-4111-8111-111111111111",
+                "integration": "swamp",
+                "operation": "approve_linear_delete_preview",
+                "arguments": {"approval_reference": reference},
+                "mode": "apply",
+            },
+            caller="owner",
+            policy={
+                "peers": {
+                    "owner": {"operations": ["swamp.approve_linear_delete_preview"]}
+                }
+            },
+            runner=mock.Mock(),
+            workspace=Path("/reviewed/runtime"),
+            audit_path=Path("/dev/null"),
+            session_id=preview["session_id"],
+            preview_loader=mock.Mock(return_value=preview),
+            attestation_issuer=issuer,
+            approval_attempt_recorder=lambda _value: {"claimed": True},
+            approval_recorder=recorder,
+        )
+
+        self.assertEqual(
+            result["result"],
+            {"approval_reference": reference, "ready": True},
+        )
+        issuer.assert_not_called()
+        recorder.assert_called_once_with(preview, granted)
+
+    def test_failed_grant_persistence_consumes_reference_without_second_attestation(self):
+        preview = delete_preview_fixture()
+        granted = delete_grant_fixture(preview)
+        state = {"attempted": False}
+        issuer = mock.Mock(return_value=granted)
+
+        def loader(_reference, _session_id):
+            loaded = copy.deepcopy(preview)
+            if state["attempted"]:
+                loaded["approval_attempted"] = True
+            return loaded
+
+        def claim_attempt(_loaded):
+            state["attempted"] = True
+            return {"claimed": True}
+
+        request = {
+            "request_id": "11111111-1111-4111-8111-111111111111",
+            "integration": "swamp",
+            "operation": "approve_linear_delete_preview",
+            "arguments": {"approval_reference": preview["approval_reference"]},
+            "mode": "apply",
+        }
+        kwargs = {
+            "caller": "owner",
+            "policy": {
+                "peers": {
+                    "owner": {"operations": ["swamp.approve_linear_delete_preview"]}
+                }
+            },
+            "runner": mock.Mock(),
+            "workspace": Path("/reviewed/runtime"),
+            "audit_path": Path("/dev/null"),
+            "session_id": preview["session_id"],
+            "preview_loader": loader,
+            "attestation_issuer": issuer,
+            "approval_attempt_recorder": claim_attempt,
+            "approval_recorder": mock.Mock(
+                side_effect=RuntimeError("injected recorder crash")
+            ),
+        }
+        with self.assertRaisesRegex(RuntimeError, "injected recorder crash"):
+            execute_request(request, **kwargs)
+        with self.assertRaisesRegex(
+            Exception, "outcome is unknown|fresh preview|already attempted"
+        ):
+            execute_request(request, **kwargs)
+
+        self.assertEqual(issuer.call_count, 1)
+        self.assertTrue(state["attempted"])
+
+    def test_tampered_persisted_delete_grant_rejects_without_ok_audit(self):
+        preview = delete_preview_fixture()
+        valid = delete_grant_fixture(preview)
+        mutations = {
+            "policy-extra": lambda value: value.update({"extra": True}),
+            "approval-missing": lambda value: value["approval"].pop("checksum"),
+            "approval-extra": lambda value: value["approval"].update({"extra": True}),
+            "workflow": lambda value: value["approval"].update({"workflow": "other"}),
+            "model": lambda value: value["approval"].update({"model": "other"}),
+            "run-id": lambda value: value["approval"].update({"run_id": "not-a-uuid"}),
+            "version": lambda value: value["approval"].update({"artifact_version": True}),
+            "checksum": lambda value: value["approval"].update({"checksum": "short"}),
+            "intent": lambda value: value["approval"].update({"intent_hash": "d" * 64}),
+            "before": lambda value: value["approval"].update({"before_state_hash": "d" * 64}),
+            "expiry": lambda value: value["approval"].update(
+                {"expires_at": "2099-09-06T19:59:59Z"}
+            ),
+        }
+        request = {
+            "request_id": "11111111-1111-4111-8111-111111111111",
+            "integration": "swamp",
+            "operation": "approve_linear_delete_preview",
+            "arguments": {"approval_reference": preview["approval_reference"]},
+            "mode": "apply",
+        }
+        policy = {
+            "peers": {"owner": {"operations": ["swamp.approve_linear_delete_preview"]}}
+        }
+        for name, mutate in mutations.items():
+            tampered = copy.deepcopy(valid)
+            mutate(tampered)
+            loaded = {**preview, "granted_policy": tampered}
+            issuer = mock.Mock()
+            recorder = mock.Mock()
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                audit = Path(tmp) / "audit.jsonl"
+                with self.assertRaisesRegex(Exception, "grant|attestation|approval"):
+                    execute_request(
+                        request,
+                        caller="owner",
+                        policy=policy,
+                        runner=mock.Mock(),
+                        workspace=Path(tmp),
+                        audit_path=audit,
+                        session_id=preview["session_id"],
+                        preview_loader=mock.Mock(return_value=loaded),
+                        attestation_issuer=issuer,
+                        approval_attempt_recorder=lambda _value: {"claimed": True},
+                        approval_recorder=recorder,
+                    )
+                issuer.assert_not_called()
+                recorder.assert_not_called()
+                audit_text = audit.read_text() if audit.exists() else ""
+                self.assertNotIn('"status": "ok"', audit_text)
+
+    def test_concurrent_delete_confirmation_issues_one_attestation_and_converges(self):
+        preview = delete_preview_fixture()
+        granted = delete_grant_fixture(preview)
+        state = {"grant": None}
+        state_lock = threading.Lock()
+        loaded_together = threading.Barrier(2)
+        issued = []
+
+        def loader(reference, session_id):
+            self.assertEqual(reference, preview["approval_reference"])
+            self.assertEqual(session_id, preview["session_id"])
+            with state_lock:
+                loaded = copy.deepcopy(preview)
+                if state["grant"] is not None:
+                    loaded["granted_policy"] = copy.deepcopy(state["grant"])
+            if "granted_policy" not in loaded:
+                try:
+                    loaded_together.wait(timeout=0.25)
+                except threading.BrokenBarrierError:
+                    pass
+            return loaded
+
+        def issuer(_loaded):
+            with state_lock:
+                issued.append("plan/start/approve")
+            return copy.deepcopy(granted)
+
+        def recorder(_loaded, policy_value):
+            with state_lock:
+                if state["grant"] is None:
+                    state["grant"] = copy.deepcopy(policy_value)
+                self.assertEqual(state["grant"], policy_value)
+            return {"ready": True}
+
+        policy = {
+            "peers": {"owner": {"operations": ["swamp.approve_linear_delete_preview"]}}
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            def confirm(index):
+                return execute_request(
+                    {
+                        "request_id": f"11111111-1111-4111-8111-{index:012d}",
+                        "integration": "swamp",
+                        "operation": "approve_linear_delete_preview",
+                        "arguments": {"approval_reference": preview["approval_reference"]},
+                        "mode": "apply",
+                    },
+                    caller="owner",
+                    policy=policy,
+                    runner=mock.Mock(),
+                    workspace=Path(tmp),
+                    audit_path=Path(tmp) / "audit.jsonl",
+                    session_id=preview["session_id"],
+                    preview_loader=loader,
+                    attestation_issuer=issuer,
+                    approval_attempt_recorder=lambda _value: {"claimed": True},
+                    approval_recorder=recorder,
+                    approval_lock_root=Path(tmp) / "locks",
+                )
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(pool.map(confirm, (1, 2)))
+
+        self.assertEqual(issued, ["plan/start/approve"])
+        self.assertEqual(state["grant"], granted)
+        self.assertEqual(
+            [result["result"] for result in results],
+            [
+                {"approval_reference": preview["approval_reference"], "ready": True},
+                {"approval_reference": preview["approval_reference"], "ready": True},
+            ],
+        )
+
+    def test_delete_preview_attestation_uses_only_dedicated_linear_workflows(self):
+        preview = {
+            "approval_intent": {
+                "operation": "delete_linear_entity",
+                "target": {"type": "issue", "selector": {"identifier": "SIS-77"}},
+                "change": {},
+            },
+            "before_state_hash": "b" * 64,
+            "expires_at": "2026-09-06T20:00:00Z",
+        }
+        granted = {"mode": "owner_approved", "approval": {"checksum": "d" * 64}}
+        responses = [
+            {
+                "result": {
+                    "workflowRunId": "11111111-1111-4111-8111-111111111111",
+                    "artifactVersion": 7,
+                    "plan": {"checksum": "c" * 64},
+                }
+            },
+            {"result": {"id": "22222222-2222-4222-8222-222222222222"}},
+            {"result": {"policy": granted}},
+        ]
+        with mock.patch(
+            "plugins.ops_broker.broker.execute_request", side_effect=responses
+        ) as invoke:
+            result = _issue_linear_delete_attestation(
+                preview,
+                policy={},
+                runner=mock.Mock(),
+                workspace=Path("/reviewed/runtime"),
+                audit_path=Path("/audit.jsonl"),
+            )
+
+        self.assertEqual(result, granted)
+        operations = [call.args[0]["operation"] for call in invoke.call_args_list]
+        self.assertEqual(
+            operations,
+            [
+                "plan_linear_destructive_owner_approval",
+                "start_linear_destructive_owner_approval_attest",
+                "approve_linear_destructive_owner_approval_attest",
+            ],
+        )
+        self.assertNotIn("run_readonly_workflow", operations)
+        plan_request = invoke.call_args_list[0].args[0]
+        self.assertEqual(
+            plan_request["arguments"],
+            {
+                "intent": preview["approval_intent"],
+                "before_state_hash": preview["before_state_hash"],
+                "expires_at": preview["expires_at"],
+            },
         )
 
     def test_public_schema_allows_full_owner_attestation_start_shape(self):

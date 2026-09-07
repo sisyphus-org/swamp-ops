@@ -5,6 +5,7 @@ import copy
 import hashlib
 import json
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -159,7 +160,7 @@ def _impact(client: Any, entity_type: str, entity: dict[str, Any]) -> dict[str, 
     return {"linked_projects": client.list_initiative_projects(entity["id"])}
 
 
-def _canonical_impact(impact: dict[str, list[Any]]) -> dict[str, list[Any]]:
+def _canonical_raw_impact(impact: dict[str, list[Any]]) -> dict[str, list[Any]]:
     if not isinstance(impact, dict) or any(not isinstance(items, list) for items in impact.values()):
         raise RuntimeError("Linear dependency impact inventory is invalid")
     normalized: dict[str, list[Any]] = {}
@@ -176,12 +177,32 @@ def _canonical_impact(impact: dict[str, list[Any]]) -> dict[str, list[Any]]:
             raise RuntimeError(
                 "Linear dependency impact inventory contains duplicate raw IDs"
             )
-        values = [_scrub(item) for item in impact[key]]
+        values = copy.deepcopy(impact[key])
         values.sort(key=lambda item: json.dumps(
             item, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         ))
         normalized[key] = values
     return normalized
+
+
+def _canonical_impact(impact: dict[str, list[Any]]) -> dict[str, list[Any]]:
+    return {
+        key: [_scrub(item) for item in items]
+        for key, items in _canonical_raw_impact(impact).items()
+    }
+
+
+def _trusted_before_state(
+    entity: dict[str, Any], raw_impact: dict[str, list[Any]]
+) -> dict[str, Any]:
+    """Canonical internal state used only for approval identity binding."""
+    impact = _canonical_raw_impact(raw_impact)
+    return {
+        "entity": copy.deepcopy(entity),
+        "archived": False,
+        "impact": impact,
+        "impact_counts": {key: len(items) for key, items in impact.items()},
+    }
 
 
 def _load(path: Path) -> dict[str, dict[str, Any]]:
@@ -532,12 +553,16 @@ def execute(
     )
     entries = _load(recovery_path) if recovery_path else {}
     recovery = entries.get(key_hash)
-    approval_ref = command["policy"]["approval"]
-    binding = {
-        "approval_checksum": approval_ref["checksum"],
-        "intent_hash": approval_ref["intent_hash"],
-        "command_hash": _hash(command),
-    }
+    approval_ref = command["policy"].get("approval")
+    binding = (
+        {
+            "approval_checksum": approval_ref["checksum"],
+            "intent_hash": approval_ref["intent_hash"],
+            "command_hash": _hash(command),
+        }
+        if isinstance(approval_ref, dict)
+        else {}
+    )
     if recovery is not None and (
         recovery.get("request_hash") != request_hash
         or any(recovery.get(key) != value for key, value in binding.items())
@@ -598,6 +623,8 @@ def execute(
     raw_impact = _impact(client, entity_type, entity)
     impact = _canonical_impact(raw_impact)
     impact_counts = {key: len(items) for key, items in impact.items()}
+    trusted_before = _trusted_before_state(entity, raw_impact)
+    before_state_hash = _hash(trusted_before)
     before = {
         "entity": _scrub(entity), "archived": False,
         "impact": impact, "impact_counts": impact_counts,
@@ -615,6 +642,7 @@ def execute(
         return {
             **base, "result": "planned", "before": before, "after": after,
             "plan": plan, "no_op": False, "verified": False,
+            "before_state_hash": before_state_hash,
         }
     if recovery_path is None:
         raise error_cls("entity destruction apply requires recovery journal")
@@ -624,10 +652,15 @@ def execute(
         else _delete_recovery_manifest(entity_type, entity, raw_impact)
     )
     manifest_hash = _hash(recovery_manifest)
+    if (
+        not isinstance(approval_ref, dict)
+        or approval_ref.get("before_state_hash") != before_state_hash
+    ):
+        raise error_cls("entity destruction final before-state drifted from approval")
     entry = {
         "request_hash": request_hash, **binding,
-        "before_state_hash": _hash(before), "after_state_hash": _hash(after),
-        "impact_before_hash": _hash(impact), "phase": "prepared",
+        "before_state_hash": before_state_hash, "after_state_hash": _hash(after),
+        "impact_before_hash": _hash(trusted_before["impact"]), "phase": "prepared",
         "recovery_manifest": recovery_manifest,
         "manifest_hash": manifest_hash,
     }
@@ -676,5 +709,51 @@ def execute(
     return {
         **base, "result": "applied", "before": before, "after": after,
         "plan": plan, "no_op": False, "verified": True,
+        "before_state_hash": before_state_hash,
         "recovery_evidence": evidence(entry),
+    }
+
+
+def preview_delete(
+    client: Any,
+    command: dict[str, Any],
+    *,
+    error_cls: type[Exception],
+) -> dict[str, Any]:
+    """Return the exact existing delete plan without creating mutation authority."""
+    delete_command = copy.deepcopy(command)
+    delete_command["operation"] = "delete_linear_entity"
+    planned = execute(
+        client,
+        delete_command,
+        mode="plan",
+        journal_path=None,
+        key_hash="",
+        request_hash="",
+        error_cls=error_cls,
+    )
+    before = copy.deepcopy(planned["before"])
+    before["impact"]["children"] = [
+        {"identifier": child.get("identifier"), "title": child.get("title")}
+        for child in before["impact"]["children"]
+    ]
+    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=15)).replace(
+        microsecond=0
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return {
+        **planned,
+        "operation": "preview_delete_linear_entity",
+        "before": before,
+        "mode": "apply",
+        "result": "read",
+        "no_op": True,
+        "verified": True,
+        "approval_intent": {
+            "operation": "delete_linear_entity",
+            "target": copy.deepcopy(command["target"]),
+            "change": {},
+        },
+        "before_state_hash": planned["before_state_hash"],
+        "expires_at": expires_at,
+        "delete_semantics": "recoverable_trash_30_days",
     }

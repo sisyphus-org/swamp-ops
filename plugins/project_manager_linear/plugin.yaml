@@ -1,9 +1,9 @@
 name: project-manager-linear
-version: 1.5.0
+version: 1.6.0
 description: >-
   Deterministic PM Linear lane with compare-before-set issue moves, direct
   writable-state transitions, reserved duplicate relation handling,
-  owner-approved destructive mutations, and bounded ordered bulk orchestration.
+  trusted delete previews, owner-approved destructive mutations, and bounded ordered bulk orchestration.
 author: sisyphus-org
 kind: backend
 provides_tools:

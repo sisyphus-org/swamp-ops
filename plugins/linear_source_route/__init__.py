@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Any, Callable
 
 from .audit import audit_route as bundled_audit_route
@@ -14,8 +14,11 @@ from .calendar_route import (
 from .route import (
     COMMENT_REQUEST,
     CREDENTIAL_SHAPES,
+    LINEAR_DELETE_APPROVAL_REFERENCE,
     RouteError,
     SourceContext,
+    _canonical_sha256,
+    _validate_approval_reference,
     is_source_profile,
     route_request,
 )
@@ -243,6 +246,7 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                     "link_project_to_initiative",
                     "search_linear",
                     "inventory_linear",
+                    "approve_delete_linear_entity",
                     "archive_linear_entity",
                     "delete_linear_entity",
                 ],
@@ -304,6 +308,10 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                     {"required": ["name"], "minProperties": 1, "maxProperties": 1},
                     {"required": ["project", "name"], "minProperties": 2, "maxProperties": 2},
                 ],
+            },
+            "approval_reference": {
+                "type": "string",
+                "pattern": "^linear-delete-approval:v1:[0-9a-f]{64}$",
             },
             "identifier": {
                 "type": "string",
@@ -543,10 +551,33 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                 "properties": {"operation": {"const": "inventory_linear"}},
             },
             {
+                "required": ["operation", "entity_type", "selector"],
+                "maxProperties": 3,
+                "properties": {
+                    "operation": {"const": "delete_linear_entity"},
+                    "entity_type": {"const": "issue"},
+                },
+                "not": {"required": ["approval"]},
+            },
+            {
+                "required": ["operation", "entity_type", "selector", "approval"],
+                "maxProperties": 4,
+                "properties": {
+                    "operation": {"const": "delete_linear_entity"}
+                },
+            },
+            {
+                "required": ["operation", "approval_reference"],
+                "maxProperties": 2,
+                "properties": {
+                    "operation": {"const": "approve_delete_linear_entity"}
+                },
+            },
+            {
                 "required": ["operation", "entity_type", "selector", "approval"],
                 "properties": {
                     "operation": {
-                        "enum": ["archive_linear_entity", "delete_linear_entity"]
+                        "const": "archive_linear_entity"
                     }
                 },
             },
@@ -949,6 +980,194 @@ class HermesKanbanBoard:
         finally:
             conn.close()
 
+    def record_delete_preview(
+        self,
+        task_id: str,
+        source: SourceContext,
+        result: dict[str, Any],
+    ) -> None:
+        """Persist the protected preview binding for the trusted owner broker."""
+        reference = result.get("approval_reference")
+        if (
+            not isinstance(reference, str)
+            or LINEAR_DELETE_APPROVAL_REFERENCE.fullmatch(reference) is None
+        ):
+            raise RouteError("delete preview approval reference is invalid")
+        payload = {
+            "schema_version": "linear-delete-preview.v1",
+            "approval_reference": reference,
+            "source": {
+                "profile": source.profile,
+                "platform": source.platform,
+                "chat_id": source.chat_id,
+                "user_id": source.user_id,
+                "thread_id": source.thread_id,
+                "session_id": source.session_id,
+            },
+            "approval_intent": result.get("approval_intent"),
+            "before_state_hash": result.get("before_state_hash"),
+            "expires_at": result.get("expires_at"),
+        }
+        conn = self._connect()
+        try:
+            with self.kb.write_txn(conn):
+                task = self.kb.get_task(conn, task_id)
+                if (
+                    task is None
+                    or getattr(task, "status", None) != "done"
+                    or getattr(task, "assignee", None) != "project-manager"
+                    or getattr(task, "session_id", None) != source.session_id
+                ):
+                    raise RouteError("delete preview task binding is invalid")
+                rows = conn.execute(
+                    "SELECT platform, chat_id, thread_id, user_id, chat_type, "
+                    "notifier_profile, delivery_mode FROM kanban_notify_subs "
+                    "WHERE task_id = ?",
+                    (task_id,),
+                ).fetchall()
+                route_fields = (
+                    "platform", "chat_id", "thread_id", "user_id", "chat_type",
+                    "notifier_profile", "delivery_mode",
+                )
+                expected_route = (
+                    source.platform,
+                    source.chat_id,
+                    source.thread_id,
+                    source.user_id,
+                    "dm",
+                    source.profile,
+                    "wake",
+                )
+                actual_routes = [tuple(row[key] for key in route_fields) for row in rows]
+                if actual_routes != [expected_route]:
+                    raise RouteError("delete preview source route binding is invalid")
+                prior = conn.execute(
+                    "SELECT payload FROM task_events WHERE task_id = ? AND kind = ?",
+                    (task_id, "linear_delete_preview_ready"),
+                ).fetchall()
+                if prior:
+                    if len(prior) != 1 or json.loads(prior[0]["payload"]) != payload:
+                        raise RouteError("delete preview protected binding conflicts")
+                    return
+                self.kb._append_event(
+                    conn,
+                    task_id,
+                    "linear_delete_preview_ready",
+                    payload,
+                )
+        finally:
+            conn.close()
+
+    def delete_preview_requires_successor(self, task_id: str) -> bool:
+        """Refresh a consumed reference whose approval outcome is unknown."""
+        conn = self._connect()
+        try:
+            attempts = conn.execute(
+                "SELECT COUNT(*) FROM task_events WHERE task_id = ? AND kind = ?",
+                (task_id, "linear_delete_approval_attempted"),
+            ).fetchone()[0]
+            grants = conn.execute(
+                "SELECT COUNT(*) FROM task_events WHERE task_id = ? AND kind = ?",
+                (task_id, "linear_delete_approval_granted"),
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        if attempts not in {0, 1} or grants not in {0, 1}:
+            raise RouteError("delete approval attempt state is invalid")
+        return attempts == 1 and grants == 0
+
+    def approved_delete_request(
+        self, reference: str, source: SourceContext
+    ) -> dict[str, Any]:
+        """Load one broker-granted delete without exposing its policy to the model."""
+        if LINEAR_DELETE_APPROVAL_REFERENCE.fullmatch(reference) is None:
+            raise RouteError("delete approval reference is invalid")
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT t.id, t.status, t.assignee, t.session_id, e.payload "
+                "FROM task_events e JOIN tasks t ON t.id = e.task_id "
+                "WHERE e.kind = ? AND e.payload LIKE ?",
+                ("linear_delete_preview_ready", f'%\"approval_reference\": \"{reference}\"%'),
+            ).fetchall()
+            if len(rows) != 1:
+                raise RouteError("delete preview approval binding is missing or ambiguous")
+            row = rows[0]
+            if (
+                row["status"] != "done"
+                or row["assignee"] != "project-manager"
+                or row["session_id"] != source.session_id
+            ):
+                raise RouteError("delete preview approval task/session binding is invalid")
+            preview = json.loads(row["payload"])
+            grants = conn.execute(
+                "SELECT payload FROM task_events WHERE task_id = ? AND kind = ?",
+                (row["id"], "linear_delete_approval_granted"),
+            ).fetchall()
+            if len(grants) != 1:
+                raise RouteError("delete approval is missing or ambiguous")
+            grant = json.loads(grants[0]["payload"])
+        finally:
+            conn.close()
+        expected_source = {
+            "profile": source.profile,
+            "platform": source.platform,
+            "chat_id": source.chat_id,
+            "user_id": source.user_id,
+            "thread_id": source.thread_id,
+            "session_id": source.session_id,
+        }
+        if (
+            not isinstance(preview, dict)
+            or preview.get("schema_version") != "linear-delete-preview.v1"
+            or preview.get("approval_reference") != reference
+            or preview.get("source") != expected_source
+            or not isinstance(grant, dict)
+            or set(grant)
+            != {
+                "schema_version",
+                "approval_reference",
+                "preview_hash",
+                "policy",
+            }
+            or grant.get("schema_version") != "linear-delete-approval.v1"
+            or grant.get("approval_reference") != reference
+            or grant.get("preview_hash") != _canonical_sha256(preview)
+        ):
+            raise RouteError("delete approval protected binding is invalid")
+        intent = preview.get("approval_intent")
+        if (
+            not isinstance(intent, dict)
+            or set(intent) != {"operation", "target", "change"}
+            or intent.get("operation") != "delete_linear_entity"
+            or intent.get("change") != {}
+            or not isinstance(intent.get("target"), dict)
+            or set(intent["target"]) != {"type", "selector"}
+            or intent["target"].get("type") != "issue"
+        ):
+            raise RouteError("delete approval intent is invalid")
+        policy = grant.get("policy")
+        approval = _validate_approval_reference(
+            policy.get("approval") if isinstance(policy, dict) else None
+        )
+        if (
+            policy != {"mode": "owner_approved", "approval": approval}
+            or approval["intent_hash"] != _canonical_sha256(intent)
+            or approval["before_state_hash"] != preview.get("before_state_hash")
+            or approval["expires_at"] != preview.get("expires_at")
+            or datetime.strptime(approval["expires_at"], "%Y-%m-%dT%H:%M:%SZ").replace(
+                tzinfo=timezone.utc
+            )
+            <= datetime.now(timezone.utc)
+        ):
+            raise RouteError("delete approval is stale or does not match the preview")
+        return {
+            "operation": "delete_linear_entity",
+            "entity_type": "issue",
+            "selector": dict(intent["target"]["selector"]),
+            "approval": approval,
+        }
+
     def set_wake_route(self, task_id: str, source: SourceContext) -> None:
         conn = self._connect()
         try:
@@ -1317,6 +1536,122 @@ def _public_target(result: dict[str, Any]) -> tuple[dict[str, Any], dict[str, An
         }
     if operation in {"search_linear", "inventory_linear"}:
         return _public_workspace_read(result)
+    if operation == "preview_delete_linear_entity":
+        target = result.get("target")
+        before = result.get("before")
+        reference = result.get("approval_reference")
+        if (
+            not isinstance(target, dict)
+            or set(target) != {"type", "selector"}
+            or target.get("type") != "issue"
+            or not isinstance(target.get("selector"), dict)
+            or set(target["selector"]) != {"identifier"}
+            or not isinstance(before, dict)
+            or before.get("archived") is not False
+            or not isinstance(reference, str)
+            or LINEAR_DELETE_APPROVAL_REFERENCE.fullmatch(reference) is None
+        ):
+            raise RouteError("verified delete preview lacks exact public facts")
+        identifier = target["selector"].get("identifier")
+        entity = before.get("entity")
+        impact = before.get("impact")
+        counts = before.get("impact_counts")
+        if (
+            not isinstance(identifier, str)
+            or PUBLIC_ISSUE_IDENTIFIER.fullmatch(identifier) is None
+            or not isinstance(entity, dict)
+            or entity.get("identifier") != identifier
+            or not isinstance(impact, dict)
+            or set(impact) != {"children", "relations"}
+            or not isinstance(impact.get("children"), list)
+            or not isinstance(impact.get("relations"), list)
+            or counts
+            != {
+                "children": len(impact["children"]),
+                "relations": len(impact["relations"]),
+            }
+        ):
+            raise RouteError("verified delete preview has invalid impact facts")
+        issue_target = _public_issue_target(
+            {"type": "issue", "identifier": identifier, "url": entity.get("url")}
+        )
+        project = entity.get("project")
+        milestone = entity.get("projectMilestone")
+        public_children = []
+        for child in impact["children"]:
+            identifier_value = child.get("identifier") if isinstance(child, dict) else None
+            if (
+                not isinstance(child, dict)
+                or set(child) != {"identifier", "title"}
+                or not isinstance(identifier_value, str)
+                or PUBLIC_ISSUE_IDENTIFIER.fullmatch(identifier_value) is None
+            ):
+                raise RouteError("verified delete preview has invalid child impact")
+            public_children.append(
+                {
+                    "identifier": identifier_value,
+                    "title": _public_text(child.get("title"), "child title"),
+                }
+            )
+        public_relations = []
+        for relation in impact["relations"]:
+            if not isinstance(relation, dict):
+                raise RouteError("verified delete preview has invalid relation impact")
+            relation_type = relation.get("type")
+            left = relation.get("issue")
+            right = relation.get("relatedIssue")
+            endpoints = [
+                endpoint.get("identifier") if isinstance(endpoint, dict) else None
+                for endpoint in (left, right)
+            ]
+            if (
+                relation_type not in {"blocks", "related", "duplicate"}
+                or endpoints.count(identifier) != 1
+                or any(
+                    not isinstance(value, str)
+                    or PUBLIC_ISSUE_IDENTIFIER.fullmatch(value) is None
+                    for value in endpoints
+                )
+            ):
+                raise RouteError("verified delete preview has invalid relation impact")
+            peer = endpoints[1] if endpoints[0] == identifier else endpoints[0]
+            public_relations.append({"type": relation_type, "identifier": peer})
+        preview = {
+            "identifier": identifier,
+            "title": _public_text(entity.get("title"), "issue title"),
+            "url": issue_target["url"],
+            "project": (
+                None
+                if project is None
+                else _public_text(project.get("name") if isinstance(project, dict) else None, "project name")
+            ),
+            "milestone": (
+                None
+                if milestone is None
+                else _public_text(
+                    milestone.get("name") if isinstance(milestone, dict) else None,
+                    "milestone name",
+                )
+            ),
+            "children": public_children,
+            "relations": public_relations,
+            "impact_counts": {
+                "children": len(public_children),
+                "relations": len(public_relations),
+            },
+            "delete_semantics": result.get("delete_semantics"),
+            "expires_at": result.get("expires_at"),
+        }
+        if (
+            preview["delete_semantics"] != "recoverable_trash_30_days"
+            or not isinstance(preview["expires_at"], str)
+            or not re.fullmatch(
+                r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z",
+                preview["expires_at"],
+            )
+        ):
+            raise RouteError("verified delete preview has invalid approval metadata")
+        return issue_target, {"delete_preview": preview, "approval_reference": reference}
     if operation in {"archive_linear_entity", "delete_linear_entity"}:
         target = result.get("target")
         if (
@@ -1771,6 +2106,16 @@ def _public_result(result: dict[str, Any]) -> dict[str, Any]:
             "changed": outcome == "applied",
         }
         target, context = _public_target(verified)
+        if verified.get("operation") == "preview_delete_linear_entity":
+            if (
+                not isinstance(context, dict)
+                or set(context) != {"delete_preview", "approval_reference"}
+            ):
+                raise RouteError("completed delete preview lacks public approval facts")
+            public["phase"] = "awaiting_approval"
+            public["preview"] = context["delete_preview"]
+            public["approval_reference"] = context["approval_reference"]
+            return public
         public["target"] = target
         if context is not None:
             public["context"] = context
@@ -1819,7 +2164,26 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
         ):
             request = dict(args)
         elif (
-            args.get("operation") in {"archive_linear_entity", "delete_linear_entity"}
+            args.get("operation") == "delete_linear_entity"
+            and set(args) == {"operation", "entity_type", "selector"}
+            and args.get("entity_type") == "issue"
+        ):
+            request = {**args, "operation": "preview_delete_linear_entity"}
+        elif (
+            args.get("operation") == "delete_linear_entity"
+            and set(args) == {"operation", "entity_type", "selector", "approval"}
+        ):
+            request = dict(args)
+        elif (
+            args.get("operation") == "approve_delete_linear_entity"
+            and set(args) == {"operation", "approval_reference"}
+            and isinstance(args.get("approval_reference"), str)
+            and LINEAR_DELETE_APPROVAL_REFERENCE.fullmatch(args["approval_reference"])
+            is not None
+        ):
+            request = dict(args)
+        elif (
+            args.get("operation") == "archive_linear_entity"
             and set(args) == {"operation", "entity_type", "selector", "approval"}
         ):
             request = dict(args)
@@ -1999,7 +2363,16 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
         )
         board_factory = kwargs.get("board_factory") or HermesKanbanBoard
         board = board_factory(source_profile=source.profile)
-        internal_result = route_request(request, source=source, board=board)
+        if isinstance(request, dict) and request.get("operation") == "approve_delete_linear_entity":
+            request = board.approved_delete_request(
+                request["approval_reference"], source
+            )
+        route_options = {}
+        if kwargs.get("now_factory") is not None:
+            route_options["now_factory"] = kwargs["now_factory"]
+        internal_result = route_request(
+            request, source=source, board=board, **route_options
+        )
         return json.dumps(
             _public_result(internal_result), ensure_ascii=False, sort_keys=True
         )

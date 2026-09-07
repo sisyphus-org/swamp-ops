@@ -1,10 +1,12 @@
 import concurrent.futures
 import contextlib
+import hashlib
 import json
 import os
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -22,10 +24,17 @@ from plugins.linear_source_route import (  # noqa: E402
     _public_result,
     handle_linear_source_request,
 )
+from plugins.linear_source_route import route as source_route  # noqa: E402
 from plugins.linear_source_route.route import (  # noqa: E402
     RouteError,
     SourceContext,
     route_request,
+)
+from plugins.ops_broker.broker import (  # noqa: E402
+    BrokerError,
+    _load_linear_delete_preview,
+    _record_linear_delete_approval,
+    _record_linear_delete_approval_attempt,
 )
 
 
@@ -426,6 +435,250 @@ class AdapterTests(unittest.TestCase):
             self.assertEqual(branch["required"], required)
         self.assertNotIn("relation_id", parameters["properties"])
 
+    def test_protected_delete_preview_and_broker_grant_round_trip_in_real_kanban_db(self):
+        from hermes_cli import kanban_db as kb
+
+        source = SourceContext(
+            session_id="20260906_120000_abcdef12",
+            profile="default",
+            platform="telegram",
+            chat_id="442308262",
+            user_id="442308262",
+            chat_type="dm",
+            thread_id="454007",
+        )
+        command_value = source_route.parse_linear_request(
+            {
+                "operation": "preview_delete_linear_entity",
+                "entity_type": "issue",
+                "selector": {"identifier": "SIS-77"},
+            },
+            source_profile="default",
+        ).command
+        before = {
+            "entity": {
+                "identifier": "SIS-77",
+                "title": "Disposable",
+                "url": "https://linear.app/example/issue/SIS-77/disposable",
+                "project": {"name": "P"},
+                "projectMilestone": {"name": "M"},
+            },
+            "archived": False,
+            "impact": {"children": [], "relations": []},
+            "impact_counts": {"children": 0, "relations": 0},
+        }
+        before_hash = source_route._canonical_sha256(before)
+        result = {
+            "schema_version": "linear-result.v2",
+            "command_id": command_value["command_id"],
+            "correlation_id": command_value["correlation_id"],
+            "idempotency_key": command_value["idempotency_key"],
+            "source_profile": "default",
+            "operation": "preview_delete_linear_entity",
+            "mode": "apply",
+            "target": command_value["target"],
+            "result": "read",
+            "before": before,
+            "after": {"present": False},
+            "plan": [{"action": "delete_linear_entity"}],
+            "no_op": True,
+            "verified": True,
+            "approval_intent": {
+                "operation": "delete_linear_entity",
+                "target": command_value["target"],
+                "change": {},
+            },
+            "before_state_hash": before_hash,
+            "expires_at": "2099-09-06T20:00:00Z",
+            "delete_semantics": "recoverable_trash_30_days",
+        }
+        approval = {
+            "workflow": "linear-destructive-owner-approval-attest",
+            "model": "linear-destructive-owner-approval-attest",
+            "run_id": "11111111-1111-4111-8111-111111111111",
+            "artifact_version": 1,
+            "checksum": "a" * 64,
+            "intent_hash": source_route._canonical_sha256(result["approval_intent"]),
+            "before_state_hash": before_hash,
+            "expires_at": result["expires_at"],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "kanban.db"
+            with mock.patch.dict(os.environ, {"HERMES_KANBAN_DB": str(db_path)}):
+                kb.init_db(db_path=db_path)
+                board = HermesKanbanBoard(
+                    board="default", source_profile="default", kb=kb
+                )
+                delivery_key = "linear-delivery:v2:" + "e" * 32
+                task, _created = board.get_or_create_task(
+                    delivery_key,
+                    title="Linear preview_delete_linear_entity SIS-77",
+                    body=source_route.build_task_body(command_value),
+                    assignee="project-manager",
+                    skills=["project-manager-linear-worker"],
+                    triage=True,
+                    idempotency_key=delivery_key,
+                    session_id=source.session_id,
+                    max_runtime_seconds=300,
+                )
+                board.set_wake_route(task["id"], source)
+                board.release(task["id"], "route verified")
+                conn = kb.connect(db_path=db_path)
+                try:
+                    self.assertTrue(kb.complete_task(conn, task["id"], result=json.dumps(result)))
+                    completed = kb.get_task(conn, task["id"])
+                finally:
+                    conn.close()
+                reference = source_route._delete_preview_reference(
+                    {"id": task["id"], "session_id": source.session_id},
+                    result,
+                    source,
+                )
+                protected = {**result, "approval_reference": reference}
+                board.record_delete_preview(task["id"], source, protected)
+                board.record_delete_preview(task["id"], source, protected)
+                owner_policy = {
+                    "ownerIdentities": [
+                        {
+                            "source": "telegram",
+                            "user_id": source.user_id,
+                            "caller": "owner",
+                        }
+                    ]
+                }
+                loaded = _load_linear_delete_preview(
+                    reference,
+                    source.session_id,
+                    policy=owner_policy,
+                    kb=kb,
+                    now=datetime(2099, 9, 6, 19, 50, tzinfo=timezone.utc),
+                )
+                self.assertIsNotNone(loaded)
+                assert loaded is not None
+                with self.assertRaisesRegex(BrokerError, "session|binding"):
+                    _load_linear_delete_preview(
+                        reference,
+                        "20990906_120000_deadbeef",
+                        policy=owner_policy,
+                        kb=kb,
+                        now=datetime(2099, 9, 6, 19, 50, tzinfo=timezone.utc),
+                    )
+                with self.assertRaisesRegex(BrokerError, "owner|binding"):
+                    _load_linear_delete_preview(
+                        reference,
+                        source.session_id,
+                        policy={"ownerIdentities": []},
+                        kb=kb,
+                        now=datetime(2099, 9, 6, 19, 50, tzinfo=timezone.utc),
+                    )
+                with self.assertRaisesRegex(BrokerError, "expired|TTL"):
+                    _load_linear_delete_preview(
+                        reference,
+                        source.session_id,
+                        policy=owner_policy,
+                        kb=kb,
+                        now=datetime(2099, 9, 6, 20, 0, 1, tzinfo=timezone.utc),
+                    )
+                _record_linear_delete_approval_attempt(loaded, kb=kb)
+                attempted = _load_linear_delete_preview(
+                    reference,
+                    source.session_id,
+                    policy=owner_policy,
+                    kb=kb,
+                    now=datetime(2099, 9, 6, 19, 50, tzinfo=timezone.utc),
+                )
+                assert attempted is not None
+                self.assertTrue(attempted["approval_attempted"])
+                _record_linear_delete_approval(
+                    loaded,
+                    {"mode": "owner_approved", "approval": approval},
+                    kb=kb,
+                )
+                _record_linear_delete_approval(
+                    loaded,
+                    {"mode": "owner_approved", "approval": approval},
+                    kb=kb,
+                )
+                replayed = _load_linear_delete_preview(
+                    reference,
+                    source.session_id,
+                    policy=owner_policy,
+                    kb=kb,
+                    now=datetime(2099, 9, 6, 19, 50, tzinfo=timezone.utc),
+                )
+                assert replayed is not None
+                self.assertEqual(
+                    replayed["granted_policy"],
+                    {"mode": "owner_approved", "approval": approval},
+                )
+                conn = kb.connect(db_path=db_path)
+                try:
+                    original_grant_payload = conn.execute(
+                        "SELECT payload FROM task_events WHERE task_id = ? AND kind = ?",
+                        (task["id"], "linear_delete_approval_granted"),
+                    ).fetchone()[0]
+                    extra_key_grant = json.loads(original_grant_payload)
+                    extra_key_grant["unexpected"] = True
+                    conn.execute(
+                        "UPDATE task_events SET payload = ? WHERE task_id = ? AND kind = ?",
+                        (
+                            json.dumps(extra_key_grant, sort_keys=True),
+                            task["id"],
+                            "linear_delete_approval_granted",
+                        ),
+                    )
+                    conn.commit()
+                    with self.assertRaisesRegex(BrokerError, "grant binding"):
+                        _load_linear_delete_preview(
+                            reference,
+                            source.session_id,
+                            policy=owner_policy,
+                            kb=kb,
+                            now=datetime(2099, 9, 6, 19, 50, tzinfo=timezone.utc),
+                        )
+                    conn.execute(
+                        "UPDATE task_events SET payload = ? WHERE task_id = ? AND kind = ?",
+                        (
+                            original_grant_payload,
+                            task["id"],
+                            "linear_delete_approval_granted",
+                        ),
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+                conn = kb.connect(db_path=db_path)
+                try:
+                    preview_count = conn.execute(
+                        "SELECT COUNT(*) FROM task_events WHERE task_id = ? AND kind = ?",
+                        (task["id"], "linear_delete_preview_ready"),
+                    ).fetchone()[0]
+                    grant_count = conn.execute(
+                        "SELECT COUNT(*) FROM task_events WHERE task_id = ? AND kind = ?",
+                        (task["id"], "linear_delete_approval_granted"),
+                    ).fetchone()[0]
+                    attempt_count = conn.execute(
+                        "SELECT COUNT(*) FROM task_events WHERE task_id = ? AND kind = ?",
+                        (task["id"], "linear_delete_approval_attempted"),
+                    ).fetchone()[0]
+                finally:
+                    conn.close()
+                approved = board.approved_delete_request(reference, source)
+
+        self.assertIsNotNone(completed)
+        self.assertEqual(preview_count, 1)
+        self.assertEqual(grant_count, 1)
+        self.assertEqual(attempt_count, 1)
+        self.assertEqual(
+            approved,
+            {
+                "operation": "delete_linear_entity",
+                "entity_type": "issue",
+                "selector": {"identifier": "SIS-77"},
+                "approval": approval,
+            },
+        )
+
     def test_adapter_reads_latest_persisted_block_reason(self):
         from hermes_cli import kanban_db as kb
 
@@ -690,6 +943,360 @@ class AdapterTests(unittest.TestCase):
 
 
 class PluginTests(unittest.TestCase):
+    def test_delete_preview_schema_and_handler_queue_read_only_pm_command(self):
+        request = {
+            "operation": "delete_linear_entity",
+            "entity_type": "issue",
+            "selector": {"identifier": "SIS-77"},
+        }
+        jsonschema.validate(request, LINEAR_SOURCE_REQUEST_SCHEMA["parameters"])
+        for forbidden in (
+            {**request, "approved": True},
+            {**request, "before_state_hash": "a" * 64},
+            {**request, "approval": {"approved": True}},
+        ):
+            with self.subTest(forbidden=forbidden), self.assertRaises(
+                jsonschema.ValidationError
+            ):
+                jsonschema.validate(forbidden, LINEAR_SOURCE_REQUEST_SCHEMA["parameters"])
+        session_values = {
+            "HERMES_SESSION_PROFILE": "default",
+            "HERMES_SESSION_PLATFORM": "telegram",
+            "HERMES_SESSION_CHAT_ID": "442308262",
+            "HERMES_SESSION_USER_ID": "442308262",
+            "HERMES_SESSION_CHAT_TYPE": "dm",
+            "HERMES_SESSION_THREAD_ID": "454007",
+            "HERMES_SESSION_ID": "20260906_120000_abcdef12",
+        }
+        fake_board = mock.Mock()
+
+        def create_task(_delivery_key, **kwargs):
+            command_value = json.loads(kwargs["body"])["command"]
+            self.assertEqual(command_value["operation"], "preview_delete_linear_entity")
+            self.assertEqual(
+                command_value["target"],
+                {"type": "issue", "selector": {"identifier": "SIS-77"}},
+            )
+            self.assertEqual(command_value["change"], {})
+            self.assertEqual(command_value["policy"], {"mode": "standard"})
+            return (
+                {
+                    "id": "t_1234abcd",
+                    "status": "triage",
+                    "session_id": kwargs["session_id"],
+                    "idempotency_key": kwargs["idempotency_key"],
+                },
+                True,
+            )
+
+        fake_board.get_or_create_task.side_effect = create_task
+        fake_board.audit_route.return_value = {"result": "pass"}
+        result = json.loads(
+            handle_linear_source_request(
+                request,
+                session_id=session_values["HERMES_SESSION_ID"],
+                board_factory=lambda **_kwargs: fake_board,
+                session_getter=lambda name, default="": session_values.get(name, default),
+                runtime_profile_getter=lambda: "default",
+            )
+        )
+        self.assertEqual(result, {"status": "queued"})
+
+    def test_fixed_approved_delete_matrix_remains_accepted_and_is_not_previewed(self):
+        approval = {
+            "workflow": "linear-destructive-owner-approval-attest",
+            "model": "linear-destructive-owner-approval-attest",
+            "run_id": "11111111-1111-4111-8111-111111111111",
+            "artifact_version": 1,
+            "checksum": "a" * 64,
+            "intent_hash": "b" * 64,
+            "before_state_hash": "c" * 64,
+            "expires_at": "2099-09-06T20:00:00Z",
+        }
+        selectors = {
+            "issue": {"identifier": "SIS-77"},
+            "project": {"name": "Exact project"},
+            "milestone": {"project": "Exact project", "name": "Exact milestone"},
+            "initiative": {"name": "Exact initiative"},
+        }
+        parameters = LINEAR_SOURCE_REQUEST_SCHEMA["parameters"]
+        delete_branches = [
+            branch
+            for branch in parameters["oneOf"]
+            if branch.get("properties", {}).get("operation", {}).get("const")
+            == "delete_linear_entity"
+        ]
+        self.assertEqual(len(delete_branches), 2)
+        self.assertEqual(
+            {tuple(branch["required"]) for branch in delete_branches},
+            {
+                ("operation", "entity_type", "selector"),
+                ("operation", "entity_type", "selector", "approval"),
+            },
+        )
+        for entity_type, selector in selectors.items():
+            request = {
+                "operation": "delete_linear_entity",
+                "entity_type": entity_type,
+                "selector": selector,
+                "approval": approval,
+            }
+            with self.subTest(entity_type=entity_type):
+                jsonschema.validate(request, parameters)
+        for entity_type in ("project", "milestone", "initiative"):
+            with self.subTest(unapproved_entity_type=entity_type), self.assertRaises(
+                jsonschema.ValidationError
+            ):
+                jsonschema.validate(
+                    {
+                        "operation": "delete_linear_entity",
+                        "entity_type": entity_type,
+                        "selector": selectors[entity_type],
+                    },
+                    parameters,
+                )
+
+        captured = []
+        session_values = {
+            "HERMES_SESSION_PROFILE": "default",
+            "HERMES_SESSION_PLATFORM": "telegram",
+            "HERMES_SESSION_CHAT_ID": "442308262",
+            "HERMES_SESSION_USER_ID": "442308262",
+            "HERMES_SESSION_CHAT_TYPE": "dm",
+            "HERMES_SESSION_THREAD_ID": "454007",
+            "HERMES_SESSION_ID": "20260906_120000_abcdef12",
+        }
+        with mock.patch(
+            "plugins.linear_source_route.route_request",
+            side_effect=lambda request, **_kwargs: captured.append(request)
+            or {"status": "queued"},
+        ):
+            result = json.loads(
+                handle_linear_source_request(
+                    {
+                        "operation": "delete_linear_entity",
+                        "entity_type": "project",
+                        "selector": selectors["project"],
+                        "approval": approval,
+                    },
+                    session_id=session_values["HERMES_SESSION_ID"],
+                    board_factory=lambda **_kwargs: mock.Mock(),
+                    session_getter=lambda name, default="": session_values.get(name, default),
+                    runtime_profile_getter=lambda: "default",
+                )
+            )
+        self.assertEqual(result, {"status": "queued"})
+        self.assertEqual(captured[0]["operation"], "delete_linear_entity")
+        self.assertEqual(captured[0]["entity_type"], "project")
+        self.assertEqual(captured[0]["approval"], approval)
+
+    def test_delete_preview_completion_exposes_only_safe_impact_and_opaque_reference(self):
+        request = {
+            "operation": "delete_linear_entity",
+            "entity_type": "issue",
+            "selector": {"identifier": "SIS-77"},
+        }
+        session_values = {
+            "HERMES_SESSION_PROFILE": "default",
+            "HERMES_SESSION_PLATFORM": "telegram",
+            "HERMES_SESSION_CHAT_ID": "442308262",
+            "HERMES_SESSION_USER_ID": "442308262",
+            "HERMES_SESSION_CHAT_TYPE": "dm",
+            "HERMES_SESSION_THREAD_ID": "454007",
+            "HERMES_SESSION_ID": "20260906_120000_abcdef12",
+        }
+        fake_board = mock.Mock()
+        captured: dict[str, str] = {}
+
+        def existing_task(delivery_key, **kwargs):
+            envelope = json.loads(kwargs["body"])
+            command_value = envelope["command"]
+            before = {
+                "entity": {
+                    "identifier": "SIS-77",
+                    "title": "Disposable verification issue",
+                    "url": "https://linear.app/example/issue/SIS-77/disposable-verification-issue",
+                    "project": {"name": "Hermes Foundation"},
+                    "projectMilestone": {"name": "Secure multi-agent operations"},
+                },
+                "archived": False,
+                "impact": {
+                    "children": [{"identifier": "SIS-78", "title": "Child"}],
+                    "relations": [
+                        {
+                            "type": "related",
+                            "issue": {"identifier": "SIS-77"},
+                            "relatedIssue": {"identifier": "SIS-79"},
+                        }
+                    ],
+                },
+                "impact_counts": {"children": 1, "relations": 1},
+            }
+            before_hash = hashlib.sha256(
+                json.dumps(
+                    before,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest()
+            captured["before_hash"] = before_hash
+            result = {
+                "schema_version": "linear-result.v2",
+                "command_id": command_value["command_id"],
+                "correlation_id": command_value["correlation_id"],
+                "idempotency_key": command_value["idempotency_key"],
+                "source_profile": command_value["source_profile"],
+                "operation": "preview_delete_linear_entity",
+                "mode": "apply",
+                "target": command_value["target"],
+                "result": "read",
+                "before": before,
+                "after": {"present": False},
+                "plan": [{"action": "delete_linear_entity"}],
+                "no_op": True,
+                "verified": True,
+                "approval_intent": {
+                    "operation": "delete_linear_entity",
+                    "target": command_value["target"],
+                    "change": {},
+                },
+                "before_state_hash": before_hash,
+                "expires_at": "2026-09-06T20:00:00Z",
+                "delete_semantics": "recoverable_trash_30_days",
+            }
+            return (
+                {
+                    "id": "t_1234abcd",
+                    "status": "done",
+                    "session_id": kwargs["session_id"],
+                    "idempotency_key": delivery_key,
+                    "body": json.dumps(envelope),
+                    "result": json.dumps(result),
+                },
+                False,
+            )
+
+        fake_board.get_or_create_task.side_effect = existing_task
+        public = json.loads(
+            handle_linear_source_request(
+                request,
+                session_id=session_values["HERMES_SESSION_ID"],
+                board_factory=lambda **_kwargs: fake_board,
+                session_getter=lambda name, default="": session_values.get(name, default),
+                runtime_profile_getter=lambda: "default",
+                now_factory=lambda: datetime(
+                    2026, 9, 6, 19, 50, tzinfo=timezone.utc
+                ),
+            )
+        )
+
+        self.assertEqual(public["status"], "completed")
+        self.assertFalse(public["changed"])
+        self.assertEqual(public["phase"], "awaiting_approval")
+        self.assertRegex(
+            public["approval_reference"], r"^linear-delete-approval:v1:[0-9a-f]{64}$"
+        )
+        self.assertEqual(
+            public["preview"],
+            {
+                "identifier": "SIS-77",
+                "title": "Disposable verification issue",
+                "url": "https://linear.app/example/issue/SIS-77/disposable-verification-issue",
+                "project": "Hermes Foundation",
+                "milestone": "Secure multi-agent operations",
+                "children": [{"identifier": "SIS-78", "title": "Child"}],
+                "relations": [
+                    {
+                        "type": "related",
+                        "identifier": "SIS-79",
+                    }
+                ],
+                "impact_counts": {"children": 1, "relations": 1},
+                "delete_semantics": "recoverable_trash_30_days",
+                "expires_at": "2026-09-06T20:00:00Z",
+            },
+        )
+        serialized = json.dumps(public, sort_keys=True)
+        self.assertNotIn(captured["before_hash"], serialized)
+        self.assertNotIn("approval_intent", serialized)
+        self.assertNotIn("before_state_hash", serialized)
+        fake_board.record_delete_preview.assert_called_once()
+        record_call = fake_board.record_delete_preview.call_args
+        self.assertEqual(record_call.args[0], "t_1234abcd")
+        self.assertEqual(record_call.args[1].session_id, session_values["HERMES_SESSION_ID"])
+        self.assertEqual(
+            record_call.args[2]["approval_reference"], public["approval_reference"]
+        )
+
+    def test_delete_approval_uses_only_opaque_reference_then_queues_bound_delete(self):
+        reference = "linear-delete-approval:v1:" + "a" * 64
+        request = {
+            "operation": "approve_delete_linear_entity",
+            "approval_reference": reference,
+        }
+        jsonschema.validate(request, LINEAR_SOURCE_REQUEST_SCHEMA["parameters"])
+        session_values = {
+            "HERMES_SESSION_PROFILE": "default",
+            "HERMES_SESSION_PLATFORM": "telegram",
+            "HERMES_SESSION_CHAT_ID": "442308262",
+            "HERMES_SESSION_USER_ID": "442308262",
+            "HERMES_SESSION_CHAT_TYPE": "dm",
+            "HERMES_SESSION_THREAD_ID": "454007",
+            "HERMES_SESSION_ID": "20260906_120000_abcdef12",
+        }
+        approval = {
+            "workflow": "linear-destructive-owner-approval-attest",
+            "model": "linear-destructive-owner-approval-attest",
+            "run_id": "11111111-1111-4111-8111-111111111111",
+            "artifact_version": 1,
+            "checksum": "b" * 64,
+            "intent_hash": "c" * 64,
+            "before_state_hash": "d" * 64,
+            "expires_at": "2026-09-06T20:00:00Z",
+        }
+        fake_board = mock.Mock()
+        fake_board.approved_delete_request.return_value = {
+            "operation": "delete_linear_entity",
+            "entity_type": "issue",
+            "selector": {"identifier": "SIS-77"},
+            "approval": approval,
+        }
+
+        def create_task(_delivery_key, **kwargs):
+            command_value = json.loads(kwargs["body"])["command"]
+            self.assertEqual(command_value["operation"], "delete_linear_entity")
+            self.assertEqual(command_value["policy"], {"mode": "owner_approved", "approval": approval})
+            return (
+                {
+                    "id": "t_8765dcba",
+                    "status": "triage",
+                    "session_id": kwargs["session_id"],
+                    "idempotency_key": kwargs["idempotency_key"],
+                },
+                True,
+            )
+
+        fake_board.get_or_create_task.side_effect = create_task
+        fake_board.audit_route.return_value = {"result": "pass"}
+        public = json.loads(
+            handle_linear_source_request(
+                request,
+                session_id=session_values["HERMES_SESSION_ID"],
+                board_factory=lambda **_kwargs: fake_board,
+                session_getter=lambda name, default="": session_values.get(name, default),
+                runtime_profile_getter=lambda: "default",
+            )
+        )
+
+        self.assertEqual(public, {"status": "queued"})
+        fake_board.approved_delete_request.assert_called_once()
+        self.assertEqual(fake_board.approved_delete_request.call_args.args[0], reference)
+        self.assertEqual(
+            fake_board.approved_delete_request.call_args.args[1].session_id,
+            session_values["HERMES_SESSION_ID"],
+        )
+
     def test_default_runtime_profile_comes_from_resolved_profile_home(self):
         profile_home = "/Users/hermes/.hermes/profiles/swe"
         with mock.patch.dict("os.environ", {"HERMES_HOME": profile_home}, clear=False):
@@ -721,6 +1328,7 @@ class PluginTests(unittest.TestCase):
                 "items",
                 "entity_type",
                 "selector",
+                "approval_reference",
                 "identifier",
                 "related_identifier",
                 "old_related_identifier",
@@ -888,7 +1496,7 @@ class PluginTests(unittest.TestCase):
                 },
                 parameters,
             )
-        self.assertEqual(len(parameters["oneOf"]), 25)
+        self.assertEqual(len(parameters["oneOf"]), 28)
         self.assertEqual(
             parameters["properties"]["description_transform"]["enum"],
             ["remove_links"],
@@ -919,6 +1527,7 @@ class PluginTests(unittest.TestCase):
                 "link_project_to_initiative",
                 "search_linear",
                 "inventory_linear",
+                "approve_delete_linear_entity",
                 "archive_linear_entity",
                 "delete_linear_entity",
             ],
@@ -931,7 +1540,10 @@ class PluginTests(unittest.TestCase):
                 "bulk_linear_operations",
                 "search_linear",
                 "inventory_linear",
-                None,
+                "delete_linear_entity",
+                "delete_linear_entity",
+                "approve_delete_linear_entity",
+                "archive_linear_entity",
                 "change_state",
                 "move_issue",
                 "update_issue",
