@@ -4494,6 +4494,36 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(replay["result"], "no_op")
             self.assertEqual(len(client.writes), 1)
 
+    def test_update_issue_title_accepts_provider_derived_url_change(self):
+        class SlugChangingClient(FakeClient):
+            def update_issue_fields(self, issue_id, **fields):
+                super().update_issue_fields(issue_id, **fields)
+                if "title" in fields:
+                    self.current["url"] = (
+                        "https://linear.app/example/issue/SIS-59/"
+                        "ship-the-full-linear-manager"
+                    )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = SlugChangingClient()
+            applied = lane.execute_command(
+                client,
+                command(
+                    "update_issue",
+                    {"title": "Ship the full Linear manager"},
+                    key="linear:SIS-59:title-url-change:fixture",
+                ),
+                mode="apply",
+                journal_path=Path(tmp) / "journal.json",
+            )
+
+        self.assertEqual(applied["result"], "applied")
+        self.assertTrue(applied["verified"])
+        self.assertEqual(
+            applied["after"]["url"],
+            "https://linear.app/example/issue/SIS-59/ship-the-full-linear-manager",
+        )
+
     def test_update_issue_assigns_exact_user_and_replays_noop(self):
         with tempfile.TemporaryDirectory() as tmp:
             journal = Path(tmp) / "journal.json"
