@@ -540,14 +540,14 @@ class CalendarRoutingTests(unittest.TestCase):
             "approval_reference": "calendar-approval:v1:" + "f" * 64,
             "plan_reference": plan_reference, "verified": True,
         }
-        key = calendar_route.delivery_key(command["idempotency_key"], source)
-        board = FakeBoard(existing={
+        task = {
             "id": "t_deadbeef", "status": "done", "session_id": source.session_id,
-            "idempotency_key": key, "body": calendar_route.build_calendar_task_body(command),
+            "idempotency_key": calendar_route.delivery_key(command["idempotency_key"], source),
+            "body": calendar_route.build_calendar_task_body(command),
             "result": json.dumps(result),
-        })
-        with self.assertRaises(calendar_route.CalendarRouteError):
-            calendar_route.route_calendar_request(request, source=source, board=board)
+        }
+        with self.assertRaisesRegex(calendar_route.CalendarRouteError, "plan completion"):
+            calendar_route._load_completed(task, command)
 
     def test_failed_route_audit_leaves_calendar_task_in_triage(self):
         board = FakeBoard(audit="fail")
