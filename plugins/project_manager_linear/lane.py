@@ -3946,7 +3946,7 @@ def execute_command(
                     fields.append("parent")
             elif live.get("parent") != issue.get("parent"):
                 fields.append("parent")
-            if live.get("url") != issue.get("url"):
+            if "title" not in change and live.get("url") != issue.get("url"):
                 fields.append("url")
             if live.get("archivedAt") != issue.get("archivedAt"):
                 fields.append("archived")
