@@ -1380,6 +1380,10 @@ def validate_command(raw: Any) -> dict[str, Any]:
                 "bulk_linear_operations target must be the current workspace"
             )
     elif destructive_operation or delete_preview:
+        if delete_preview and (
+            not isinstance(target, dict) or target.get("type") != "issue"
+        ):
+            raise ContractError("delete preview target must be one exact issue")
         _load_entity_destruction().validate_target(
             target,
             "delete_linear_entity" if delete_preview else operation,

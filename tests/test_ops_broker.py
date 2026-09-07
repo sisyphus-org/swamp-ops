@@ -124,6 +124,40 @@ class RequestValidationTests(unittest.TestCase):
             }.issubset(operations)
         )
 
+    def test_delete_approval_requires_immutable_audit_before_attempt(self):
+        preview = delete_preview_fixture()
+        issuer = mock.Mock(return_value=delete_grant_fixture(preview))
+        attempt = mock.Mock(return_value={"claimed": True})
+        with self.assertRaisesRegex(Exception, "immutable audit path"):
+            execute_request(
+                {
+                    "request_id": "11111111-1111-4111-8111-111111111111",
+                    "integration": "swamp",
+                    "operation": "approve_linear_delete_preview",
+                    "arguments": {
+                        "approval_reference": preview["approval_reference"]
+                    },
+                    "mode": "apply",
+                },
+                caller="owner",
+                policy={
+                    "peers": {
+                        "owner": {
+                            "operations": ["swamp.approve_linear_delete_preview"]
+                        }
+                    }
+                },
+                runner=mock.Mock(),
+                workspace=Path("/reviewed/runtime"),
+                session_id=preview["session_id"],
+                preview_loader=mock.Mock(return_value=preview),
+                attestation_issuer=issuer,
+                approval_attempt_recorder=attempt,
+                approval_recorder=mock.Mock(return_value={"ready": True}),
+            )
+        issuer.assert_not_called()
+        attempt.assert_not_called()
+
     def test_opaque_delete_preview_approval_never_returns_attestation_internals(self):
         preview = delete_preview_fixture()
         reference = preview["approval_reference"]
@@ -149,6 +183,7 @@ class RequestValidationTests(unittest.TestCase):
             policy=policy,
             runner=mock.Mock(),
             workspace=Path("/reviewed/runtime"),
+            audit_path=Path("/dev/null"),
             session_id=preview["session_id"],
             preview_loader=lambda value, session: (
                 preview if (value, session) == (reference, preview["session_id"]) else None
@@ -198,6 +233,7 @@ class RequestValidationTests(unittest.TestCase):
             },
             runner=mock.Mock(),
             workspace=Path("/reviewed/runtime"),
+            audit_path=Path("/dev/null"),
             session_id=preview["session_id"],
             preview_loader=mock.Mock(return_value=preview),
             attestation_issuer=issuer,
@@ -244,6 +280,7 @@ class RequestValidationTests(unittest.TestCase):
             },
             "runner": mock.Mock(),
             "workspace": Path("/reviewed/runtime"),
+            "audit_path": Path("/dev/null"),
             "session_id": preview["session_id"],
             "preview_loader": loader,
             "attestation_issuer": issuer,
@@ -368,6 +405,7 @@ class RequestValidationTests(unittest.TestCase):
                     policy=policy,
                     runner=mock.Mock(),
                     workspace=Path(tmp),
+                    audit_path=Path(tmp) / "audit.jsonl",
                     session_id=preview["session_id"],
                     preview_loader=loader,
                     attestation_issuer=issuer,

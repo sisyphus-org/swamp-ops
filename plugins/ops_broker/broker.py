@@ -1313,6 +1313,10 @@ def execute_request(
                 raise BrokerError("Linear delete approval reference is invalid")
             if not session_id:
                 raise BrokerError("Linear delete approval requires the exact owner session")
+            if audit_path is None:
+                raise BrokerError(
+                    "Linear delete approval requires an immutable audit path"
+                )
             if (
                 preview_loader is None
                 or attestation_issuer is None

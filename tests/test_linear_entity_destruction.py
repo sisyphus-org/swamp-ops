@@ -339,6 +339,24 @@ class LinearEntityDestructionTests(unittest.TestCase):
                 lane.execute_command(client, destructive_command(operation, entity_type, selector), mode="plan")
             client.assert_not_called()
 
+    def test_delete_preview_rejects_non_issue_targets_at_command_boundary(self):
+        for entity_type, selector in (
+            ("project", {"name": "P"}),
+            ("milestone", {"project": "P", "name": "M"}),
+            ("initiative", {"name": "I"}),
+        ):
+            with self.subTest(entity_type=entity_type), self.assertRaisesRegex(
+                lane.ContractError, "preview.*issue|issue.*preview"
+            ):
+                lane.validate_command(
+                    destructive_command(
+                        "preview_delete_linear_entity",
+                        entity_type,
+                        selector,
+                        policy={"mode": "standard"},
+                    )
+                )
+
     def test_standard_policy_raw_ids_bulk_and_wrong_selectors_are_blocked(self):
         cases = [
             destructive_command("archive_linear_entity", "issue", {"identifier": "SIS-77"}, policy={"mode": "standard"}),
