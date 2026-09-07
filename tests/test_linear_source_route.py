@@ -846,6 +846,43 @@ class ParseTests(unittest.TestCase):
         )
         self.assertEqual(parsed.command["policy"], {"mode": "standard"})
 
+    def test_move_issue_accepts_exact_project_with_no_current_milestone(self):
+        parsed = route.parse_linear_request(
+            {
+                "operation": "move_issue",
+                "identifier": "SIS-33",
+                "expected_project": "Книги",
+                "expected_milestone": None,
+                "project": "Великие книги: история идей",
+                "milestone": "01 · Литература — образ человека",
+            },
+            source_profile="books",
+            uuid_factory=uuid_factory(),
+        )
+        self.assertEqual(
+            parsed.command["change"],
+            {
+                "expected_project": "Книги",
+                "expected_milestone": None,
+                "project": "Великие книги: история идей",
+                "milestone": "01 · Литература — образ человека",
+            },
+        )
+
+        with self.assertRaisesRegex(route.RouteError, "milestone.*project"):
+            route.parse_linear_request(
+                {
+                    "operation": "move_issue",
+                    "identifier": "SIS-33",
+                    "expected_project": None,
+                    "expected_milestone": "orphan milestone",
+                    "project": "Великие книги: история идей",
+                    "milestone": "01 · Литература — образ человека",
+                },
+                source_profile="books",
+                uuid_factory=uuid_factory(),
+            )
+
     def test_move_issue_rejects_missing_compare_and_set_fields(self):
         base = {
             "operation": "move_issue",

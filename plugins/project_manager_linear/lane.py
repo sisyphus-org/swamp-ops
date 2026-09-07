@@ -1493,13 +1493,15 @@ def validate_command(raw: Any) -> dict[str, Any]:
             )
         expected_project = change["expected_project"]
         expected_milestone = change["expected_milestone"]
-        if (expected_project is None) != (expected_milestone is None):
+        if expected_project is None and expected_milestone is not None:
             raise ContractError(
-                "move_issue expected project and milestone must both be exact names or null"
+                "move_issue expected milestone requires an exact expected project"
             )
         values = (change["project"], change["milestone"])
         if expected_project is not None:
-            values += (expected_project, expected_milestone)
+            values += (expected_project,)
+        if expected_milestone is not None:
+            values += (expected_milestone,)
         if any(
             not isinstance(value, str)
             or not value.strip()

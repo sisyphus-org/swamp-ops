@@ -3884,6 +3884,28 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(replay["before"], replay["after"])
             self.assertEqual(len(client.writes), 1)
 
+    def test_move_issue_compares_named_project_with_no_current_milestone(self):
+        client = FakeClient()
+        client.current["projectMilestone"] = None
+        raw = command(
+            "move_issue",
+            {
+                "expected_project": "Current Project",
+                "expected_milestone": None,
+                "project": "Project Two",
+                "milestone": "Milestone Two",
+            },
+            key="linear:SIS-55:move:mixed-current-scope",
+        )
+
+        planned = lane.execute_command(client, raw, mode="plan")
+
+        self.assertEqual(planned["before"]["project"], "Current Project")
+        self.assertIsNone(planned["before"]["milestone"])
+        self.assertEqual(planned["after"]["project"], "Project Two")
+        self.assertEqual(planned["after"]["milestone"], "Milestone Two")
+        self.assertEqual(client.writes, [])
+
     def test_move_issue_requires_live_scope_match_before_write(self):
         client = FakeClient()
         raw = command(

@@ -862,14 +862,15 @@ def parse_linear_request(
                 raise RouteError("move_issue requires exact expected and target scope")
             expected_project = request["expected_project"]
             expected_milestone = request["expected_milestone"]
-            if (expected_project is None) != (expected_milestone is None):
+            if expected_project is None and expected_milestone is not None:
                 raise RouteError(
-                    "expected_project and expected_milestone must both be exact names or null"
+                    "expected_milestone requires an exact expected_project"
                 )
             if expected_project is not None:
                 _validate_clean_text(
                     expected_project, "expected_project", maximum=200, required=True
                 )
+            if expected_milestone is not None:
                 _validate_clean_text(
                     expected_milestone,
                     "expected_milestone",
