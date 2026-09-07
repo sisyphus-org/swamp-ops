@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 import jsonschema
+from hermes_cli import kanban_db as kb
 
 
 ROOT = Path(__file__).parents[1]
@@ -33,6 +34,81 @@ class Registry:
 
 
 class CalendarSourcePluginTests(unittest.TestCase):
+    def test_board_atomically_prefers_active_legacy_delivery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "kanban.db"
+            with mock.patch.dict(os.environ, {"HERMES_KANBAN_DB": str(db_path)}):
+                kb.init_db(db_path=db_path)
+                board = HermesKanbanBoard(
+                    board="default", source_profile="default", kb=kb
+                )
+                legacy_key = "calendar-delivery:v1:" + "a" * 32
+                direct_key = "calendar-delivery:v1:" + "b" * 32
+                legacy, _ = board.get_or_create_task(
+                    legacy_key,
+                    title="Calendar plan_write", body="legacy", assignee="personal-assistant",
+                    skills=["personal-assistant-calendar-worker"], triage=True,
+                    idempotency_key=legacy_key, session_id="20260904_120000_abcdef12",
+                    max_runtime_seconds=300,
+                )
+
+                selected, created, reused_legacy = board.get_or_create_task_with_legacy(
+                    direct_key,
+                    legacy_key,
+                    title="Calendar execute_write", body="direct", assignee="personal-assistant",
+                    skills=["personal-assistant-calendar-worker"], triage=True,
+                    idempotency_key=direct_key, session_id="20260904_120000_abcdef12",
+                    max_runtime_seconds=300,
+                )
+
+                self.assertEqual(selected["id"], legacy["id"])
+                self.assertFalse(created)
+                self.assertTrue(reused_legacy)
+                conn = kb.connect(db_path=db_path)
+                try:
+                    count = conn.execute(
+                        "SELECT COUNT(*) FROM tasks WHERE idempotency_key IN (?, ?) "
+                        "AND status != 'archived'",
+                        (legacy_key, direct_key),
+                    ).fetchone()[0]
+                finally:
+                    conn.close()
+                self.assertEqual(count, 1)
+
+    def test_board_rejects_coexisting_legacy_and_direct_deliveries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "kanban.db"
+            with mock.patch.dict(os.environ, {"HERMES_KANBAN_DB": str(db_path)}):
+                kb.init_db(db_path=db_path)
+                board = HermesKanbanBoard(
+                    board="default", source_profile="default", kb=kb
+                )
+                legacy_key = "calendar-delivery:v1:" + "c" * 32
+                direct_key = "calendar-delivery:v1:" + "d" * 32
+                common = {
+                    "assignee": "personal-assistant",
+                    "skills": ["personal-assistant-calendar-worker"],
+                    "triage": True,
+                    "session_id": "20260904_120000_abcdef12",
+                    "max_runtime_seconds": 300,
+                }
+                board.get_or_create_task(
+                    legacy_key, title="Calendar plan_write", body="legacy",
+                    idempotency_key=legacy_key, **common,
+                )
+                board.get_or_create_task(
+                    direct_key, title="Calendar execute_write", body="direct",
+                    idempotency_key=direct_key, **common,
+                )
+
+                with self.assertRaisesRegex(Exception, "legacy and direct"):
+                    board.get_or_create_task_with_legacy(
+                        direct_key,
+                        legacy_key,
+                        title="Calendar execute_write", body="direct",
+                        idempotency_key=direct_key, **common,
+                    )
+
     def test_plugin_registers_bounded_calendar_source_tool(self):
         registry = Registry()
         register(registry)

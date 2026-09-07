@@ -136,12 +136,44 @@ class CalendarCommandTests(unittest.TestCase):
 
 
 class FakeBoard:
-    def __init__(self, existing=None, audit="pass", approval_linear_issue=None, approval_write_identity=None):
+    def __init__(self, existing=None, audit="pass", approval_linear_issue=None, approval_write_identity=None, legacy_existing=None):
         self.existing = existing
         self.audit = audit
         self.approval_linear_issue = approval_linear_issue
         self.approval_write_identity = approval_write_identity
+        self.legacy_existing = legacy_existing
         self.calls = []
+
+    def find_task(self, delivery_key):
+        self.calls.append(("find", delivery_key))
+        if (
+            self.legacy_existing is not None
+            and self.legacy_existing.get("idempotency_key") == delivery_key
+        ):
+            return self.legacy_existing
+        return None
+
+    def get_or_create_task_with_legacy(
+        self, delivery_key, legacy_delivery_key, **kwargs
+    ):
+        self.calls.append(
+            ("get_or_create_compatible", delivery_key, legacy_delivery_key, kwargs)
+        )
+        if (
+            self.legacy_existing is not None
+            and self.legacy_existing.get("idempotency_key") == legacy_delivery_key
+        ):
+            return self.legacy_existing, False, True
+        if self.existing is not None:
+            return self.existing, False, False
+        return {
+            "id": "t_deadbeef",
+            "status": "triage",
+            "session_id": kwargs["session_id"],
+            "idempotency_key": delivery_key,
+            "body": kwargs["body"],
+            "result": None,
+        }, True, False
 
     def get_or_create_task(self, delivery_key, **kwargs):
         self.calls.append(("get_or_create", delivery_key, kwargs))
@@ -210,6 +242,47 @@ def legacy_plan_command(request, *, source_profile="default"):
 
 
 class CalendarRoutingTests(unittest.TestCase):
+    def test_literal_legacy_create_replay_returns_existing_preview_without_new_task(self):
+        source = source_context()
+        request = {
+            "operation": "create", "block_key": "legacy", "summary": "Legacy event",
+            "start": "2026-09-12T13:00", "end": "2026-09-12T14:00", "details": "",
+        }
+        command = legacy_plan_command(request, source_profile=source.profile)
+        plan = {
+            "run_id": "22222222-2222-4222-8222-222222222222",
+            "artifact_version": 1, "checksum": "a" * 64, "before_state_hash": "b" * 64,
+        }
+        preview = {
+            "operation": "create", "block_key": "legacy", "summary": "Legacy event",
+            "details": "", "start": "2026-09-12T13:00:00+03:00",
+            "end": "2026-09-12T14:00:00+03:00", "timezone": "Europe/Kyiv",
+            "linear_url": "",
+        }
+        result = {
+            "schema_version": "calendar-result.v1", "command_id": command["command_id"],
+            "idempotency_key": command["idempotency_key"], "source_profile": source.profile,
+            "operation": "plan_write", "phase": "awaiting_approval", "outcome": "planned",
+            "preview": preview,
+            "approval_reference": calendar_route._expected_approval_reference(
+                command, plan, source.session_id
+            ),
+            "plan_reference": plan, "verified": True,
+        }
+        legacy_key = calendar_route.delivery_key(command["idempotency_key"], source)
+        board = FakeBoard(legacy_existing={
+            "id": "t_legacy", "status": "done", "session_id": source.session_id,
+            "idempotency_key": legacy_key,
+            "body": calendar_route.build_calendar_task_body(command),
+            "result": json.dumps(result),
+        })
+
+        output = calendar_route.route_calendar_request(request, source=source, board=board)
+
+        self.assertEqual(output["phase"], "awaiting_approval")
+        self.assertEqual(output["preview"], preview)
+        self.assertEqual([call[0] for call in board.calls], ["get_or_create_compatible"])
+
     def test_route_creates_exact_pa_task_then_audits_and_releases(self):
         board = FakeBoard()
         output = calendar_route.route_calendar_request(

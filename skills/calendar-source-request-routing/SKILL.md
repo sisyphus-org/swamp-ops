@@ -1,7 +1,7 @@
 ---
 name: calendar-source-request-routing
 description: Route Calendar reads and explicit-intent writes to PA.
-version: 1.2.0
+version: 1.2.1
 author: sisyphus-org
 platforms: [linux, macos]
 metadata:
@@ -49,7 +49,7 @@ For a new update or delete request, retain the existing two-step flow:
 4. Only after confirmation in the same source session, call `operation=approve` with the exact opaque reference.
 5. After `queued`, stop. On wake, replay the exact approval call and report sanitized verified read-back.
 
-`operation=approve` also remains available for create previews issued before this single-step contract was deployed. Never create a new preview-first flow for an ordinary create.
+`operation=approve` also remains available for create previews issued before this single-step contract was deployed. A literal same-session replay of such a create must return the existing protected preview; it must never create a new direct-execution task. Never create a new preview-first flow for an ordinary create.
 
 ### Literal field preservation
 
