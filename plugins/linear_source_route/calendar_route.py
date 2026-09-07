@@ -179,6 +179,12 @@ def parse_calendar_request(
         raise CalendarRequestError(str(exc)) from exc
 
 
+def _legacy_create_replay_command(command: dict[str, Any]) -> dict[str, Any]:
+    legacy = {**command, "operation": "plan_write", "idempotency_key": "pending"}
+    legacy["idempotency_key"] = _semantic_key(legacy)
+    return legacy
+
+
 def delivery_key(mutation_key: str, source: SourceContext) -> str:
     identity = {
         "mutation_key": mutation_key,
@@ -493,17 +499,36 @@ def route_calendar_request(
         request, source_profile=source.profile, uuid_factory=uuid_factory
     ).command
     key = delivery_key(command["idempotency_key"], source)
-    task, created = board.get_or_create_task(
-        key,
-        title=f"Calendar {command['operation']}",
-        body=build_calendar_task_body(command),
-        assignee="personal-assistant",
-        skills=["personal-assistant-calendar-worker"],
-        triage=True,
-        idempotency_key=key,
-        session_id=source.session_id,
-        max_runtime_seconds=300,
-    )
+    if command["operation"] == "execute_write":
+        legacy_command = _legacy_create_replay_command(command)
+        legacy_key = delivery_key(legacy_command["idempotency_key"], source)
+        task, created, reused_legacy = board.get_or_create_task_with_legacy(
+            key,
+            legacy_key,
+            title=f"Calendar {command['operation']}",
+            body=build_calendar_task_body(command),
+            assignee="personal-assistant",
+            skills=["personal-assistant-calendar-worker"],
+            triage=True,
+            idempotency_key=key,
+            session_id=source.session_id,
+            max_runtime_seconds=300,
+        )
+        if reused_legacy:
+            command = legacy_command
+            key = legacy_key
+    else:
+        task, created = board.get_or_create_task(
+            key,
+            title=f"Calendar {command['operation']}",
+            body=build_calendar_task_body(command),
+            assignee="personal-assistant",
+            skills=["personal-assistant-calendar-worker"],
+            triage=True,
+            idempotency_key=key,
+            session_id=source.session_id,
+            max_runtime_seconds=300,
+        )
     if task.get("idempotency_key") != key or task.get("session_id") != source.session_id:
         raise CalendarRouteError("Calendar task is not bound to the exact source session")
     if not created:

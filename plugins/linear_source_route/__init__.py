@@ -940,6 +940,59 @@ class HermesKanbanBoard:
         finally:
             conn.close()
 
+    def get_or_create_task_with_legacy(
+        self,
+        delivery_key: str,
+        legacy_delivery_key: str,
+        **kwargs: Any,
+    ) -> tuple[dict[str, Any], bool, bool]:
+        """Atomically prefer an active legacy delivery, else reuse/create direct."""
+        if (
+            kwargs.get("idempotency_key") != delivery_key
+            or legacy_delivery_key == delivery_key
+        ):
+            raise RouteError("Calendar compatibility delivery keys are invalid")
+        conn = self._connect()
+        try:
+            with self.kb.write_txn(conn):
+                rows = conn.execute(
+                    "SELECT id, idempotency_key FROM tasks "
+                    "WHERE idempotency_key IN (?, ?) AND status != 'archived' "
+                    "ORDER BY created_at DESC",
+                    (legacy_delivery_key, delivery_key),
+                ).fetchall()
+                by_key: dict[str, list[Any]] = {
+                    legacy_delivery_key: [], delivery_key: []
+                }
+                for row in rows:
+                    key = row["idempotency_key"]
+                    if key not in by_key:
+                        raise RouteError("Calendar compatibility lookup returned an invalid key")
+                    by_key[key].append(row)
+                if any(len(matches) > 1 for matches in by_key.values()):
+                    raise RouteError("duplicate active tasks share a Calendar delivery key")
+                if by_key[legacy_delivery_key] and by_key[delivery_key]:
+                    raise RouteError("active legacy and direct Calendar deliveries coexist")
+                selected = by_key[legacy_delivery_key] or by_key[delivery_key]
+                if selected:
+                    task = self.kb.get_task(conn, selected[0]["id"])
+                    if task is None:
+                        raise RouteError("Calendar delivery lookup returned a missing task")
+                    return _task_dict(task), False, bool(by_key[legacy_delivery_key])
+                task_id = self.kb.create_task(
+                    conn,
+                    created_by=self.source_profile,
+                    workspace_kind="scratch",
+                    board=self.board,
+                    **kwargs,
+                )
+                task = self.kb.get_task(conn, task_id)
+                if task is None:
+                    raise RouteError("Kanban create returned a missing task")
+                return _task_dict(task), True, False
+        finally:
+            conn.close()
+
     def find_task(self, delivery_key: str) -> dict[str, Any] | None:
         """Return the one active exact delivery task without creating it."""
         conn = self._connect()
