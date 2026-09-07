@@ -48,6 +48,12 @@ def command(request=None):
     ).command
 
 
+def legacy_plan_command(request):
+    raw = command(request)
+    raw["operation"] = "plan_write"
+    return raw
+
+
 def task_record(raw_command=None, **overrides):
     values = {
         "id": "t_deadbeef",
@@ -198,13 +204,146 @@ class PersonalAssistantCalendarWorkerTests(unittest.TestCase):
         self.assertEqual(persisted["outcome"], "read")
         self.assertTrue(persisted["verified"])
 
-    def test_write_plan_returns_exact_preview_and_opaque_approval_reference(self):
+    def test_explicit_write_plans_attests_applies_and_verifies_in_one_run(self):
         request = {
             "operation": "create", "block_key": "primary", "summary": "Review SIS-123",
             "start": "2026-09-07T10:00", "end": "2026-09-07T10:30",
             "linear_url": "https://linear.app/sisyphusx/issue/SIS-123/calendar-routing", "details": "",
         }
         raw = command(request)
+        self.assertEqual(raw["operation"], "execute_write")
+        lifecycle = Lifecycle()
+        workflows = Workflows()
+
+        output = json.loads(handle_pa_calendar_execute(
+            {}, environ=environ(), task_loader=lambda *_args: task_record(raw),
+            run_reserver=lambda *_args: True, lifecycle_factory=lambda _task_id: lifecycle,
+            workflow_runner_factory=lambda: workflows,
+        ))
+
+        self.assertEqual(output["status"], "completed")
+        self.assertEqual([call[0] for call in workflows.calls], [
+            "plan", "snapshot", "start_approval", "approve", "resume_approval", "snapshot", "apply",
+        ])
+        persisted = json.loads(lifecycle.completed[0]["result"])
+        self.assertEqual(persisted["operation"], "execute_write")
+        self.assertEqual(persisted["phase"], "completed")
+        self.assertEqual(persisted["outcome"], "applied")
+        self.assertNotIn("preview", persisted)
+        self.assertNotIn("approval_reference", persisted)
+        self.assertEqual(persisted["data"]["status"], "verified")
+
+    def test_execute_write_rejects_non_create_before_workflow_access(self):
+        raw = command({
+            "operation": "delete", "block_key": "primary", "summary": "",
+            "start": "", "end": "", "details": "",
+        })
+        raw["operation"] = "execute_write"
+        lifecycle = Lifecycle()
+        workflows = Workflows()
+
+        output = json.loads(handle_pa_calendar_execute(
+            {}, environ=environ(), task_loader=lambda *_args: task_record(raw),
+            run_reserver=lambda *_args: True, lifecycle_factory=lambda _task_id: lifecycle,
+            workflow_runner_factory=lambda: workflows,
+        ))
+
+        self.assertEqual(output["status"], "blocked")
+        self.assertEqual(workflows.calls, [])
+        self.assertEqual(lifecycle.completed, [])
+
+    def test_execute_write_journal_rejects_wrong_operation_or_block_key(self):
+        raw = command({
+            "operation": "create", "block_key": "primary", "summary": "Review SIS-123",
+            "start": "2026-09-07T10:00", "end": "2026-09-07T10:30", "details": "",
+        })
+        base = {
+            "schema_version": "calendar-result.v1", "command_id": raw["command_id"],
+            "idempotency_key": raw["idempotency_key"], "source_profile": raw["source_profile"],
+            "operation": "execute_write", "verified": True, "phase": "completed",
+            "outcome": "applied",
+        }
+        for bad_data in (
+            {"operation": "delete", "status": "verified", "reused": False, "blockKey": "primary"},
+            {"operation": "create", "status": "verified", "reused": False, "blockKey": "other"},
+        ):
+            with self.subTest(data=bad_data), self.assertRaisesRegex(
+                RuntimeError, "apply journal"
+            ):
+                _validate_completed_result(
+                    raw, {**base, "data": bad_data}, "20260904_120000_abcdef12",
+                    expected_linear_issue=None,
+                )
+
+    def test_execute_write_journal_rejects_inconsistent_outcome_and_reused(self):
+        raw = command({
+            "operation": "create", "block_key": "primary", "summary": "Review SIS-123",
+            "start": "2026-09-07T10:00", "end": "2026-09-07T10:30", "details": "",
+        })
+        base = {
+            "schema_version": "calendar-result.v1", "command_id": raw["command_id"],
+            "idempotency_key": raw["idempotency_key"], "source_profile": raw["source_profile"],
+            "operation": "execute_write", "verified": True, "phase": "completed",
+        }
+        for outcome, reused in (("applied", True), ("no_op", False)):
+            result = {
+                **base,
+                "outcome": outcome,
+                "data": {
+                    "operation": "create", "status": "verified", "reused": reused,
+                    "blockKey": "primary",
+                },
+            }
+            with self.subTest(outcome=outcome, reused=reused), self.assertRaisesRegex(
+                RuntimeError, "apply journal"
+            ):
+                _validate_completed_result(
+                    raw, result, "20260904_120000_abcdef12", expected_linear_issue=None
+                )
+
+    def test_explicit_write_replays_verified_journal_without_second_mutation(self):
+        request = {
+            "operation": "create", "block_key": "primary", "summary": "Review SIS-123",
+            "start": "2026-09-07T10:00", "end": "2026-09-07T10:30",
+            "linear_url": "https://linear.app/sisyphusx/issue/SIS-123/calendar-routing", "details": "",
+        }
+        raw = command(request)
+        stored = []
+        first_workflows = Workflows()
+        first_lifecycle = Lifecycle()
+        first = json.loads(handle_pa_calendar_execute(
+            {}, environ=environ(), task_loader=lambda *_args: task_record(raw),
+            run_reserver=lambda *_args: True, lifecycle_factory=lambda _task_id: first_lifecycle,
+            workflow_runner_factory=lambda: first_workflows,
+            result_loader=lambda *_args: None,
+            result_writer=lambda _command, result, _environ: stored.append(result),
+        ))
+        self.assertEqual(first["status"], "completed")
+        self.assertEqual(len(stored), 1)
+
+        replay_workflows = Workflows()
+        replay_lifecycle = Lifecycle()
+        replay = json.loads(handle_pa_calendar_execute(
+            {}, environ=environ(), task_loader=lambda *_args: task_record(raw),
+            run_reserver=lambda *_args: True, lifecycle_factory=lambda _task_id: replay_lifecycle,
+            workflow_runner_factory=lambda: replay_workflows,
+            result_loader=lambda *_args: stored[0],
+            result_writer=lambda *_args: self.fail("replay must not rewrite the journal"),
+        ))
+
+        self.assertEqual(replay["status"], "completed")
+        self.assertEqual(replay_workflows.calls, [])
+        replay_result = json.loads(replay_lifecycle.completed[0]["result"])
+        self.assertEqual(replay_result["outcome"], "applied")
+        self.assertEqual(replay_result["data"]["status"], "verified")
+
+    def test_write_plan_returns_exact_preview_and_opaque_approval_reference(self):
+        request = {
+            "operation": "create", "block_key": "primary", "summary": "Review SIS-123",
+            "start": "2026-09-07T10:00", "end": "2026-09-07T10:30",
+            "linear_url": "https://linear.app/sisyphusx/issue/SIS-123/calendar-routing", "details": "",
+        }
+        raw = legacy_plan_command(request)
         lifecycle = Lifecycle()
         workflows = Workflows()
         handle_pa_calendar_execute(
@@ -241,7 +380,7 @@ class PersonalAssistantCalendarWorkerTests(unittest.TestCase):
             "end": "2026-09-06T12:00",
             "details": "",
         }
-        raw = command(request)
+        raw = legacy_plan_command(request)
 
         class StandaloneWorkflows(Workflows):
             def plan(self, request):
@@ -397,6 +536,29 @@ class PersonalAssistantCalendarWorkerTests(unittest.TestCase):
                 "20260904_120000_abcdef12",
                 expected_linear_issue="SIS-123",
             )
+
+    def test_legacy_approval_journal_rejects_wrong_operation_or_block_key(self):
+        approval_ref = "calendar-approval:v1:" + "c" * 64
+        raw = command({"operation": "approve", "approval_reference": approval_ref})
+        base = {
+            "schema_version": "calendar-result.v1", "command_id": raw["command_id"],
+            "idempotency_key": raw["idempotency_key"], "source_profile": raw["source_profile"],
+            "operation": "approve_write", "verified": True, "phase": "completed",
+            "outcome": "applied",
+        }
+        for bad_data in (
+            {"operation": "delete", "status": "verified", "reused": False, "blockKey": "primary"},
+            {"operation": "create", "status": "verified", "reused": False, "blockKey": "wrong"},
+        ):
+            with self.subTest(data=bad_data), self.assertRaisesRegex(Exception, "apply journal"):
+                _validate_completed_result(
+                    raw,
+                    {**base, "data": bad_data},
+                    "20260904_120000_abcdef12",
+                    expected_linear_issue=None,
+                    expected_operation="create",
+                    expected_block_key="primary",
+                )
 
     def test_approval_renews_claim_before_each_network_step_and_apply(self):
         approval_ref = "calendar-approval:v1:" + "c" * 64
@@ -600,7 +762,7 @@ class PersonalAssistantCalendarWorkerTests(unittest.TestCase):
             "start": "2026-09-07T10:00", "end": "2026-09-07T10:30",
             "linear_url": "https://linear.app/sisyphusx/issue/SIS-123/calendar-routing", "details": "",
         }
-        raw = command(request)
+        raw = legacy_plan_command(request)
         plan_reference = {
             "run_id": PLAN_RUN, "artifact_version": 7, "checksum": "a" * 64,
             "before_state_hash": "d" * 64,

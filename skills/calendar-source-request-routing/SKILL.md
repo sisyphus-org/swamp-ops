@@ -1,7 +1,7 @@
 ---
 name: calendar-source-request-routing
-description: Route Calendar reads and approval-gated writes to PA.
-version: 1.1.1
+description: Route Calendar reads and explicit-intent writes to PA.
+version: 1.2.0
 author: sisyphus-org
 platforms: [linux, macos]
 metadata:
@@ -17,42 +17,39 @@ Use `calendar_source_request` for Calendar requests. The source profile never as
 
 Call exactly one of `inventory`, `events`, or `freebusy` with `window` equal to `today`, `next-7-days`, or `next-30-days`. After `queued`, stop. On exact-session wake, replay the literal request once and report only the sanitized completed data.
 
-## Approval-gated writes
+## Explicit-intent writes
 
 Calendar and Linear are independent operations. A normal Calendar request must not create or require a Linear issue. Link them only when the owner explicitly supplies an SIS issue or asks for the connection.
 
-1. For a standalone event, omit `linear_url`. Choose a stable safe `block_key` that includes the event date or another unique discriminator, for example `lavina-rusanovka-2026-09-06`, so unrelated events do not collide.
+An explicit owner instruction to create or add a Calendar event is the authorization for that exact bounded creation. Do **not** ask for a second confirmation after the create request is already clear. Update and delete retain the existing preview/approval flow because they modify or remove an existing target.
+
+Before calling the tool, resolve required fields from the current request and unambiguous conversation context:
+
+- title/summary;
+- local Kyiv date and start time;
+- end time or a clearly established duration;
+- exact target identity for update/delete.
+
+Ask one focused clarification only when a required value is genuinely missing or has multiple plausible interpretations. Do not ask merely because the value appeared in the previous message, can be derived from a relative phrase such as `через час после этой`, or uses a conventional duration already established by the referenced event.
+
+1. For a standalone event, omit `linear_url`. Choose a stable safe `block_key` that includes the event date/time or another unique discriminator so separate events do not collide.
 2. When the owner explicitly supplies `SIS-N` without its URL, resolve it through the Linear source route and pass only the returned canonical public `https://linear.app/.../issue/SIS-N/...` URL. Never pass Linear credentials or an internal ID.
-3. Call `calendar_source_request` with `operation=create|update|delete`, exact `block_key`, `summary`, local Kyiv `start`/`end`, `details`, and optional canonical `linear_url`. Delete requires empty event fields.
-4. When replay returns `phase=awaiting_approval`, retain the complete exact machine preview internally for approval binding and recovery matching, then show only the concise owner-facing rendering defined below. Do not approve implicitly or paraphrase away material values. A standalone machine preview has an empty `linear_url`.
-5. Only after an explicit approval in this same source session, call `calendar_source_request` with `operation=approve` and the exact opaque `approval_reference` returned with that preview.
-6. After `queued`, stop. On wake, replay the exact approval call and report sanitized verified read-back.
+3. For create, call `calendar_source_request` once with exact `block_key`, `summary`, local Kyiv `start`/`end`, `details`, and optional canonical `linear_url`.
+4. After `queued`, stop. On exact-session wake, replay the literal create request once and report only sanitized verified read-back.
 
-Never copy workflow run IDs, task IDs, OAuth data, event IDs, artifact versions, checksums, before-state hashes, or internal routing fields into the human response. The machine preview contains only the operation, block key, summary, details, Kyiv-aware start/end, timezone, and optional canonical Linear URL. Its shortened owner-facing representation follows below. If routing is unavailable, report the truthful capability error; never instruct the owner to upload an OAuth JSON file.
+The routed worker still performs a protected plan, before-state snapshot, attestation workflow, fresh snapshot comparison, provider mutation, and exact read-back in one run. The source agent never receives workflow run IDs, OAuth data, event IDs, artifact versions, checksums, before-state hashes, or internal routing fields. If routing is unavailable, report the truthful capability error; never instruct the owner to upload an OAuth JSON file.
 
-### Owner-facing preview format
+### Preview-gated update and delete
 
-Validate and retain every exact preview field internally for approval binding,
-but present only human-relevant information. Use a short heading that expresses
-the action (`Создать запись?`, `Изменить запись?`, or `Удалить запись?`) instead
-of rendering the literal protocol operation.
+For a new update or delete request, retain the existing two-step flow:
 
-- Show the event title.
-- Convert ISO timestamps to a human-readable local date and time range, for
-  example `6 сентября, 10:00–12:00`.
-- Show the timezone name and UTC offset, for example `Киев, UTC+3`.
-- Show details only when they add material information not already in the title.
-- Show a linked Linear issue only when `linear_url` is non-empty.
-- For create and update, omit `operation`, omit `block_key`, omit an empty
-  `linear_url`, and do not expose ISO timestamps or empty fields.
-- A delete machine preview intentionally has empty event fields. Never show only
-  `Удалить запись?`: include one exact reviewable target. Until the protocol
-  exposes a stored title/time, render `Цель: <block_key>` as the required
-  exception so the owner can identify the deterministic event being removed.
+1. Call `calendar_source_request` with the exact update/delete fields. Delete requires empty event fields.
+2. After `queued`, stop. On exact-session wake, replay that literal request once to obtain the exact machine preview and opaque approval reference.
+3. Show the material target/action fields to the owner and ask for explicit confirmation.
+4. Only after confirmation in the same source session, call `operation=approve` with the exact opaque reference.
+5. After `queued`, stop. On wake, replay the exact approval call and report sanitized verified read-back.
 
-Do not change, drop, or infer any material value when formatting. The approval
-call still uses the exact opaque reference bound to the complete machine
-preview, not the shortened owner-facing rendering.
+`operation=approve` also remains available for create previews issued before this single-step contract was deployed. Never create a new preview-first flow for an ordinary create.
 
 ### Literal field preservation
 
@@ -68,7 +65,11 @@ for approval.
 
 ## Replay
 
-Literal replay is required. The route derives one global semantic key and one exact source-session delivery key, so it reuses the same Kanban task and notification. Approval references are accepted only by the same profile/session that received the preview.
+Literal replay is required. The route derives one global semantic key and one exact source-session delivery key, so it reuses the same Kanban task, verified external result, and notification without another mutation.
+
+### Legacy approval recovery
+
+Approval references from pre-1.2.0 previews are accepted only by the same profile/session that received the preview.
 
 Never reconstruct, abbreviate, or guess an `approval_reference`. Keep the exact
 opaque value from the plan tool result for the later approval and replay calls;

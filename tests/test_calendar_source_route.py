@@ -43,7 +43,7 @@ class CalendarCommandTests(unittest.TestCase):
             source_profile="books",
             uuid_factory=lambda: "11111111-1111-4111-8111-111111111111",
         ).command
-        self.assertEqual(command["operation"], "plan_write")
+        self.assertEqual(command["operation"], "execute_write")
         self.assertEqual(command["request"], request)
         self.assertEqual(command["source_profile"], "books")
 
@@ -63,9 +63,27 @@ class CalendarCommandTests(unittest.TestCase):
             uuid_factory=lambda: "11111111-1111-4111-8111-111111111111",
         ).command
 
-        self.assertEqual(command["operation"], "plan_write")
+        self.assertEqual(command["operation"], "execute_write")
         self.assertEqual(command["request"], {**request, "linear_url": ""})
         self.assertEqual(command["source_profile"], "ideas")
+
+    def test_update_and_delete_remain_preview_gated(self):
+        update = calendar_route.parse_calendar_request(
+            {
+                "operation": "update", "block_key": "primary", "summary": "Updated",
+                "start": "2026-09-07T10:00", "end": "2026-09-07T10:30", "details": "",
+            },
+            source_profile="default",
+        ).command
+        delete = calendar_route.parse_calendar_request(
+            {
+                "operation": "delete", "block_key": "primary", "summary": "",
+                "start": "", "end": "", "details": "",
+            },
+            source_profile="default",
+        ).command
+        self.assertEqual(update["operation"], "plan_write")
+        self.assertEqual(delete["operation"], "plan_write")
 
     def test_write_request_rejects_non_positive_interval_before_queueing(self):
         for end in ("2026-09-07T10:00", "2026-09-07T09:59"):
@@ -118,10 +136,11 @@ class CalendarCommandTests(unittest.TestCase):
 
 
 class FakeBoard:
-    def __init__(self, existing=None, audit="pass", approval_linear_issue=None):
+    def __init__(self, existing=None, audit="pass", approval_linear_issue=None, approval_write_identity=None):
         self.existing = existing
         self.audit = audit
         self.approval_linear_issue = approval_linear_issue
+        self.approval_write_identity = approval_write_identity
         self.calls = []
 
     def get_or_create_task(self, delivery_key, **kwargs):
@@ -154,6 +173,16 @@ class FakeBoard:
         self.calls.append(("approval_link", reference, source))
         return self.approval_linear_issue
 
+    def calendar_approval_write_identity(self, reference, source):
+        self.calls.append(("approval_identity", reference, source))
+        if self.approval_write_identity is not None:
+            return self.approval_write_identity
+        return {
+            "operation": "create",
+            "block_key": "primary",
+            "linear_issue": self.approval_linear_issue,
+        }
+
 
 def source_context(**overrides):
     values = {
@@ -167,6 +196,17 @@ def source_context(**overrides):
     }
     values.update(overrides)
     return SourceContext(**values)
+
+
+def legacy_plan_command(request, *, source_profile="default"):
+    command = calendar_route.parse_calendar_request(
+        request,
+        source_profile=source_profile,
+        uuid_factory=lambda: "11111111-1111-4111-8111-111111111111",
+    ).command
+    command["operation"] = "plan_write"
+    command["idempotency_key"] = calendar_route._semantic_key(command)
+    return command
 
 
 class CalendarRoutingTests(unittest.TestCase):
@@ -188,6 +228,112 @@ class CalendarRoutingTests(unittest.TestCase):
         self.assertEqual(create["session_id"], source_context().session_id)
         self.assertEqual([call[0] for call in board.calls], ["get_or_create", "route", "audit", "release"])
 
+    def test_completed_explicit_write_returns_verified_result_without_preview(self):
+        source = source_context()
+        request = {
+            "operation": "create",
+            "block_key": "bedroom-lesi-ukrainky-7a-2026-09-12-1300",
+            "summary": "Сходить в BEDROOM",
+            "start": "2026-09-12T13:00",
+            "end": "2026-09-12T14:00",
+            "details": "Адрес: Леси Украинки, 7а",
+        }
+        command = calendar_route.parse_calendar_request(
+            request, source_profile=source.profile,
+            uuid_factory=lambda: "11111111-1111-4111-8111-111111111111",
+        ).command
+        result = {
+            "schema_version": "calendar-result.v1",
+            "command_id": command["command_id"],
+            "idempotency_key": command["idempotency_key"],
+            "source_profile": source.profile,
+            "operation": "execute_write",
+            "phase": "completed",
+            "outcome": "applied",
+            "data": {
+                "operation": "create", "status": "verified", "reused": False,
+                "blockKey": request["block_key"],
+            },
+            "verified": True,
+        }
+        board = FakeBoard(existing={
+            "id": "t_deadbeef", "status": "done", "session_id": source.session_id,
+            "idempotency_key": calendar_route.delivery_key(command["idempotency_key"], source),
+            "body": calendar_route.build_calendar_task_body(command),
+            "result": json.dumps(result),
+        })
+
+        output = calendar_route.route_calendar_request(request, source=source, board=board)
+
+        self.assertEqual(output["status"], "completed")
+        self.assertEqual(output["phase"], "completed")
+        self.assertTrue(output["changed"])
+        self.assertNotIn("preview", output)
+        self.assertEqual(output["data"]["status"], "verified")
+
+    def test_completed_explicit_write_rejects_wrong_target_or_operation(self):
+        source = source_context()
+        request = {
+            "operation": "create", "block_key": "expected", "summary": "Create event",
+            "start": "2026-09-12T13:00", "end": "2026-09-12T14:00", "details": "",
+        }
+        command = calendar_route.parse_calendar_request(
+            request, source_profile=source.profile,
+            uuid_factory=lambda: "11111111-1111-4111-8111-111111111111",
+        ).command
+        base = {
+            "schema_version": "calendar-result.v1", "command_id": command["command_id"],
+            "idempotency_key": command["idempotency_key"], "source_profile": source.profile,
+            "operation": "execute_write", "phase": "completed", "outcome": "applied",
+            "verified": True,
+        }
+        for bad_data in (
+            {"operation": "delete", "status": "verified", "reused": False, "blockKey": "expected"},
+            {"operation": "create", "status": "verified", "reused": False, "blockKey": "different"},
+        ):
+            task = {
+                "id": "t_deadbeef", "status": "done", "session_id": source.session_id,
+                "body": calendar_route.build_calendar_task_body(command),
+                "result": json.dumps({**base, "data": bad_data}),
+            }
+            with self.subTest(data=bad_data), self.assertRaisesRegex(
+                calendar_route.CalendarRouteError, "apply completion"
+            ):
+                calendar_route._load_completed(task, command)
+
+    def test_completed_explicit_write_rejects_inconsistent_outcome_and_reused(self):
+        source = source_context()
+        request = {
+            "operation": "create", "block_key": "expected", "summary": "Create event",
+            "start": "2026-09-12T13:00", "end": "2026-09-12T14:00", "details": "",
+        }
+        command = calendar_route.parse_calendar_request(
+            request, source_profile=source.profile,
+            uuid_factory=lambda: "11111111-1111-4111-8111-111111111111",
+        ).command
+        base = {
+            "schema_version": "calendar-result.v1", "command_id": command["command_id"],
+            "idempotency_key": command["idempotency_key"], "source_profile": source.profile,
+            "operation": "execute_write", "phase": "completed", "verified": True,
+        }
+        for outcome, reused in (("applied", True), ("no_op", False)):
+            task = {
+                "id": "t_deadbeef", "status": "done", "session_id": source.session_id,
+                "body": calendar_route.build_calendar_task_body(command),
+                "result": json.dumps({
+                    **base,
+                    "outcome": outcome,
+                    "data": {
+                        "operation": "create", "status": "verified", "reused": reused,
+                        "blockKey": "expected",
+                    },
+                }),
+            }
+            with self.subTest(outcome=outcome, reused=reused), self.assertRaisesRegex(
+                calendar_route.CalendarRouteError, "apply completion"
+            ):
+                calendar_route._load_completed(task, command)
+
     def test_completed_plan_replay_returns_exact_preview_and_opaque_reference(self):
         source = source_context()
         request = {
@@ -199,11 +345,7 @@ class CalendarRoutingTests(unittest.TestCase):
             "linear_url": "https://linear.app/sisyphusx/issue/SIS-123/calendar-routing",
             "details": "",
         }
-        command = calendar_route.parse_calendar_request(
-            request,
-            source_profile=source.profile,
-            uuid_factory=lambda: "11111111-1111-4111-8111-111111111111",
-        ).command
+        command = legacy_plan_command(request, source_profile=source.profile)
         envelope = calendar_route.build_calendar_task_body(command)
         preview = {
             "operation": "create",
@@ -251,7 +393,8 @@ class CalendarRoutingTests(unittest.TestCase):
             "body": envelope,
             "result": json.dumps(result),
         })
-        output = calendar_route.route_calendar_request(request, source=source, board=board)
+        task = dict(board.existing or {})
+        output = calendar_route._load_completed(task, command)
         self.assertEqual(output["status"], "completed")
         self.assertEqual(output["preview"], preview)
         self.assertEqual(output["approval_reference"], result["approval_reference"])
@@ -297,6 +440,10 @@ class CalendarRoutingTests(unittest.TestCase):
             "idempotency_key": calendar_route.delivery_key(command["idempotency_key"], source),
             "body": calendar_route.build_calendar_task_body(command),
             "result": json.dumps(result),
+        }, approval_write_identity={
+            "operation": "create",
+            "block_key": "lavina-rusanovka-2026-09-06",
+            "linear_issue": None,
         })
 
         output = calendar_route.route_calendar_request(request, source=source, board=board)
@@ -338,6 +485,34 @@ class CalendarRoutingTests(unittest.TestCase):
                 task, command, expected_linear_issue="SIS-123"
             )
 
+    def test_completed_legacy_approval_rejects_wrong_operation_or_block_key(self):
+        source = source_context()
+        request = {"operation": "approve", "approval_reference": "calendar-approval:v1:" + "a" * 64}
+        command = calendar_route.parse_calendar_request(
+            request, source_profile=source.profile,
+            uuid_factory=lambda: "11111111-1111-4111-8111-111111111111",
+        ).command
+        base = {
+            "schema_version": "calendar-result.v1", "command_id": command["command_id"],
+            "idempotency_key": command["idempotency_key"], "source_profile": source.profile,
+            "operation": "approve_write", "phase": "completed", "outcome": "applied",
+            "verified": True,
+        }
+        expected = {"operation": "create", "block_key": "primary", "linear_issue": None}
+        for bad_data in (
+            {"operation": "delete", "status": "verified", "reused": False, "blockKey": "primary"},
+            {"operation": "create", "status": "verified", "reused": False, "blockKey": "wrong"},
+        ):
+            task = {
+                "id": "t_deadbeef", "status": "done", "session_id": source.session_id,
+                "body": calendar_route.build_calendar_task_body(command),
+                "result": json.dumps({**base, "data": bad_data}),
+            }
+            with self.subTest(data=bad_data), self.assertRaisesRegex(
+                calendar_route.CalendarRouteError, "apply completion"
+            ):
+                calendar_route._load_completed(task, command, expected_write_identity=expected)
+
     def test_completed_plan_replay_rejects_substituted_opaque_reference(self):
         source = source_context()
         request = {
@@ -345,10 +520,7 @@ class CalendarRoutingTests(unittest.TestCase):
             "start": "2026-09-07T10:00", "end": "2026-09-07T10:30",
             "linear_url": "https://linear.app/sisyphusx/issue/SIS-123/calendar-routing", "details": "",
         }
-        command = calendar_route.parse_calendar_request(
-            request, source_profile=source.profile,
-            uuid_factory=lambda: "11111111-1111-4111-8111-111111111111",
-        ).command
+        command = legacy_plan_command(request, source_profile=source.profile)
         plan_reference = {
             "run_id": "22222222-2222-4222-8222-222222222222",
             "artifact_version": 7,
