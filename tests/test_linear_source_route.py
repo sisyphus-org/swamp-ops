@@ -1,7 +1,10 @@
+import concurrent.futures
 import importlib.util
 import json
 import sys
+import threading
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -1222,6 +1225,194 @@ class DispatchTests(unittest.TestCase):
         )
         body = json.loads(board.calls[0][2]["body"])
         self.assertEqual(body["command"]["source_profile"], "books")
+
+    def test_fixed_approved_delete_matrix_routes_every_exact_selector(self):
+        selectors = {
+            "issue": ({"identifier": "SIS-77"}, "SIS-77"),
+            "project": ({"name": "Exact project"}, "Exact project"),
+            "milestone": (
+                {"project": "Exact project", "name": "Exact milestone"},
+                "Exact project / Exact milestone",
+            ),
+            "initiative": ({"name": "Exact initiative"}, "Exact initiative"),
+        }
+        for entity_type, (selector, expected_label) in selectors.items():
+            with self.subTest(entity_type=entity_type):
+                board = FakeBoard()
+                result = route.route_request(
+                    {
+                        "operation": "delete_linear_entity",
+                        "entity_type": entity_type,
+                        "selector": selector,
+                        "approval": approval_reference(),
+                    },
+                    source=source_context(),
+                    board=board,
+                    uuid_factory=uuid_factory(),
+                )
+                self.assertEqual(result["status"], "queued")
+                created = board.calls[0][2]
+                self.assertEqual(
+                    created["title"],
+                    f"Linear delete_linear_entity {expected_label}",
+                )
+                self.assertLessEqual(len(expected_label), 200)
+                command = json.loads(created["body"])["command"]
+                self.assertEqual(
+                    command["target"],
+                    {"type": entity_type, "selector": selector},
+                )
+
+    def test_expired_preview_concurrently_reserves_one_fresh_successor(self):
+        class StatefulBoard(FakeBoard):
+            def __init__(self):
+                super().__init__()
+                self.lock = threading.Lock()
+                self.tasks = {}
+                self.preview_records = []
+                self.attempted = set()
+
+            def get_or_create_task(self, delivery_key, **kwargs):
+                with self.lock:
+                    self.calls.append(("get_or_create", delivery_key, kwargs))
+                    task = self.tasks.get(delivery_key)
+                    if task is not None:
+                        return dict(task), False
+                    task = {
+                        "id": f"t_{delivery_key.rsplit(':', 1)[-1][:8]}",
+                        "status": "triage",
+                        "session_id": kwargs["session_id"],
+                        "idempotency_key": delivery_key,
+                        "body": kwargs["body"],
+                        "result": None,
+                    }
+                    self.tasks[delivery_key] = task
+                    return dict(task), True
+
+            def record_delete_preview(self, task_id, source, result):
+                with self.lock:
+                    record = (task_id, source, result)
+                    if self.preview_records and self.preview_records[-1] != record:
+                        raise AssertionError("conflicting preview record")
+                    if not self.preview_records:
+                        self.preview_records.append(record)
+
+            def delete_preview_requires_successor(self, task_id):
+                return task_id in self.attempted
+
+        request = {
+            "operation": "preview_delete_linear_entity",
+            "entity_type": "issue",
+            "selector": {"identifier": "SIS-77"},
+        }
+        source = source_context()
+        board = StatefulBoard()
+        first = route.route_request(request, source=source, board=board)
+        expired_task = board.tasks[first["delivery_key"]]
+        persisted = json.loads(expired_task["body"])["command"]
+        expired_task["status"] = "done"
+        expired_task["result"] = json.dumps(
+            {
+                "schema_version": "linear-result.v2",
+                "command_id": persisted["command_id"],
+                "correlation_id": persisted["correlation_id"],
+                "idempotency_key": persisted["idempotency_key"],
+                "source_profile": persisted["source_profile"],
+                "operation": persisted["operation"],
+                "mode": "apply",
+                "target": persisted["target"],
+                "result": "read",
+                "before": {"entity": {"identifier": "SIS-77"}},
+                "after": {"present": False},
+                "plan": [{"action": "delete_linear_entity"}],
+                "no_op": True,
+                "verified": True,
+                "approval_intent": {
+                    "operation": "delete_linear_entity",
+                    "target": persisted["target"],
+                    "change": {},
+                },
+                "before_state_hash": "a" * 64,
+                "expires_at": "2026-09-06T20:00:00Z",
+                "delete_semantics": "recoverable_trash_30_days",
+            }
+        )
+        fixed_now = datetime(2026, 9, 6, 20, 0, 1, tzinfo=timezone.utc)
+
+        def replay(_index):
+            return route.route_request(
+                request,
+                source=source,
+                board=board,
+                now_factory=lambda: fixed_now,
+            )
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(replay, (1, 2)))
+
+        successor_ids = {result["task_id"] for result in results}
+        self.assertEqual(len(successor_ids), 1)
+        self.assertNotIn(expired_task["id"], successor_ids)
+        self.assertEqual(len(board.tasks), 2)
+        self.assertEqual(
+            [result["status"] for result in results],
+            ["queued", "queued"],
+        )
+        self.assertEqual(
+            {result["replayed"] for result in results},
+            {False, True},
+        )
+        self.assertEqual(board.preview_records, [])
+        serialized = json.dumps(results, sort_keys=True)
+        self.assertNotIn("linear-delete-approval:v1:", serialized)
+
+        successor = next(
+            task for task in board.tasks.values() if task["id"] in successor_ids
+        )
+        successor_command = json.loads(successor["body"])["command"]
+        successor["status"] = "done"
+        successor["result"] = json.dumps(
+            {
+                "schema_version": "linear-result.v2",
+                "command_id": successor_command["command_id"],
+                "correlation_id": successor_command["correlation_id"],
+                "idempotency_key": successor_command["idempotency_key"],
+                "source_profile": successor_command["source_profile"],
+                "operation": successor_command["operation"],
+                "mode": "apply",
+                "target": successor_command["target"],
+                "result": "read",
+                "before": {"entity": {"identifier": "SIS-77"}},
+                "after": {"present": False},
+                "plan": [{"action": "delete_linear_entity"}],
+                "no_op": True,
+                "verified": True,
+                "approval_intent": {
+                    "operation": "delete_linear_entity",
+                    "target": successor_command["target"],
+                    "change": {},
+                },
+                "before_state_hash": "b" * 64,
+                "expires_at": "2026-09-06T20:15:00Z",
+                "delete_semantics": "recoverable_trash_30_days",
+            }
+        )
+        unexpired_replays = [replay(index) for index in (3, 4)]
+        self.assertEqual(len(board.tasks), 2)
+        self.assertEqual(
+            {item["task_id"] for item in unexpired_replays}, successor_ids
+        )
+        self.assertEqual(
+            len({item["linear_result"]["approval_reference"] for item in unexpired_replays}),
+            1,
+        )
+        self.assertEqual(len(board.preview_records), 1)
+
+        board.attempted.add(successor["id"])
+        fresh_after_unknown = replay(5)
+        self.assertEqual(fresh_after_unknown["status"], "queued")
+        self.assertNotEqual(fresh_after_unknown["task_id"], successor["id"])
+        self.assertEqual(len(board.tasks), 3)
 
     def test_cross_profile_and_session_deliveries_share_mutation_key_but_create_separate_tasks(self):
         request = {

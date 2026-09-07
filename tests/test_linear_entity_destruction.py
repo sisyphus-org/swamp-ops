@@ -8,6 +8,7 @@ from unittest import mock
 
 from plugins.linear_source_route import (
     LINEAR_SOURCE_REQUEST_SCHEMA,
+    _public_result,
     _public_target,
     route as source_route,
 )
@@ -32,10 +33,12 @@ def destructive_command(operation, entity_type, selector, *, key=None, policy=No
     }
 
 
-def bind(raw, before):
+def bind(raw, plan):
     bound = copy.deepcopy(raw)
     intent = {key: bound[key] for key in ("operation", "target", "change")}
-    before_hash = owner_approval.canonical_sha256(before)
+    before_hash = plan.get("before_state_hash") or owner_approval.canonical_sha256(
+        plan["before"]
+    )
     bound["policy"]["approval"]["intent_hash"] = owner_approval.canonical_sha256(intent)
     bound["policy"]["approval"]["before_state_hash"] = before_hash
     verified = approval.VerifiedOwnerApproval(
@@ -178,9 +181,128 @@ class LinearEntityDestructionTests(unittest.TestCase):
         ("delete_linear_entity", "initiative", {"name": "Empty initiative"}),
     )
 
+    def test_delete_preview_is_verified_read_only_and_binds_exact_before_state(self):
+        client = DestructiveClient()
+        raw = destructive_command(
+            "preview_delete_linear_entity",
+            "issue",
+            {"identifier": "SIS-77"},
+            policy={"mode": "standard"},
+        )
+
+        result = lane.execute_command(client, raw, mode="apply", journal_path=None)
+
+        self.assertEqual(client.writes, [])
+        self.assertEqual(result["operation"], "preview_delete_linear_entity")
+        self.assertEqual(result["result"], "read")
+        self.assertTrue(result["verified"])
+        self.assertTrue(result["no_op"])
+        self.assertEqual(result["target"], raw["target"])
+        self.assertEqual(result["before"]["entity"]["identifier"], "SIS-77")
+        self.assertEqual(result["before"]["entity"]["project"]["name"], "P")
+        self.assertEqual(result["before"]["entity"]["projectMilestone"]["name"], "M")
+        self.assertEqual(result["before"]["impact_counts"], {"children": 0, "relations": 0})
+        self.assertEqual(
+            result["approval_intent"],
+            {
+                "operation": "delete_linear_entity",
+                "target": raw["target"],
+                "change": {},
+            },
+        )
+        self.assertRegex(result["before_state_hash"], r"^[0-9a-f]{64}$")
+        self.assertNotEqual(
+            result["before_state_hash"],
+            owner_approval.canonical_sha256(result["before"]),
+        )
+        self.assertEqual(result["delete_semantics"], "recoverable_trash_30_days")
+        expires = datetime.strptime(result["expires_at"], "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+        self.assertGreater(expires, datetime.now(timezone.utc))
+        self.assertLessEqual(expires, datetime.now(timezone.utc) + timedelta(minutes=16))
+
+    def test_source_replay_accepts_identity_bound_preview_hash_without_raw_ids(self):
+        client = DestructiveClient()
+        source = source_route.SourceContext(
+            session_id="20260906_120000_abcdef12",
+            profile="default",
+            platform="telegram",
+            chat_id="442308262",
+            user_id="442308262",
+            chat_type="dm",
+            thread_id="454007",
+        )
+        uuids = iter(
+            [
+                "11111111-1111-4111-8111-111111111111",
+                "22222222-2222-4222-8222-222222222222",
+            ]
+        )
+        command_value = source_route.parse_linear_request(
+            {
+                "operation": "preview_delete_linear_entity",
+                "entity_type": "issue",
+                "selector": {"identifier": "SIS-77"},
+            },
+            source_profile="default",
+            uuid_factory=lambda: next(uuids),
+        ).command
+        pm_result = lane.execute_command(
+            client, command_value, mode="apply", journal_path=None
+        )
+        self.assertNotEqual(
+            pm_result["before_state_hash"],
+            owner_approval.canonical_sha256(pm_result["before"]),
+        )
+
+        class CompletedBoard:
+            def __init__(self):
+                self.recorded = None
+
+            def get_or_create_task(self, _delivery_key, **kwargs):
+                return (
+                    {
+                        "id": "t_1234abcd",
+                        "status": "done",
+                        "session_id": source.session_id,
+                        "idempotency_key": kwargs["idempotency_key"],
+                        "body": kwargs["body"],
+                        "result": json.dumps(pm_result),
+                    },
+                    False,
+                )
+
+            def record_delete_preview(self, task_id, exact_source, result):
+                self.recorded = (task_id, exact_source, result)
+
+        board = CompletedBoard()
+        route_uuids = iter(
+            [
+                "11111111-1111-4111-8111-111111111111",
+                "22222222-2222-4222-8222-222222222222",
+            ]
+        )
+        routed = source_route.route_request(
+            {
+                "operation": "preview_delete_linear_entity",
+                "entity_type": "issue",
+                "selector": {"identifier": "SIS-77"},
+            },
+            source=source,
+            board=board,
+            uuid_factory=lambda: next(route_uuids),
+        )
+
+        self.assertEqual(routed["status"], "verified_no_op")
+        self.assertIsNotNone(board.recorded)
+        serialized = json.dumps(_public_result(routed), sort_keys=True)
+        self.assertNotIn("issue-id", serialized)
+        self.assertNotIn(pm_result["before_state_hash"], serialized)
+
     def apply(self, raw, client, journal):
         planned = lane.execute_command(client, raw, mode="plan")
-        raw, verified = bind(raw, planned["before"])
+        raw, verified = bind(raw, planned)
         with mock.patch("plugins.project_manager_linear.approval.verify_owner_approval", return_value=verified):
             return execute_claimed_task(raw, task_id="t_1234abcd", lane=lane, client=client, journal_path=journal, approval_now=NOW)
 
@@ -322,7 +444,7 @@ class LinearEntityDestructionTests(unittest.TestCase):
                     key=f"linear:destroy:missing:{missing}",
                 )
                 planned = lane.execute_command(client, raw, mode="plan")
-                raw, consumed = bind(raw, planned["before"])
+                raw, consumed = bind(raw, planned)
                 auth = approval.ConsumedOwnerApproval(
                     consumed, _marker=approval._CONSUMED_MARKER
                 )
@@ -352,7 +474,7 @@ class LinearEntityDestructionTests(unittest.TestCase):
         for client, message in ((Failure(), "api failed"), (Drift(), "read-back")):
             raw = destructive_command("archive_linear_entity", "issue", {"identifier": "SIS-77"}, key=f"linear:destroy:failure:{type(client).__name__}")
             planned = lane.execute_command(client, raw, mode="plan")
-            raw, consumed = bind(raw, planned["before"])
+            raw, consumed = bind(raw, planned)
             auth = approval.ConsumedOwnerApproval(consumed, _marker=approval._CONSUMED_MARKER)
             with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex((RuntimeError, lane.ContractError), message):
                 lane.execute_command(client, raw, mode="apply", journal_path=Path(tmp)/"j.json", owner_approval_authorization=auth)
@@ -374,7 +496,7 @@ class LinearEntityDestructionTests(unittest.TestCase):
         client.configure_nonempty_impact("issue")
         raw = destructive_command("delete_linear_entity", "issue", {"identifier": "SIS-77"}, key="linear:destroy:impact-drift")
         approved = lane.execute_command(client, raw, mode="plan")
-        raw, verified = bind(raw, approved["before"])
+        raw, verified = bind(raw, approved)
         client.calls = 0
         with tempfile.TemporaryDirectory() as tmp, mock.patch(
             "plugins.project_manager_linear.approval.verify_owner_approval",
@@ -383,6 +505,84 @@ class LinearEntityDestructionTests(unittest.TestCase):
             execute_claimed_task(
                 raw, task_id="t_1234abcd", lane=lane, client=client,
                 journal_path=Path(tmp) / "journal.json", approval_now=NOW,
+            )
+        self.assertEqual(client.writes, [])
+
+    def test_delete_preview_hash_changes_for_internal_identity_only_drift(self):
+        baseline_client = DestructiveClient()
+        baseline_client.configure_nonempty_impact("issue")
+        raw = destructive_command(
+            "preview_delete_linear_entity",
+            "issue",
+            {"identifier": "SIS-77"},
+            policy={"mode": "standard"},
+        )
+        baseline = lane.execute_command(
+            baseline_client, raw, mode="apply", journal_path=None
+        )
+        self.assertEqual(
+            baseline["before"]["impact"]["children"],
+            [{"identifier": "SIS-78", "title": "Child"}],
+        )
+        mutations = {
+            "entity": lambda client: client.entities["issues"][0].update(
+                {"id": "replacement-issue-id"}
+            ),
+            "child": lambda client: client.children[0].update(
+                {"id": "replacement-child-id"}
+            ),
+            "relation": lambda client: client.issue_relations[0].update(
+                {"id": "replacement-relation-id"}
+            ),
+            "endpoint": lambda client: client.issue_relations[0]["relatedIssue"].update(
+                {"id": "replacement-endpoint-id"}
+            ),
+        }
+        for identity, mutate in mutations.items():
+            client = DestructiveClient()
+            client.configure_nonempty_impact("issue")
+            mutate(client)
+            changed = lane.execute_command(client, raw, mode="apply", journal_path=None)
+            with self.subTest(identity=identity):
+                self.assertEqual(changed["before"], baseline["before"])
+                self.assertNotEqual(
+                    changed["before_state_hash"], baseline["before_state_hash"]
+                )
+
+    def test_apply_rejects_identity_drift_in_its_final_inventory_before_mutation(self):
+        class FinalIdentityDrift(DestructiveClient):
+            root_reads = 0
+
+            def list_child_issues(self, identifier):
+                values = super().list_child_issues(identifier)
+                if identifier == "SIS-77":
+                    self.root_reads += 1
+                    if self.root_reads >= 3:
+                        values[0]["id"] = "replacement-child-id"
+                return values
+
+        client = FinalIdentityDrift()
+        client.configure_nonempty_impact("issue")
+        raw = destructive_command(
+            "delete_linear_entity",
+            "issue",
+            {"identifier": "SIS-77"},
+            key="linear:destroy:final-identity-drift",
+        )
+        approved = lane.execute_command(client, raw, mode="plan")
+        raw, verified = bind(raw, approved)
+        client.root_reads = 0
+        with tempfile.TemporaryDirectory() as tmp, mock.patch(
+            "plugins.project_manager_linear.approval.verify_owner_approval",
+            return_value=verified,
+        ), self.assertRaisesRegex((approval.ApprovalError, lane.ContractError), "drift"):
+            execute_claimed_task(
+                raw,
+                task_id="t_1234abcd",
+                lane=lane,
+                client=client,
+                journal_path=Path(tmp) / "journal.json",
+                approval_now=NOW,
             )
         self.assertEqual(client.writes, [])
 
@@ -464,6 +664,44 @@ class LinearEntityDestructionTests(unittest.TestCase):
             with self.assertRaises(source_route.RouteError):
                 _public_target({"operation": "archive_linear_entity", "target": target, "after": {"archived": True}})
 
+    def test_delete_preview_public_children_require_exact_safe_issue_shape(self):
+        result = {
+            "operation": "preview_delete_linear_entity",
+            "target": {"type": "issue", "selector": {"identifier": "SIS-77"}},
+            "before": {
+                "entity": {
+                    "identifier": "SIS-77",
+                    "title": "Disposable",
+                    "url": "https://linear.app/acme/issue/SIS-77/disposable",
+                    "project": None,
+                    "projectMilestone": None,
+                },
+                "archived": False,
+                "impact": {
+                    "children": [{"identifier": "SIS-78", "title": "Child"}],
+                    "relations": [],
+                },
+                "impact_counts": {"children": 1, "relations": 0},
+            },
+            "approval_reference": "linear-delete-approval:v1:" + "a" * 64,
+            "delete_semantics": "recoverable_trash_30_days",
+            "expires_at": "2099-09-06T20:00:00Z",
+        }
+        _public_target(result)
+        malformed = (
+            {"identifier": "owner@example.com", "title": "Child"},
+            {"identifier": "internal-child-id", "title": "Child"},
+            {"identifier": 78, "title": "Child"},
+            {"identifier": "SIS-78"},
+            {"identifier": "SIS-78", "title": "Child", "id": "raw-child-id"},
+            {"identifier": "SIS-78", "title": "Child", "email": "owner@example.com"},
+        )
+        for child in malformed:
+            tampered = copy.deepcopy(result)
+            tampered["before"]["impact"]["children"] = [child]
+            with self.subTest(child=child), self.assertRaises(source_route.RouteError):
+                _public_target(tampered)
+
     def test_source_and_approval_contracts_are_exact_and_narrow(self):
         reference = owner_policy()["approval"]
         for operation, entity_type, selector in self.SUPPORTED:
@@ -504,7 +742,7 @@ class LinearEntityDestructionTests(unittest.TestCase):
         client = Crash()
         raw = destructive_command("archive_linear_entity", "issue", {"identifier": "SIS-77"}, key="linear:destroy:crash:issue")
         planned = lane.execute_command(client, raw, mode="plan")
-        raw, verified = bind(raw, planned["before"])
+        raw, verified = bind(raw, planned)
         with tempfile.TemporaryDirectory() as tmp, mock.patch("plugins.project_manager_linear.approval.verify_owner_approval", return_value=verified) as verifier:
             journal = Path(tmp)/"j.json"
             with self.assertRaises(KeyboardInterrupt):
@@ -536,7 +774,7 @@ class LinearEntityDestructionTests(unittest.TestCase):
             {"name": "Empty project"}, key="linear:destroy:crash:project",
         )
         planned = lane.execute_command(client, raw, mode="plan")
-        raw, verified = bind(raw, planned["before"])
+        raw, verified = bind(raw, planned)
         with tempfile.TemporaryDirectory() as tmp, mock.patch(
             "plugins.project_manager_linear.approval.verify_owner_approval",
             return_value=verified,
@@ -579,7 +817,7 @@ class LinearEntityDestructionTests(unittest.TestCase):
                     key=f"linear:destroy:archive-recovery-drift:{drift}",
                 )
                 planned = lane.execute_command(client, raw, mode="plan")
-                raw, verified = bind(raw, planned["before"])
+                raw, verified = bind(raw, planned)
                 journal = Path(tmp) / "j.json"
                 with mock.patch(
                     "plugins.project_manager_linear.approval.verify_owner_approval",
@@ -644,7 +882,7 @@ class LinearEntityDestructionTests(unittest.TestCase):
                     key=f"linear:destroy:delete-recovery-drift:{drift}",
                 )
                 planned = lane.execute_command(client, raw, mode="plan")
-                raw, verified = bind(raw, planned["before"])
+                raw, verified = bind(raw, planned)
                 journal = Path(tmp) / "j.json"
                 with mock.patch(
                     "plugins.project_manager_linear.approval.verify_owner_approval",

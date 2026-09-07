@@ -148,6 +148,7 @@ def execute_pm_command(
         "inventory_sub_issues",
         "search_linear",
         "inventory_linear",
+        "preview_delete_linear_entity",
     }:
         result = lane.execute_command(
             client,
@@ -281,7 +282,14 @@ def execute_pm_command(
                 lease_seconds=approval_lease_seconds,
             )
         else:
-            before_state_hash = contract.canonical_sha256(plan.get("before"))
+            before_state_hash = (
+                plan.get("before_state_hash")
+                if validated["operation"]
+                in {"archive_linear_entity", "delete_linear_entity"}
+                else contract.canonical_sha256(plan.get("before"))
+            )
+            if not isinstance(before_state_hash, str):
+                raise ApprovalError("owner approval before-state hash is invalid")
             verified_approval = verify_owner_approval(
                 validated["policy"],
                 expected_intent=expected_intent,
@@ -369,8 +377,11 @@ def execute_pm_command(
                 or not approved_target_matches
                 or approved_plan_binding["plan"] is None
                 or not live_before_matches
-                or contract.canonical_sha256(live_plan.get("before"))
-                != before_state_hash
+                or (
+                    live_plan.get("before_state_hash")
+                    if operation in {"archive_linear_entity", "delete_linear_entity"}
+                    else contract.canonical_sha256(live_plan.get("before"))
+                ) != before_state_hash
                 or contract.canonical_sha256(live_plan_binding)
                 != contract.canonical_sha256(approved_plan_binding)
             ):

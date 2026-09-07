@@ -3,11 +3,21 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
 import subprocess
 from pathlib import Path
 from typing import Any
 
-from .broker import BrokerError, execute_request, resolve_caller, validate_request
+from .broker import (
+    BrokerError,
+    _issue_linear_delete_attestation,
+    _load_linear_delete_preview,
+    _record_linear_delete_approval,
+    _record_linear_delete_approval_attempt,
+    execute_request,
+    resolve_caller,
+    validate_request,
+)
 
 
 PLUGIN_ROOT = Path(__file__).resolve().parent
@@ -43,6 +53,7 @@ OPS_BROKER_SCHEMA = {
                     "plan_linear_destructive_owner_approval",
                     "start_linear_destructive_owner_approval_attest",
                     "approve_linear_destructive_owner_approval_attest",
+                    "approve_linear_delete_preview",
                     "get_result",
                 ],
             },
@@ -130,6 +141,31 @@ def handle_ops_broker(args: dict[str, Any], **kwargs: Any) -> str:
             "OPS_BROKER_AUDIT",
             hermes_home / "plugin-data" / "ops-broker" / "audit.jsonl",
         )
+        preview_loader = kwargs.get("preview_loader") or (
+            lambda reference, exact_session: _load_linear_delete_preview(
+                reference,
+                exact_session,
+                policy=policy,
+            )
+        )
+        attestation_issuer = kwargs.get("attestation_issuer") or (
+            lambda preview: _issue_linear_delete_attestation(
+                preview,
+                policy=policy,
+                runner=default_runner,
+                workspace=workspace,
+                audit_path=audit_path,
+            )
+        )
+        approval_recorder = kwargs.get("approval_recorder") or (
+            lambda preview, granted: _record_linear_delete_approval(
+                preview,
+                granted,
+            )
+        )
+        approval_attempt_recorder = kwargs.get("approval_attempt_recorder") or (
+            lambda preview: _record_linear_delete_approval_attempt(preview)
+        )
         result = execute_request(
             request,
             caller=caller,
@@ -137,6 +173,12 @@ def handle_ops_broker(args: dict[str, Any], **kwargs: Any) -> str:
             runner=default_runner,
             workspace=workspace,
             audit_path=audit_path,
+            session_id=session_id,
+            preview_loader=preview_loader,
+            attestation_issuer=attestation_issuer,
+            approval_recorder=approval_recorder,
+            approval_attempt_recorder=approval_attempt_recorder,
+            approval_lock_root=audit_path.parent / "linear-delete-confirmation-locks",
         )
         return json.dumps(result, sort_keys=True)
     except (
@@ -145,6 +187,7 @@ def handle_ops_broker(args: dict[str, Any], **kwargs: Any) -> str:
         TypeError,
         ValueError,
         OSError,
+        sqlite3.Error,
         json.JSONDecodeError,
         subprocess.TimeoutExpired,
     ) as exc:

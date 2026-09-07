@@ -8,7 +8,7 @@ import json
 import re
 import uuid
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any, Callable
 
 
@@ -20,6 +20,9 @@ SESSION_ID = re.compile(r"^[0-9]{8}_[0-9]{6}_[a-f0-9]{8}$")
 PROFILE_NAME = re.compile(r"^[a-z][a-z0-9-]{1,30}$")
 SPECIAL_PROFILES = {"broker", "project-manager"}
 NUMERIC_ID = re.compile(r"^[1-9][0-9]*$")
+LINEAR_DELETE_APPROVAL_REFERENCE = re.compile(
+    r"^linear-delete-approval:v1:[0-9a-f]{64}$"
+)
 TERMINAL_IN_FLIGHT = {"todo", "ready", "running", "review"}
 CREDENTIAL_SHAPES = (
     re.compile(r"Authorization:\s*(?:Bearer|Basic)\s+\S+", re.IGNORECASE),
@@ -41,6 +44,8 @@ LINEAR_ENTITY_TYPES = ("issues", "projects", "milestones", "initiatives")
 MAX_SEARCH_QUERY = 500
 MAX_BULK_ITEMS = 50
 MAX_BULK_BYTES = 24_576
+MAX_TASK_LABEL_CHARS = 200
+MAX_DELETE_PREVIEW_GENERATIONS = 64
 BULK_MUTATING_OPERATIONS = {
     "change_state", "move_issue", "update_issue", "update_sub_issues", "add_comment", "create_issue",
     "converge_hierarchy", "create_standalone_issue", "converge_issue_tree",
@@ -76,6 +81,10 @@ class RouteError(RuntimeError):
     """The user command or source route violates the bounded contract."""
 
 
+class _ExpiredDeletePreview(RouteError):
+    """Signal that a valid completed preview needs a deterministic successor."""
+
+
 @dataclass(frozen=True)
 class SourceContext:
     """Exact source identity required for a session-thread wake route."""
@@ -101,6 +110,56 @@ UUIDFactory = Callable[[], str]
 
 def _uuid4() -> str:
     return str(uuid.uuid4())
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _canonical_sha256(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+
+
+def _delete_preview_reference(
+    task: dict[str, Any], result: dict[str, Any], source: SourceContext
+) -> str:
+    task_id = task.get("id")
+    session_id = task.get("session_id")
+    source_profile = result.get("source_profile")
+    if (
+        not isinstance(task_id, str)
+        or not re.fullmatch(r"t_[a-f0-9]{8,}", task_id)
+        or not isinstance(session_id, str)
+        or not session_id
+        or not isinstance(source_profile, str)
+        or not source_profile
+        or source.session_id != session_id
+        or source.profile != source_profile
+    ):
+        raise RouteError("delete preview lacks an exact task/session binding")
+    binding = {
+        "task_id": task_id,
+        "session_id": session_id,
+        "source": {
+            "profile": source.profile,
+            "platform": source.platform,
+            "chat_id": source.chat_id,
+            "user_id": source.user_id,
+            "thread_id": source.thread_id,
+            "session_id": source.session_id,
+        },
+        "approval_intent": result.get("approval_intent"),
+        "before_state_hash": result.get("before_state_hash"),
+        "expires_at": result.get("expires_at"),
+    }
+    return f"linear-delete-approval:v1:{_canonical_sha256(binding)}"
 
 
 def _semantic_key(command: dict[str, Any]) -> str:
@@ -137,6 +196,14 @@ def _delivery_key(mutation_key: str, source: SourceContext) -> str:
         ).encode()
     ).hexdigest()
     return f"linear-delivery:v2:{digest[:32]}"
+
+
+def _delete_preview_successor_key(delivery_key: str, task_id: str) -> str:
+    successor = {
+        "predecessor_delivery_key": delivery_key,
+        "predecessor_task_id": task_id,
+    }
+    return f"linear-delivery:v2:{_canonical_sha256(successor)[:32]}"
 
 
 def _validate_clean_text(
@@ -311,6 +378,22 @@ def _validate_destructive_request(request: dict[str, Any]) -> tuple[dict[str, An
         for field in ("project", "name"):
             _validate_clean_text(selector.get(field), f"selector.{field}", maximum=200, required=True)
     return {"type": entity_type, "selector": dict(selector)}, _validate_approval_reference(request["approval"])
+
+
+def _validate_delete_preview_request(request: dict[str, Any]) -> dict[str, Any]:
+    if set(request) != {"operation", "entity_type", "selector"}:
+        raise RouteError("delete preview must contain one exact typed selector")
+    entity_type = request.get("entity_type")
+    selector = request.get("selector")
+    if entity_type != "issue" or not isinstance(selector, dict):
+        raise RouteError("delete preview currently supports one exact issue")
+    if (
+        set(selector) != {"identifier"}
+        or not isinstance(selector.get("identifier"), str)
+        or re.fullmatch(r"SIS-[1-9][0-9]*", selector["identifier"]) is None
+    ):
+        raise RouteError("issue selector must be exactly one SIS-N")
+    return {"type": "issue", "selector": dict(selector)}
 
 
 def _validate_workspace_read_request(request: dict[str, Any]) -> dict[str, Any]:
@@ -1095,6 +1178,9 @@ def parse_linear_request(
                 "project": request["project"],
                 "initiative": request["initiative"],
             }
+        elif operation == "preview_delete_linear_entity":
+            target = _validate_delete_preview_request(request)
+            change = {}
         elif operation in {"archive_linear_entity", "delete_linear_entity"}:
             target, approval_reference = _validate_destructive_request(request)
             change = {}
@@ -1172,8 +1258,33 @@ def build_task_body(command: dict[str, Any]) -> str:
     return json.dumps(envelope, ensure_ascii=False, sort_keys=True)
 
 
+def _task_target_label(target: dict[str, Any]) -> str:
+    """Return one validated public selector label, bounded for task titles."""
+    label = target.get("identifier")
+    if label is None:
+        selector = target.get("selector")
+        if isinstance(selector, dict):
+            if isinstance(selector.get("identifier"), str):
+                label = selector["identifier"]
+            elif target.get("type") == "milestone" and all(
+                isinstance(selector.get(field), str) for field in ("project", "name")
+            ):
+                label = f"{selector['project']} / {selector['name']}"
+            elif isinstance(selector.get("name"), str):
+                label = selector["name"]
+    if not isinstance(label, str) or not label:
+        raise RouteError("Linear task target lacks a safe public label")
+    if len(label) > MAX_TASK_LABEL_CHARS:
+        label = label[: MAX_TASK_LABEL_CHARS - 1] + "…"
+    return label
+
+
 def _verified_replay(
-    task: dict[str, Any], command: dict[str, Any], delivery_key: str
+    task: dict[str, Any],
+    command: dict[str, Any],
+    delivery_key: str,
+    source: SourceContext,
+    now: datetime,
 ) -> dict[str, Any]:
     raw_result = task.get("result")
     try:
@@ -1277,7 +1388,47 @@ def _verified_replay(
     if not isinstance(target, dict):
         raise RouteError("completed replay has an invalid verified target")
     operation = persisted["operation"]
-    if operation in {"archive_linear_entity", "delete_linear_entity"}:
+    if operation == "preview_delete_linear_entity":
+        expected_intent = {
+            "operation": "delete_linear_entity",
+            "target": persisted["target"],
+            "change": {},
+        }
+        before = result.get("before")
+        expires_at = result.get("expires_at")
+        before_state_hash = result.get("before_state_hash")
+        if (
+            target != persisted["target"]
+            or not isinstance(before, dict)
+            or not isinstance(before_state_hash, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", before_state_hash)
+            or result.get("approval_intent") != expected_intent
+            or result.get("delete_semantics") != "recoverable_trash_30_days"
+            or not isinstance(expires_at, str)
+            or not re.fullmatch(
+                r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z",
+                expires_at,
+            )
+            or result.get("after") != {"present": False}
+            or not result.get("plan")
+        ):
+            raise RouteError("completed delete preview has an invalid protected binding")
+        approval_reference = _delete_preview_reference(task, result, source)
+        try:
+            expiry = datetime.strptime(expires_at, "%Y-%m-%dT%H:%M:%SZ").replace(
+                tzinfo=timezone.utc
+            )
+        except ValueError as exc:
+            raise RouteError(
+                "completed delete preview has an invalid protected binding"
+            ) from exc
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise RouteError("delete preview clock must be timezone-aware")
+        if expiry <= now.astimezone(timezone.utc):
+            raise _ExpiredDeletePreview("completed delete preview has expired")
+        result = dict(result)
+        result["approval_reference"] = approval_reference
+    elif operation in {"archive_linear_entity", "delete_linear_entity"}:
         if target != persisted["target"]:
             raise RouteError("completed replay target does not match persisted command")
     elif operation == "converge_hierarchy":
@@ -1431,6 +1582,7 @@ def route_request(
     source: SourceContext,
     board: Any,
     uuid_factory: UUIDFactory = _uuid4,
+    now_factory: Callable[[], datetime] = _utc_now,
 ) -> dict[str, Any]:
     """Create or replay one audited PM task and promote only after route pass."""
     validate_source_context(source)
@@ -1448,17 +1600,58 @@ def route_request(
             raise RouteError("legacy comment replay was not found")
         created = False
     else:
+        task_target = _task_target_label(command["target"])
+        task_fields = {
+            "title": f"Linear {command['operation']} {task_target}",
+            "body": build_task_body(command),
+            "assignee": "project-manager",
+            "skills": ["project-manager-linear-worker"],
+            "triage": True,
+            "session_id": source.session_id,
+            "max_runtime_seconds": 300,
+        }
         task, created = board.get_or_create_task(
             delivery_key,
-            title=f"Linear {command['operation']} {command['target']['identifier']}",
-            body=build_task_body(command),
-            assignee="project-manager",
-            skills=["project-manager-linear-worker"],
-            triage=True,
             idempotency_key=delivery_key,
-            session_id=source.session_id,
-            max_runtime_seconds=300,
+            **task_fields,
         )
+        generation = 0
+        while (
+            command["operation"] == "preview_delete_linear_entity"
+            and not created
+            and task.get("status") == "done"
+        ):
+            try:
+                requires_successor = getattr(
+                    board, "delete_preview_requires_successor", None
+                )
+                if (
+                    callable(requires_successor)
+                    and requires_successor(task["id"]) is True
+                ):
+                    raise _ExpiredDeletePreview(
+                        "delete approval attempt has an unknown outcome"
+                    )
+                completed = _verified_replay(
+                    task, command, delivery_key, source, now_factory()
+                )
+            except _ExpiredDeletePreview:
+                generation += 1
+                if generation > MAX_DELETE_PREVIEW_GENERATIONS:
+                    raise RouteError("delete preview successor chain exceeds the bound")
+                delivery_key = _delete_preview_successor_key(
+                    delivery_key, task.get("id", "")
+                )
+                task, created = board.get_or_create_task(
+                    delivery_key,
+                    idempotency_key=delivery_key,
+                    **task_fields,
+                )
+                continue
+            board.record_delete_preview(
+                task["id"], source, completed["linear_result"]
+            )
+            return completed
     replayed = not created
 
     if not created:
@@ -1468,7 +1661,14 @@ def route_request(
             raise RouteError("idempotent task belongs to a different source session")
         status = task.get("status")
         if status == "done":
-            return _verified_replay(task, command, delivery_key)
+            completed = _verified_replay(
+                task, command, delivery_key, source, now_factory()
+            )
+            if command["operation"] == "preview_delete_linear_entity":
+                board.record_delete_preview(
+                    task["id"], source, completed["linear_result"]
+                )
+            return completed
         if status == "blocked":
             return {
                 "status": "blocked",

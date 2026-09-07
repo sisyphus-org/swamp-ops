@@ -1,6 +1,6 @@
 # Linear owner-approved relation, parent, archive, and delete changes
 
-This repository exposes narrowly owner-approved destructive slices only:
+This repository retains the narrowly owner-approved direct destructive slices below. The separately generated preview/confirmation flow introduced for deletion is issue-only; it does not replace or broaden the fixed-approved matrix:
 
 1. replace or clear the parent of one exact `SIS-N` issue through parent-only `update_issue`;
 2. remove one exact existing issue relation by two exact `SIS-N` endpoints and `relation_type`;
@@ -23,6 +23,8 @@ persisted linear-command.v2 → PM common approval gate → bounded Linear mutat
 - Swamp never receives `LINEAR_TOKEN`, calls Linear, or mutates Linear. It creates immutable plan and approval-attestation artifacts only.
 - Broker caller identity comes from the authenticated session. A request body cannot claim owner identity.
 - Only the policy-bound Telegram owner may approve. A2A peers may plan and start the suspended attestation workflow but cannot approve it.
+
+For the generated issue-deletion flow, source does not accept an attestation object from the model. An approval-less exact issue `delete_linear_entity` call queues trusted `preview_delete_linear_entity`; approval-less project, milestone, and initiative deletes are rejected. PM computes the authoritative full before-state and 15-minute expiry without writing a recovery journal. Source persists that protected result on the completed task and returns only safe target/impact facts plus `linear-delete-approval:v1:<opaque>`. The reference binds task, exact source identity/session, exact target, before-state hash, and expiry. Explicit confirmation sends only that reference to broker operation `approve_linear_delete_preview`; the broker serializes by reference, reloads the protected preview inside that lock, verifies authenticated owner/session and any recorded grant, durably consumes the reference before external work, then executes at most one fixed Swamp plan/start/approve sequence and records the grant. Source then queues the exact bound issue delete. Replay reuses the single protected preview/grant/task and cannot create a second mutation. If the process fails after consumption but before a grant is durably recorded, the outcome is intentionally fail-closed: that reference cannot start a second sequence, and the next approval-less delete request creates one deterministic fresh preview successor. The preexisting direct calls carrying the fixed approval object remain accepted for the full delete matrix in this document.
 
 ## Exact approval intents
 
@@ -58,7 +60,7 @@ The attestation is emitted only after the fixed workflow suspends at `approve-li
 
 ## Source policy reference
 
-Without approval, source emits exactly `{"mode":"standard"}`. Relation removal and replacement reject that policy before Linear access. With approval, source accepts only the existing fixed structural reference shape and emits exactly:
+Without approval, source emits exactly `{"mode":"standard"}`. Relation removal and replacement reject that policy before Linear access. Direct issue delete is the exception at public ingress: no approval fields means trusted preview, not mutation. Its confirmation accepts only the opaque reference and retrieves the fixed policy from protected broker state. Other owner-approved operations accept only the existing fixed structural reference shape and emit exactly:
 
 ```json
 {"mode":"owner_approved","approval":{...fixed reference fields...}}
@@ -93,7 +95,7 @@ Wrong/expired/forged approval, wrong intent, wrong before hash, changed live pla
 
 ## Archive/delete matrix and behavior
 
-The exact supported matrix is deliberately asymmetric:
+The retained direct fixed-approved matrix is deliberately asymmetric. Generated approval-less preview/confirmation is an additional issue-only route:
 
 | operation | issue | project | milestone | initiative |
 |---|---:|---:|---:|---:|

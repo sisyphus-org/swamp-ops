@@ -47,10 +47,17 @@ OPERATIONS = {
     "link_project_to_initiative",
     "search_linear",
     "inventory_linear",
+    "preview_delete_linear_entity",
     "archive_linear_entity",
     "delete_linear_entity",
 }
-READ_OPERATIONS = {"read_issue", "inventory_sub_issues", "search_linear", "inventory_linear"}
+READ_OPERATIONS = {
+    "read_issue",
+    "inventory_sub_issues",
+    "search_linear",
+    "inventory_linear",
+    "preview_delete_linear_entity",
+}
 LINEAR_ENTITY_TYPES = ("issues", "projects", "milestones", "initiatives")
 MAX_SEARCH_QUERY = 500
 TERMINAL_STATES = {"Done", "Canceled"}
@@ -1366,16 +1373,21 @@ def validate_command(raw: Any) -> dict[str, Any]:
         "archive_linear_entity",
         "delete_linear_entity",
     }
+    delete_preview = operation == "preview_delete_linear_entity"
     if operation == "bulk_linear_operations":
         if target != {"type": "workspace", "identifier": "current"}:
             raise ContractError(
                 "bulk_linear_operations target must be the current workspace"
             )
-    elif destructive_operation:
-        _load_entity_destruction().validate_target(target, operation, ContractError)
+    elif destructive_operation or delete_preview:
+        _load_entity_destruction().validate_target(
+            target,
+            "delete_linear_entity" if delete_preview else operation,
+            ContractError,
+        )
     elif not isinstance(target, dict) or set(target) != {"type", "identifier"}:
         raise ContractError("target must contain exactly type and identifier")
-    if destructive_operation or operation == "bulk_linear_operations":
+    if destructive_operation or delete_preview or operation == "bulk_linear_operations":
         pass
     elif operation in {
         "create_issue",
@@ -1419,7 +1431,7 @@ def validate_command(raw: Any) -> dict[str, Any]:
         )
         for index in range(len(change["items"])):
             validate_command(bulk.derive_child_command(raw, index))
-    elif destructive_operation:
+    elif destructive_operation or delete_preview:
         if change:
             raise ContractError(f"{operation} change must be empty")
     elif operation in {"search_linear", "inventory_linear"}:
@@ -2350,6 +2362,13 @@ def execute_command(
 
     if command["operation"] in {"search_linear", "inventory_linear"}:
         return _workspace_read_result(client, command, mode=mode)
+
+    if command["operation"] == "preview_delete_linear_entity":
+        return _load_entity_destruction().preview_delete(
+            client,
+            command,
+            error_cls=ContractError,
+        )
 
     if command["operation"] in {"archive_linear_entity", "delete_linear_entity"}:
         return finish(
