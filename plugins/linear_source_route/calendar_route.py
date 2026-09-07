@@ -137,7 +137,10 @@ def _parse_calendar_request(
             raise CalendarRouteError("Calendar read request is outside the bounded allowlist")
         command_operation = operation
         canonical_request = {"window": request["window"]}
-    elif operation in WRITE_OPERATIONS:
+    elif operation == "create":
+        command_operation = "execute_write"
+        canonical_request = _write_request(request)
+    elif operation in {"update", "delete"}:
         command_operation = "plan_write"
         canonical_request = _write_request(request)
     elif operation == "approve":
@@ -229,6 +232,7 @@ def _load_completed(
     command: dict[str, Any],
     *,
     expected_linear_issue: str | None | object = _UNSET,
+    expected_write_identity: dict[str, Any] | object = _UNSET,
 ) -> dict[str, Any]:
     try:
         envelope = json.loads(task.get("body", ""))
@@ -359,10 +363,28 @@ def _load_completed(
             ):
                 raise CalendarRouteError("Calendar read completion is invalid")
         return {"status": "completed", "phase": "completed", "data": data}
-    if result["operation"] == "approve_write":
+    if result["operation"] in {"approve_write", "execute_write"}:
         required_apply = {"operation", "status", "reused", "blockKey"}
         allowed_apply = required_apply | {"linearIssue"}
         observed_linear_issue = data.get("linearIssue") if isinstance(data, dict) else None
+        expected_operation: str | object = _UNSET
+        expected_block_key: str | object = _UNSET
+        if result["operation"] == "execute_write":
+            match = PUBLIC_ISSUE_URL.fullmatch(persisted["request"].get("linear_url", ""))
+            expected_linear_issue = match.group(1) if match else None
+            expected_write_identity = {
+                "operation": persisted["request"].get("operation"),
+                "block_key": persisted["request"].get("block_key"),
+                "linear_issue": expected_linear_issue,
+            }
+        if expected_write_identity is not _UNSET:
+            if not isinstance(expected_write_identity, dict) or set(expected_write_identity) != {
+                "operation", "block_key", "linear_issue"
+            }:
+                raise CalendarRouteError("Calendar expected write identity is invalid")
+            expected_linear_issue = expected_write_identity["linear_issue"]
+            expected_operation = expected_write_identity["operation"]
+            expected_block_key = expected_write_identity["block_key"]
         linkage_matches = (
             expected_linear_issue is _UNSET
             or (expected_linear_issue is None and observed_linear_issue is None)
@@ -382,7 +404,22 @@ def _load_completed(
             or data.get("operation") not in WRITE_OPERATIONS
             or data.get("status") != "verified"
             or not isinstance(data.get("reused"), bool)
+            or (result.get("outcome") == "no_op") != data.get("reused")
             or not linkage_matches
+            or (
+                expected_operation is not _UNSET
+                and (
+                    data.get("operation") != expected_operation
+                    or data.get("blockKey") != expected_block_key
+                )
+            )
+            or (
+                result["operation"] == "execute_write"
+                and (
+                    data.get("operation") != persisted["request"].get("operation")
+                    or data.get("blockKey") != persisted["request"].get("block_key")
+                )
+            )
             or (
                 data.get("linearIssue") is not None
                 and (
@@ -403,10 +440,10 @@ def _load_completed(
     raise CalendarRouteError("Calendar result operation is invalid")
 
 
-def approval_plan_linear_issue(
+def approval_plan_write_identity(
     task: dict[str, Any], reference: str, source: SourceContext
-) -> str | None:
-    """Return the exact optional SIS identifier bound to one completed plan."""
+) -> dict[str, Any]:
+    """Return the exact write identity bound to one completed legacy plan."""
     try:
         envelope = json.loads(task.get("body", ""))
     except (TypeError, json.JSONDecodeError) as exc:
@@ -422,13 +459,26 @@ def approval_plan_linear_issue(
     completed = _load_completed(task, command)
     if completed.get("approval_reference") != reference:
         raise CalendarRouteError("Calendar approval plan reference is invalid")
-    linear_url = completed["preview"].get("linear_url")
-    if not linear_url:
-        return None
-    match = PUBLIC_ISSUE_URL.fullmatch(linear_url)
-    if match is None:
-        raise CalendarRouteError("Calendar approval plan linkage is invalid")
-    return match.group(1)
+    preview = completed["preview"]
+    linear_url = preview.get("linear_url")
+    linear_issue = None
+    if linear_url:
+        match = PUBLIC_ISSUE_URL.fullmatch(linear_url)
+        if match is None:
+            raise CalendarRouteError("Calendar approval plan linkage is invalid")
+        linear_issue = match.group(1)
+    return {
+        "operation": preview.get("operation"),
+        "block_key": preview.get("block_key"),
+        "linear_issue": linear_issue,
+    }
+
+
+def approval_plan_linear_issue(
+    task: dict[str, Any], reference: str, source: SourceContext
+) -> str | None:
+    """Backward-compatible projection of one completed legacy plan identity."""
+    return approval_plan_write_identity(task, reference, source)["linear_issue"]
 
 
 def route_calendar_request(
@@ -460,12 +510,16 @@ def route_calendar_request(
         status = task.get("status")
         if status == "done":
             expected_linear_issue: str | None | object = _UNSET
+            expected_write_identity: dict[str, Any] | object = _UNSET
             if command["operation"] == "approve_write":
-                expected_linear_issue = board.calendar_approval_linear_issue(
+                expected_write_identity = board.calendar_approval_write_identity(
                     command["request"]["approval_reference"], source
                 )
             return _load_completed(
-                task, command, expected_linear_issue=expected_linear_issue
+                task,
+                command,
+                expected_linear_issue=expected_linear_issue,
+                expected_write_identity=expected_write_identity,
             )
         if status == "blocked":
             return {"status": "blocked", "message": "Calendar routing or execution failed safely."}

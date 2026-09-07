@@ -39,6 +39,8 @@ class CalendarSourcePluginTests(unittest.TestCase):
         self.assertEqual(set(registry.tools), {"linear_source_request", "calendar_source_request"})
         schema = CALENDAR_SOURCE_REQUEST_SCHEMA["parameters"]
         self.assertIn("standalone", CALENDAR_SOURCE_REQUEST_SCHEMA["description"].lower())
+        self.assertIn("no second confirmation", CALENDAR_SOURCE_REQUEST_SCHEMA["description"].lower())
+        self.assertIn("genuinely missing or ambiguous", CALENDAR_SOURCE_REQUEST_SCHEMA["description"].lower())
         self.assertIn("omit", schema["properties"]["linear_url"]["description"].lower())
         self.assertIn("date", schema["properties"]["block_key"]["description"].lower())
         jsonschema.validate({"operation": "inventory", "window": "today"}, schema)
@@ -272,24 +274,21 @@ class CalendarSourcePluginTests(unittest.TestCase):
         self.assertIn("calendar_source_request", runbook)
         self.assertIn("pa_calendar_execute", runbook)
 
-    def test_calendar_preview_guidance_is_concise_and_human_readable(self):
+    def test_calendar_guidance_treats_clear_owner_request_as_authorization(self):
         guidance = (
             ROOT / "skills" / "calendar-source-request-routing" / "SKILL.md"
         ).read_text()
         for required in (
-            "human-readable local date",
-            "timezone name and UTC offset",
-            "omit `operation`",
-            "omit `block_key`",
-            "omit an empty",
+            "Do **not** ask for a second confirmation",
+            "genuinely missing or has multiple plausible interpretations",
+            "unambiguous conversation context",
+            "через час после этой",
+            "protected plan, before-state snapshot, attestation workflow",
+            "Preview-gated update and delete",
+            "Only after confirmation in the same source session",
         ):
             self.assertIn(required, guidance)
-        self.assertIn("Show details only when", guidance)
-        self.assertIn("complete exact machine preview", guidance)
-        self.assertIn("complete machine preview", guidance)
-        self.assertIn("localized owner-facing rendering", guidance)
-        self.assertIn("Never show only", guidance)
-        self.assertIn("Цель: <block_key>", guidance)
+        self.assertIn("Never create a new preview-first flow", guidance)
 
 
 if __name__ == "__main__":

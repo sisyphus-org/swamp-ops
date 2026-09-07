@@ -159,6 +159,8 @@ def _validate_command_request(command: dict[str, Any]) -> None:
     expected = {"operation", "block_key", "summary", "start", "end", "linear_url", "details"}
     if set(request) != expected or request.get("operation") not in {"create", "update", "delete"}:
         raise CalendarWorkerError("Calendar write request is invalid")
+    if operation == "execute_write" and request.get("operation") != "create":
+        raise CalendarWorkerError("Calendar direct write is limited to create")
     for field, maximum in (("block_key", 64), ("summary", 200), ("start", 19), ("end", 19), ("linear_url", 500), ("details", 4000)):
         value = request.get(field)
         if not isinstance(value, str) or len(value) > maximum or any(
@@ -201,7 +203,9 @@ def _command_from_task(task: Any) -> dict[str, Any]:
         or UUID.fullmatch(command["command_id"]) is None
         or not isinstance(command.get("idempotency_key"), str)
         or re.fullmatch(r"calendar:v1:[a-f0-9]{32}", command["idempotency_key"]) is None
-        or command.get("operation") not in {"inventory", "events", "freebusy", "plan_write", "approve_write"}
+        or command.get("operation") not in {
+            "inventory", "events", "freebusy", "plan_write", "approve_write", "execute_write"
+        }
         or not isinstance(command.get("request"), dict)
     ):
         raise CalendarWorkerError("calendar-command.v1 is invalid")
@@ -459,75 +463,46 @@ def _safe_read_data(operation: str, data: Any) -> dict[str, Any]:
     return dict(data)
 
 
-def execute_calendar_command(
-    command: dict[str, Any], *, session_id: str, db_path: Path,
-    workflows: Any, approval_loader: Callable[[str, Path], dict[str, Any]] = _load_approval_plan,
-    reservation_check: Callable[[], None] = lambda: None,
-) -> dict[str, Any]:
-    operation = command["operation"]
-    request = command["request"]
-    base = _base_result(command)
-    if operation in {"inventory", "events", "freebusy"}:
-        reservation_check()
-        data = _safe_read_data(operation, workflows.read(operation, request.get("window")))
-        return {**base, "phase": "completed", "outcome": "read", "data": data}
-    if operation == "plan_write":
-        reservation_check()
-        planned = workflows.plan(request)
-        if not isinstance(planned, dict) or set(planned) != {"run_id", "artifact_version", "preview"}:
-            raise CalendarWorkerError("Calendar plan workflow result is invalid")
-        raw_plan = planned["preview"]
-        preview = _public_plan_preview(request, raw_plan)
-        reservation_check()
-        snapshot = workflows.snapshot(request)
-        expected_identifier_match = PUBLIC_ISSUE_URL.fullmatch(request["linear_url"])
-        expected_identifier = (
-            expected_identifier_match.group(1) if expected_identifier_match else None
-        )
-        if (
-            not isinstance(snapshot, dict)
-            or set(snapshot) != {
-                "operation", "status", "linearIssue", "blockKey", "beforeStateHash"
-            }
-            or snapshot.get("operation") != "snapshot"
-            or snapshot.get("status") != "ok"
-            or snapshot.get("linearIssue") != expected_identifier
-            or snapshot.get("blockKey") != request["block_key"]
-            or not isinstance(snapshot.get("beforeStateHash"), str)
-            or SHA256.fullmatch(snapshot["beforeStateHash"]) is None
-        ):
-            raise CalendarWorkerError("Calendar before-state snapshot is invalid")
-        plan = _plan_reference({
-            "run_id": planned["run_id"],
-            "artifact_version": planned["artifact_version"],
-            "checksum": raw_plan["checksum"],
-            "before_state_hash": snapshot["beforeStateHash"],
-        }, require_before_state=True)
-        return {
-            **base,
-            "phase": "awaiting_approval",
-            "outcome": "planned",
-            "preview": preview,
-            "approval_reference": _approval_token(command, plan, session_id),
-            "plan_reference": plan,
-        }
-    reference = request.get("approval_reference")
-    if not isinstance(reference, str) or APPROVAL_REFERENCE.fullmatch(reference) is None:
-        raise CalendarWorkerError("Calendar approval reference is invalid")
-    approved_plan = approval_loader(reference, db_path)
+def _prepare_write_plan(
+    request: dict[str, Any], workflows: Any,
+    reservation_check: Callable[[], None],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    reservation_check()
+    planned = workflows.plan(request)
+    if not isinstance(planned, dict) or set(planned) != {"run_id", "artifact_version", "preview"}:
+        raise CalendarWorkerError("Calendar plan workflow result is invalid")
+    raw_plan = planned["preview"]
+    preview = _public_plan_preview(request, raw_plan)
+    reservation_check()
+    snapshot = workflows.snapshot(request)
+    expected_identifier_match = PUBLIC_ISSUE_URL.fullmatch(request["linear_url"])
+    expected_identifier = expected_identifier_match.group(1) if expected_identifier_match else None
     if (
-        not isinstance(approved_plan, dict)
-        or approved_plan.get("source_profile") != command["source_profile"]
-        or approved_plan.get("session_id") != session_id
-        or approved_plan.get("approval_reference") != reference
+        not isinstance(snapshot, dict)
+        or set(snapshot) != {
+            "operation", "status", "linearIssue", "blockKey", "beforeStateHash"
+        }
+        or snapshot.get("operation") != "snapshot"
+        or snapshot.get("status") != "ok"
+        or snapshot.get("linearIssue") != expected_identifier
+        or snapshot.get("blockKey") != request["block_key"]
+        or not isinstance(snapshot.get("beforeStateHash"), str)
+        or SHA256.fullmatch(snapshot["beforeStateHash"]) is None
     ):
-        raise CalendarWorkerError("Calendar approval must come from the same exact source session")
-    plan = _plan_reference(
-        approved_plan.get("plan_reference"), require_before_state=True
-    )
-    approved_request = approved_plan.get("request")
-    if not isinstance(approved_request, dict):
-        raise CalendarWorkerError("Calendar approval plan request binding is invalid")
+        raise CalendarWorkerError("Calendar before-state snapshot is invalid")
+    plan = _plan_reference({
+        "run_id": planned["run_id"],
+        "artifact_version": planned["artifact_version"],
+        "checksum": raw_plan["checksum"],
+        "before_state_hash": snapshot["beforeStateHash"],
+    }, require_before_state=True)
+    return plan, preview
+
+
+def _apply_write_plan(
+    base: dict[str, Any], request: dict[str, Any], plan: dict[str, Any],
+    workflows: Any, reservation_check: Callable[[], None],
+) -> dict[str, Any]:
     reservation_check()
     started = workflows.start_approval(plan)
     if not isinstance(started, dict) or started.get("status") != "suspended":
@@ -551,13 +526,9 @@ def execute_calendar_command(
         "checksum": resumed.get("checksum"),
     })
     reservation_check()
-    live_snapshot = workflows.snapshot(approved_request)
-    expected_identifier_match = PUBLIC_ISSUE_URL.fullmatch(
-        approved_request.get("linear_url", "")
-    )
-    expected_identifier = (
-        expected_identifier_match.group(1) if expected_identifier_match else None
-    )
+    live_snapshot = workflows.snapshot(request)
+    expected_identifier_match = PUBLIC_ISSUE_URL.fullmatch(request.get("linear_url", ""))
+    expected_identifier = expected_identifier_match.group(1) if expected_identifier_match else None
     if (
         not isinstance(live_snapshot, dict)
         or set(live_snapshot) != {
@@ -566,10 +537,10 @@ def execute_calendar_command(
         or live_snapshot.get("operation") != "snapshot"
         or live_snapshot.get("status") != "ok"
         or live_snapshot.get("linearIssue") != expected_identifier
-        or live_snapshot.get("blockKey") != approved_request.get("block_key")
+        or live_snapshot.get("blockKey") != request.get("block_key")
         or live_snapshot.get("beforeStateHash") != plan["before_state_hash"]
     ):
-        raise CalendarWorkerError("Calendar target changed after owner preview")
+        raise CalendarWorkerError("Calendar target changed after write authorization")
     reservation_check()
     data = workflows.apply(plan, approval)
     required_keys = {"operation", "status", "reused", "blockKey"}
@@ -579,10 +550,10 @@ def execute_calendar_command(
         or not required_keys.issubset(data)
         or not set(data).issubset(allowed_keys)
         or data.get("status") != "verified"
-        or data.get("operation") != approved_request.get("operation")
+        or data.get("operation") != request.get("operation")
         or not isinstance(data.get("reused"), bool)
         or data.get("linearIssue") != expected_identifier
-        or data.get("blockKey") != approved_request.get("block_key")
+        or data.get("blockKey") != request.get("block_key")
     ):
         raise CalendarWorkerError("Calendar apply workflow lacks verified read-back")
     return {
@@ -591,6 +562,53 @@ def execute_calendar_command(
         "outcome": "no_op" if data["reused"] else "applied",
         "data": data,
     }
+
+
+def execute_calendar_command(
+    command: dict[str, Any], *, session_id: str, db_path: Path,
+    workflows: Any, approval_loader: Callable[[str, Path], dict[str, Any]] = _load_approval_plan,
+    reservation_check: Callable[[], None] = lambda: None,
+) -> dict[str, Any]:
+    operation = command["operation"]
+    request = command["request"]
+    base = _base_result(command)
+    if operation in {"inventory", "events", "freebusy"}:
+        reservation_check()
+        data = _safe_read_data(operation, workflows.read(operation, request.get("window")))
+        return {**base, "phase": "completed", "outcome": "read", "data": data}
+    if operation == "plan_write":
+        plan, preview = _prepare_write_plan(request, workflows, reservation_check)
+        return {
+            **base,
+            "phase": "awaiting_approval",
+            "outcome": "planned",
+            "preview": preview,
+            "approval_reference": _approval_token(command, plan, session_id),
+            "plan_reference": plan,
+        }
+    if operation == "execute_write":
+        plan, _preview = _prepare_write_plan(request, workflows, reservation_check)
+        return _apply_write_plan(base, request, plan, workflows, reservation_check)
+    reference = request.get("approval_reference")
+    if not isinstance(reference, str) or APPROVAL_REFERENCE.fullmatch(reference) is None:
+        raise CalendarWorkerError("Calendar approval reference is invalid")
+    approved_plan = approval_loader(reference, db_path)
+    if (
+        not isinstance(approved_plan, dict)
+        or approved_plan.get("source_profile") != command["source_profile"]
+        or approved_plan.get("session_id") != session_id
+        or approved_plan.get("approval_reference") != reference
+    ):
+        raise CalendarWorkerError("Calendar approval must come from the same exact source session")
+    plan = _plan_reference(
+        approved_plan.get("plan_reference"), require_before_state=True
+    )
+    approved_request = approved_plan.get("request")
+    if not isinstance(approved_request, dict):
+        raise CalendarWorkerError("Calendar approval plan request binding is invalid")
+    return _apply_write_plan(
+        base, approved_request, plan, workflows, reservation_check
+    )
 
 
 class SwampCalendarWorkflows:
@@ -807,6 +825,8 @@ def _validate_completed_result(
     session_id: str,
     *,
     expected_linear_issue: str | None | object = _UNSET,
+    expected_operation: str | object = _UNSET,
+    expected_block_key: str | object = _UNSET,
 ) -> dict[str, Any]:
     common = {
         "schema_version", "command_id", "idempotency_key", "source_profile",
@@ -849,7 +869,7 @@ def _validate_completed_result(
             != _approval_token(command, plan, session_id)
         ):
             raise CalendarWorkerError("completed Calendar plan journal binding is invalid")
-    elif operation == "approve_write":
+    elif operation in {"approve_write", "execute_write"}:
         data = result.get("data")
         required_data = {"operation", "status", "reused", "blockKey"}
         allowed_data = required_data | {"linearIssue"}
@@ -873,7 +893,17 @@ def _validate_completed_result(
             or not set(data).issubset(allowed_data)
             or data.get("status") != "verified"
             or not isinstance(data.get("reused"), bool)
+            or (result.get("outcome") == "no_op") != data.get("reused")
             or not linkage_matches
+            or (expected_operation is not _UNSET and data.get("operation") != expected_operation)
+            or (expected_block_key is not _UNSET and data.get("blockKey") != expected_block_key)
+            or (
+                operation == "execute_write"
+                and (
+                    data.get("operation") != command["request"].get("operation")
+                    or data.get("blockKey") != command["request"].get("block_key")
+                )
+            )
         ):
             raise CalendarWorkerError("completed Calendar apply journal is invalid")
     else:
@@ -892,6 +922,8 @@ def _load_completed_result(
     except (OSError, json.JSONDecodeError) as exc:
         raise CalendarWorkerError("completed Calendar journal is unreadable") from exc
     expected_linear_issue: str | None | object = _UNSET
+    expected_operation: str | object = _UNSET
+    expected_block_key: str | object = _UNSET
     if command["operation"] == "approve_write":
         reference = command["request"].get("approval_reference")
         approved = _load_approval_plan(
@@ -902,11 +934,20 @@ def _load_completed_result(
             raise CalendarWorkerError("completed Calendar approval binding is invalid")
         match = PUBLIC_ISSUE_URL.fullmatch(approved_request.get("linear_url", ""))
         expected_linear_issue = match.group(1) if match else None
+        expected_operation = approved_request.get("operation")
+        expected_block_key = approved_request.get("block_key")
+    elif command["operation"] == "execute_write":
+        match = PUBLIC_ISSUE_URL.fullmatch(command["request"].get("linear_url", ""))
+        expected_linear_issue = match.group(1) if match else None
+        expected_operation = command["request"].get("operation")
+        expected_block_key = command["request"].get("block_key")
     return _validate_completed_result(
         command,
         value,
         session_id,
         expected_linear_issue=expected_linear_issue,
+        expected_operation=expected_operation,
+        expected_block_key=expected_block_key,
     )
 
 

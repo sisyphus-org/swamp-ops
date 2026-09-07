@@ -8,7 +8,7 @@ from typing import Any, Callable
 from .audit import audit_route as bundled_audit_route
 from .calendar_route import (
     CalendarRequestError,
-    approval_plan_linear_issue,
+    approval_plan_write_identity,
     route_calendar_request,
 )
 from .route import (
@@ -960,10 +960,10 @@ class HermesKanbanBoard:
         finally:
             conn.close()
 
-    def calendar_approval_linear_issue(
+    def calendar_approval_write_identity(
         self, reference: str, source: SourceContext
-    ) -> str | None:
-        """Resolve the exact optional SIS linkage from one completed plan task."""
+    ) -> dict[str, Any]:
+        """Resolve the exact write identity from one completed legacy plan task."""
         conn = self._connect()
         try:
             rows = conn.execute(
@@ -976,9 +976,15 @@ class HermesKanbanBoard:
             task = self.kb.get_task(conn, rows[0]["id"])
             if task is None:
                 raise RouteError("Calendar approval plan task is missing")
-            return approval_plan_linear_issue(_task_dict(task), reference, source)
+            return approval_plan_write_identity(_task_dict(task), reference, source)
         finally:
             conn.close()
+
+    def calendar_approval_linear_issue(
+        self, reference: str, source: SourceContext
+    ) -> str | None:
+        """Backward-compatible projection of the legacy plan linkage."""
+        return self.calendar_approval_write_identity(reference, source)["linear_issue"]
 
     def record_delete_preview(
         self,
@@ -2439,10 +2445,13 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
 CALENDAR_SOURCE_REQUEST_SCHEMA = {
     "name": "calendar_source_request",
     "description": (
-        "Route one bounded Calendar inventory, events, freebusy, standalone or "
-        "optionally Linear-linked write-plan, or same-session explicit approval "
-        "through the Personal Assistant Kanban lane. Calendar and Linear are "
-        "independent operations; never create a Linear issue only to create an event."
+        "Route one bounded Calendar inventory, events, freebusy, or explicit-intent "
+        "standalone/optionally Linear-linked write through the Personal Assistant "
+        "Kanban lane. A clear owner create request is executed once "
+        "with verified read-back and no second confirmation. Ask the owner only when "
+        "required event fields are genuinely missing or ambiguous. Update/delete and "
+        "legacy pending create previews retain explicit approval. Calendar and Linear are independent; "
+        "never create a Linear issue only to create an event."
     ),
     "parameters": {
         "type": "object",
