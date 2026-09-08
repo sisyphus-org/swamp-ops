@@ -12,7 +12,12 @@ from plugins.linear_source_route import (
     _public_target,
     route as source_route,
 )
-from plugins.project_manager_linear import approval, execute_claimed_task, lane
+from plugins.project_manager_linear import (
+    approval,
+    entity_destruction,
+    execute_claimed_task,
+    lane,
+)
 from scripts import linear_owner_approval as owner_approval
 from tests.test_linear_command_lane import owner_policy
 
@@ -361,6 +366,18 @@ class LinearEntityDestructionTests(unittest.TestCase):
         self.assertEqual(result["result"], "applied")
         self.assertTrue(result["verified"])
         self.assertEqual(client.writes, [("archive", "issue", "issue-id")])
+
+    def test_issue_archive_accepts_legacy_v1_recovery_manifest(self):
+        self.assertTrue(
+            entity_destruction._valid_recovery_manifest(
+                {
+                    "schema_version": 1,
+                    "operation": "archive_linear_entity",
+                    "entity_type": "issue",
+                    "impact_hash": "a" * 64,
+                }
+            )
+        )
 
     def test_unsafe_matrix_entries_are_rejected_before_linear_access(self):
         unsupported = (

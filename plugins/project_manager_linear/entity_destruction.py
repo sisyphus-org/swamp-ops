@@ -465,7 +465,11 @@ def _valid_recovery_manifest(value: Any) -> bool:
     entity_type = value.get("entity_type")
     if not isinstance(operation, str) or not isinstance(entity_type, str):
         return False
-    if operation == "archive_linear_entity" and entity_type == "issue":
+    if (
+        operation == "archive_linear_entity"
+        and entity_type == "issue"
+        and value.get("schema_version") == 2
+    ):
         children = value.get("children")
         relations = value.get("relations")
         if not isinstance(children, list) or not isinstance(relations, list):
