@@ -215,18 +215,312 @@ def parent_intent(command: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _lifecycle_projection(
+    command: dict[str, Any],
+    children: list[dict[str, Any]],
+    plans: list[dict[str, Any]],
+    consumer_index: int,
+    consumer_plan: dict[str, Any],
+    error_cls: type[Exception],
+) -> dict[str, Any] | None:
+    """Derive only monotonic direct-child removals from the ordered prefix."""
+    consumer = children[consumer_index]
+    target = consumer.get("target", {})
+    selector = target.get("selector") if isinstance(target, dict) else None
+    if (
+        consumer.get("operation") != "archive_linear_entity"
+        or target.get("type") != "issue"
+        or not isinstance(selector, dict)
+        or not isinstance(selector.get("identifier"), str)
+    ):
+        return None
+    parent_identifier = selector["identifier"]
+    consumer_before = consumer_plan.get("before")
+    consumer_impact = (
+        consumer_before.get("impact") if isinstance(consumer_before, dict) else None
+    )
+    impacted_children_value = (
+        consumer_impact.get("children") if isinstance(consumer_impact, dict) else []
+    )
+    impacted_children = (
+        impacted_children_value if isinstance(impacted_children_value, list) else []
+    )
+    impacted_identifiers = {
+        child.get("identifier")
+        for child in impacted_children
+        if isinstance(child, dict) and isinstance(child.get("identifier"), str)
+    }
+    producers: list[dict[str, Any]] = []
+    for index, (child, plan) in enumerate(
+        zip(children[:consumer_index], plans, strict=True)
+    ):
+        operation = child.get("operation")
+        child_target = child.get("target", {})
+        child_identifier = (
+            child_target.get("identifier")
+            if isinstance(child_target, dict)
+            else None
+        )
+        if operation == "create_issue" and child.get("change", {}).get(
+            "parent_identifier"
+        ) in {parent_identifier, *impacted_identifiers}:
+            raise error_cls(
+                "bulk contains an unsupported cross-item lifecycle dependency"
+            )
+        if operation in {
+            "create_issue_relation",
+            "remove_issue_relation",
+            "replace_issue_relation",
+        }:
+            relation_identifiers = {
+                child_identifier,
+                child.get("change", {}).get("related_identifier"),
+                child.get("change", {}).get("replacement_identifier"),
+            }
+            if relation_identifiers & {parent_identifier, *impacted_identifiers}:
+                raise error_cls(
+                    "bulk contains an unsupported cross-item lifecycle dependency"
+                )
+        if child_identifier in impacted_identifiers:
+            plan_before = plan.get("before")
+            plan_after = plan.get("after")
+            supported_reparent = bool(
+                operation == "update_issue"
+                and set(child.get("change", {})) == {"parent_identifier"}
+                and isinstance(plan_before, dict)
+                and isinstance(plan_after, dict)
+                and plan_before.get("parent_identifier") == parent_identifier
+                and plan_after.get("parent_identifier") != parent_identifier
+            )
+            if not supported_reparent:
+                raise error_cls(
+                    "bulk contains an unsupported cross-item lifecycle dependency"
+                )
+        if operation == "update_issue" and set(child.get("change", {})) == {
+            "parent_identifier"
+        }:
+            before = plan.get("before")
+            after = plan.get("after")
+            root_identifier = child.get("target", {}).get("identifier")
+            if (
+                isinstance(before, dict)
+                and isinstance(after, dict)
+                and before.get("parent_identifier") == parent_identifier
+                and after.get("parent_identifier") != parent_identifier
+                and isinstance(root_identifier, str)
+            ):
+                producers.append(
+                    {
+                        "index": index,
+                        "kind": "reparent_from_direct_parent",
+                        "root_identifier": root_identifier,
+                    }
+                )
+            elif (
+                isinstance(before, dict)
+                and isinstance(after, dict)
+                and before.get("parent_identifier") != parent_identifier
+                and after.get("parent_identifier") == parent_identifier
+            ):
+                raise error_cls(
+                    "bulk contains an unsupported cross-item lifecycle dependency"
+                )
+        elif operation == "delete_linear_entity":
+            before = plan.get("before")
+            entity = before.get("entity") if isinstance(before, dict) else None
+            parent = entity.get("parent") if isinstance(entity, dict) else None
+            producer_selector = child.get("target", {}).get("selector", {})
+            producer_identifier = (
+                producer_selector.get("identifier")
+                if isinstance(producer_selector, dict)
+                else None
+            )
+            if (
+                (
+                    isinstance(parent, dict)
+                    and parent.get("identifier") == parent_identifier
+                )
+                or producer_identifier in impacted_identifiers
+            ):
+                raise error_cls(
+                    "bulk contains an unsupported cross-item lifecycle dependency"
+                )
+        elif operation == "archive_linear_entity":
+            producer_target = child.get("target", {})
+            producer_selector = (
+                producer_target.get("selector")
+                if isinstance(producer_target, dict)
+                else None
+            )
+            before = plan.get("before")
+            entity = before.get("entity") if isinstance(before, dict) else None
+            parent = entity.get("parent") if isinstance(entity, dict) else None
+            if (
+                producer_target.get("type") == "issue"
+                and isinstance(producer_selector, dict)
+                and isinstance(parent, dict)
+                and parent.get("identifier") == parent_identifier
+                and isinstance(producer_selector.get("identifier"), str)
+            ):
+                producers.append(
+                    {
+                        "index": index,
+                        "kind": "archive_direct_child",
+                        "root_identifier": producer_selector["identifier"],
+                    }
+                )
+            elif (
+                isinstance(producer_selector, dict)
+                and producer_selector.get("identifier") in impacted_identifiers
+            ):
+                raise error_cls(
+                    "bulk contains an unsupported cross-item lifecycle dependency"
+                )
+    if not producers:
+        return None
+    return {
+        "version": 1,
+        "parent_intent_hash": _hash(
+            {
+                "operation": "bulk_linear_operations",
+                "target": command["target"],
+                "change": command["change"],
+            }
+        ),
+        "archive_target": parent_identifier,
+        "producers": producers,
+    }
+
+
+def _plan_ordered_children(
+    command: dict[str, Any],
+    children: list[dict[str, Any]],
+    plan_child: Callable[..., dict[str, Any]],
+    error_cls: type[Exception],
+) -> list[dict[str, Any]]:
+    """Read-only planning with narrowly projected ordered lifecycle effects."""
+    plans: list[dict[str, Any]] = []
+    for index, child in enumerate(children):
+        initial_plan = plan_child(child)
+        lifecycle_target = child.get("target", {})
+        issue_archive = bool(
+            child.get("operation") == "archive_linear_entity"
+            and isinstance(lifecycle_target, dict)
+            and lifecycle_target.get("type") == "issue"
+        )
+        if child.get("operation") in {
+            "archive_linear_entity",
+            "delete_linear_entity",
+        } and not issue_archive:
+            initial_before = initial_plan.get("before")
+            initial_impact = (
+                initial_before.get("impact")
+                if isinstance(initial_before, dict)
+                else None
+            )
+
+            def identities(value: Any) -> set[str]:
+                if isinstance(value, dict):
+                    result = {
+                        item
+                        for key, item in value.items()
+                        if key in {"identifier", "name"}
+                        and isinstance(item, str)
+                    }
+                    for nested in value.values():
+                        result.update(identities(nested))
+                    return result
+                if isinstance(value, list):
+                    result: set[str] = set()
+                    for nested in value:
+                        result.update(identities(nested))
+                    return result
+                return set()
+
+            impacted_identities = identities(initial_impact)
+            if any(
+                identities(producer.get("target")) & impacted_identities
+                for producer in children[:index]
+            ):
+                raise error_cls(
+                    "bulk contains an unsupported cross-item lifecycle dependency"
+                )
+        current_target = child.get("target", {})
+        current_identifier = (
+            current_target.get("identifier")
+            if isinstance(current_target, dict)
+            else None
+        )
+        current_parent = child.get("change", {}).get("parent_identifier")
+        for producer, producer_plan in zip(
+            children[:index], plans, strict=True
+        ):
+            if producer.get("operation") not in {
+                "archive_linear_entity",
+                "delete_linear_entity",
+            }:
+                continue
+            producer_target = producer.get("target", {})
+            producer_selector = (
+                producer_target.get("selector")
+                if isinstance(producer_target, dict)
+                else None
+            )
+            lifecycle_identifier = (
+                producer_selector.get("identifier")
+                if isinstance(producer_selector, dict)
+                else None
+            )
+            producer_before = producer_plan.get("before")
+            producer_impact = (
+                producer_before.get("impact")
+                if isinstance(producer_before, dict)
+                else None
+            )
+            producer_children = (
+                producer_impact.get("children")
+                if isinstance(producer_impact, dict)
+                else []
+            )
+            impacted = {
+                value.get("identifier")
+                for value in producer_children
+                if isinstance(value, dict)
+            } if isinstance(producer_children, list) else set()
+            if (
+                current_identifier == lifecycle_identifier
+                or current_identifier in impacted
+                or current_parent == lifecycle_identifier
+                or current_parent in impacted
+            ):
+                raise error_cls(
+                    "bulk contains an unsupported cross-item lifecycle dependency"
+                )
+        projection = _lifecycle_projection(
+            command, children, plans, index, initial_plan, error_cls
+        )
+        plan = (
+            plan_child(child, projection)
+            if projection is not None
+            else initial_plan
+        )
+        plans.append(plan)
+    return plans
+
+
 def preview_parent(
     command: dict[str, Any],
     *,
     plan_child: Callable[[dict[str, Any]], dict[str, Any]],
     now: datetime | None = None,
+    error_cls: type[Exception] = RuntimeError,
 ) -> dict[str, Any]:
     """Build one authoritative ordered preview without apply/journal authority."""
     children = [
         derive_child_command(command, index)
         for index in range(len(command["change"]["items"]))
     ]
-    plans = [plan_child(child) for child in children]
+    plans = _plan_ordered_children(command, children, plan_child, error_cls)
     if any(not _valid_plan(plan) for plan in plans):
         raise RuntimeError("bulk child preflight returned an invalid result")
     before_values = [plan.get("before") for plan in plans]
@@ -321,12 +615,35 @@ def _aggregate_before_state_hash(plans: list[dict[str, Any]]) -> str:
     return _hash(_before_state_hashes(plans))
 
 
-def _plan_hashes(plan: dict[str, Any]) -> dict[str, str]:
+def _plan_hashes(
+    plan: dict[str, Any], item_index: int | None = None
+) -> dict[str, Any]:
+    before_hash = _before_state_hashes([plan])[0]
+    projected_before_hash = plan.get("projected_before_state_hash", before_hash)
+    dependency_hash = plan.get("dependency_hash", _hash(None))
+    producer_indices = plan.get("producer_indices", [])
+    if (
+        not isinstance(projected_before_hash, str)
+        or len(projected_before_hash) != 64
+        or not isinstance(dependency_hash, str)
+        or len(dependency_hash) != 64
+        or not isinstance(producer_indices, list)
+        or any(not isinstance(index, int) or index < 0 for index in producer_indices)
+        or (
+            item_index is not None
+            and any(index >= item_index for index in producer_indices)
+        )
+        or producer_indices != sorted(set(producer_indices))
+    ):
+        raise RuntimeError("bulk child lifecycle commitments are invalid")
     return {
         "operation_hash": _hash(plan.get("operation")),
         "target_hash": _hash(plan.get("target")),
         "plan_hash": _hash(plan.get("plan")),
-        "before_hash": _before_state_hashes([plan])[0],
+        "before_hash": before_hash,
+        "projected_before_hash": projected_before_hash,
+        "dependency_hash": dependency_hash,
+        "producer_indices": producer_indices,
         "desired_after_hash": _hash(plan.get("after")),
     }
 
@@ -354,11 +671,13 @@ def _load_state(path: Path, binding: str, count: int, error_cls: type[Exception]
         "target_hash",
         "plan_hash",
         "before_hash",
+        "projected_before_hash",
+        "dependency_hash",
         "desired_after_hash",
     }
     if not path.is_file():
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "binding": binding,
             "aggregate_plan_hash": None,
             "before_state_hash": None,
@@ -367,6 +686,7 @@ def _load_state(path: Path, binding: str, count: int, error_cls: type[Exception]
                 {
                     "phase": "pending",
                     "outcome": None,
+                    "producer_indices": [],
                     **{field: None for field in hash_fields},
                 }
                 for _ in range(count)
@@ -387,7 +707,7 @@ def _load_state(path: Path, binding: str, count: int, error_cls: type[Exception]
             "after_state_hash",
             "items",
         }
-        or value.get("schema_version") != 2
+        or value.get("schema_version") != 3
         or value.get("binding") != binding
         or not isinstance(value.get("items"), list)
         or len(value["items"]) != count
@@ -402,7 +722,7 @@ def _load_state(path: Path, binding: str, count: int, error_cls: type[Exception]
         )
         or any(
             not isinstance(item, dict)
-            or set(item) != {"phase", "outcome", *hash_fields}
+            or set(item) != {"phase", "outcome", "producer_indices", *hash_fields}
             or item.get("phase") not in {"pending", "prepared", "completed"}
             or (
                 item.get("outcome") not in {None, "applied", "no_op"}
@@ -414,11 +734,27 @@ def _load_state(path: Path, binding: str, count: int, error_cls: type[Exception]
                 and (not isinstance(item[field], str) or len(item[field]) != 64)
                 for field in hash_fields
             )
+            or not isinstance(item.get("producer_indices"), list)
+            or any(
+                not isinstance(index, int)
+                or index < 0
+                or index >= consumer_index
+                for index in item.get("producer_indices", [])
+            )
+            or item.get("producer_indices")
+            != sorted(set(item.get("producer_indices", [])))
+            or (
+                item.get("phase") != "pending"
+                and any(
+                    value["items"][index].get("phase") != "completed"
+                    for index in item.get("producer_indices", [])
+                )
+            )
             or (
                 any(item.get(field) is None for field in hash_fields)
                 and any(item.get(field) is not None for field in hash_fields)
             )
-            for item in value["items"]
+            for consumer_index, item in enumerate(value["items"])
         )
     ):
         raise error_cls("bulk recovery binding conflicts with the exact parent intent/order")
@@ -467,7 +803,16 @@ def _valid_plan(plan: Any) -> bool:
 
 
 def _matches_original_plan(plan: dict[str, Any], item_state: dict[str, Any]) -> bool:
-    return all(item_state[field] == digest for field, digest in _plan_hashes(plan).items())
+    hashes = _plan_hashes(plan)
+    if item_state["producer_indices"]:
+        return bool(
+            hashes["operation_hash"] == item_state["operation_hash"]
+            and hashes["target_hash"] == item_state["target_hash"]
+            and hashes["plan_hash"] == item_state["plan_hash"]
+            and hashes["desired_after_hash"] == item_state["desired_after_hash"]
+            and hashes["before_hash"] == item_state["projected_before_hash"]
+        )
+    return all(item_state[field] == digest for field, digest in hashes.items())
 
 
 def _matches_exact_recovered_after(
@@ -526,7 +871,7 @@ def execute_parent(
     validate_child: Callable[[dict[str, Any]], dict[str, Any]],
     execute_child: Callable[[dict[str, Any], str, Any], dict[str, Any]],
     recovery_path: Path | None = None,
-    authorization_factory: Callable[[dict[str, Any]], Any] | None = None,
+    authorization_factory: Callable[[dict[str, Any], str], Any] | None = None,
     error_cls: type[Exception] | None = None,
     mode: str = "apply",
 ) -> dict[str, Any]:
@@ -539,11 +884,32 @@ def execute_parent(
         validate_child(derive_child_command(command, index))
         for index in range(len(command["change"]["items"]))
     ]
-    plans = [execute_child(child, "plan", None) for child in children]
+    def plan_child(
+        child: dict[str, Any], projection: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        return execute_child(child, "plan", projection)
+
+    plans = _plan_ordered_children(command, children, plan_child, error_cls)
     if any(not _valid_plan(plan) for plan in plans):
         raise error_cls("bulk child preflight returned an invalid result")
     aggregate_plan_hash = _hash([_plan_binding(plan) for plan in plans])
     aggregate_before_state_hash = _aggregate_before_state_hash(plans)
+    has_lifecycle_dependencies = any(
+        bool(plan.get("producer_indices")) for plan in plans
+    )
+
+    def require_approved_before_state(expected_hash: str) -> None:
+        approval_reference = command.get("policy", {}).get("approval")
+        if (
+            has_lifecycle_dependencies
+            and command.get("policy", {}).get("mode") == "owner_approved"
+            and (
+                not isinstance(approval_reference, dict)
+                or approval_reference.get("before_state_hash") != expected_hash
+            )
+        ):
+            raise error_cls("bulk final before-state drifted from approval")
+
     base = {
         "schema_version": "linear-result.v2",
         "command_id": command["command_id"],
@@ -653,12 +1019,19 @@ def execute_parent(
         raise error_cls("bulk apply requires a recovery journal")
     with _claim(recovery_path):
         state = _load_state(recovery_path, binding, len(children), error_cls)
+        require_approved_before_state(
+            state["before_state_hash"]
+            if state["before_state_hash"] is not None
+            else aggregate_before_state_hash
+        )
         if state["aggregate_plan_hash"] is None:
             state["aggregate_plan_hash"] = aggregate_plan_hash
             state["before_state_hash"] = aggregate_before_state_hash
             state["after_state_hash"] = _hash(after_values)
-            for item_state, plan in zip(state["items"], plans):
-                item_state.update(_plan_hashes(plan))
+            for index, (item_state, plan) in enumerate(
+                zip(state["items"], plans, strict=True)
+            ):
+                item_state.update(_plan_hashes(plan, index))
             _write_state(recovery_path, state)
         was_complete = all(item["phase"] == "completed" for item in state["items"])
         outcomes: list[dict[str, Any]] = []
@@ -677,6 +1050,11 @@ def execute_parent(
             completed = sum(
                 item["phase"] == "completed" for item in state["items"]
             )
+            if any(
+                state["items"][producer_index]["phase"] != "completed"
+                for producer_index in item_state["producer_indices"]
+            ):
+                raise _partial_failure(completed, len(children))
             try:
                 fresh_plan = execute_child(child, "plan", None)
                 if not _valid_plan(fresh_plan):
@@ -690,7 +1068,9 @@ def execute_parent(
                 raise _partial_failure(completed, len(children))
             if plan_status == "recovered":
                 authorization = (
-                    authorization_factory(child) if authorization_factory else None
+                    authorization_factory(child, item_state["projected_before_hash"])
+                    if authorization_factory
+                    else None
                 )
                 try:
                     result = execute_child(child, "apply", authorization)
@@ -716,7 +1096,11 @@ def execute_parent(
                 item_state["phase"] = "prepared"
                 item_state["outcome"] = None
                 _write_state(recovery_path, state)
-            authorization = authorization_factory(child) if authorization_factory else None
+            authorization = (
+                authorization_factory(child, item_state["projected_before_hash"])
+                if authorization_factory
+                else None
+            )
             try:
                 result = execute_child(child, "apply", authorization)
                 if (

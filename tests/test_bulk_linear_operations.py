@@ -34,6 +34,7 @@ PARENT_IDS = {
     "command_id": "11111111-1111-4111-8111-111111111111",
     "correlation_id": "22222222-2222-4222-8222-222222222222",
 }
+PREVIEW_JOURNAL = Path(tempfile.gettempdir()) / "preview-must-not-write.json"
 
 
 def item(index: int, operation: str = "update_issue") -> dict:
@@ -125,6 +126,72 @@ def preview_client() -> DestructiveClient:
     return client
 
 
+class OrderedLifecycleClient(DestructiveClient):
+    """Production-shaped issue tree whose child inventory follows parent links."""
+
+    def list_child_issues(self, identifier):
+        return [
+            copy.deepcopy(issue)
+            for issue in self.entities["issues"]
+            if issue.get("archivedAt") is None
+            and isinstance(issue.get("parent"), dict)
+            and issue["parent"].get("identifier") == identifier
+        ]
+
+    def update_issue_fields(self, issue_id, **fields):
+        self.writes.append(("update", "issue", issue_id))
+        issue = next(issue for issue in self.entities["issues"] if issue["id"] == issue_id)
+        if "parent_id" in fields:
+            parent_id = fields["parent_id"]
+            parent = next(
+                (value for value in self.entities["issues"] if value["id"] == parent_id),
+                None,
+            )
+            issue["parent"] = (
+                {"id": parent["id"], "identifier": parent["identifier"]}
+                if parent is not None
+                else None
+            )
+
+    def list_states(self, team_id):
+        return [{"id": "todo-state-id", "name": "Todo", "type": "unstarted"}]
+
+
+def ordered_lifecycle_client() -> OrderedLifecycleClient:
+    client = OrderedLifecycleClient()
+    template = copy.deepcopy(client.entities["issues"][0])
+
+    def issue(raw_id, identifier, title, parent=None):
+        value = copy.deepcopy(template)
+        value.update(
+            {
+                "id": raw_id,
+                "identifier": identifier,
+                "title": title,
+                "url": f"https://linear.app/acme/issue/{identifier}/{title.lower().replace(' ', '-')}",
+                "parent": parent,
+            }
+        )
+        return value
+
+    old_parent = issue("issue-136-id", "SIS-136", "Old parent")
+    new_parent = issue("issue-28-id", "SIS-28", "New parent")
+    moved = issue(
+        "issue-232-id",
+        "SIS-232",
+        "Moved subtree",
+        {"id": old_parent["id"], "identifier": old_parent["identifier"]},
+    )
+    descendant = issue(
+        "issue-233-id",
+        "SIS-233",
+        "Moved descendant",
+        {"id": moved["id"], "identifier": moved["identifier"]},
+    )
+    client.entities["issues"] = [old_parent, new_parent, moved, descendant]
+    return client
+
+
 def child_plan(
     child: dict,
     *,
@@ -153,6 +220,30 @@ def child_plan(
     if recovery_evidence is not None:
         result["recovery_evidence"] = copy.deepcopy(recovery_evidence)
     return result
+
+
+def approved_parent(items: list[dict], before_state_hash: str):
+    policy = approval_policy()
+    command = parent(items, policy=policy)
+    policy["approval"]["intent_hash"] = approval_contract.canonical_sha256(
+        bulk.parent_intent(command)
+    )
+    policy["approval"]["before_state_hash"] = before_state_hash
+    command = lane.validate_command(command)
+    approval = lane._load_approval()
+    verified = approval.VerifiedOwnerApproval(
+        {},
+        bulk.parent_intent(command),
+        before_state_hash,
+        policy["approval"]["checksum"],
+        _marker=approval._VERIFIED_MARKER,
+    )
+    consumed = approval.ConsumedOwnerApproval(
+        verified,
+        _marker=approval._CONSUMED_MARKER,
+        command_hash=approval.command_binding_hash(command),
+    )
+    return command, consumed
 
 
 class BulkContractTests(unittest.TestCase):
@@ -341,6 +432,692 @@ class BulkContractTests(unittest.TestCase):
 
 
 class BulkExecutionTests(unittest.TestCase):
+    def test_preview_reparent_then_archive_old_parent_uses_ordered_impact(self):
+        client = ordered_lifecycle_client()
+        request = {
+            "operation": "bulk_linear_operations",
+            "items": [
+                {
+                    "operation": "update_issue",
+                    "target": {"type": "issue", "identifier": "SIS-232"},
+                    "change": {"parent_identifier": "SIS-28"},
+                },
+                {
+                    "operation": "archive_linear_entity",
+                    "target": {
+                        "type": "issue",
+                        "selector": {"identifier": "SIS-136"},
+                    },
+                    "change": {},
+                },
+            ],
+        }
+        command = route.parse_linear_request(request).command
+
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Path(tmp) / "must-not-exist.json"
+            result = execute_pm_command(
+                command, lane=lane, client=client, journal_path=journal
+            )["result"]
+            self.assertFalse(journal.exists())
+            self.assertEqual(list(Path(tmp).iterdir()), [])
+
+        archive = result["items"][1]
+        self.assertEqual(client.writes, [])
+        self.assertEqual(archive["before"]["impact_counts"]["children"], 0)
+        self.assertEqual(archive["before"]["impact"]["children"], [])
+        self.assertEqual(archive["plan"][0]["impact_counts"]["children"], 0)
+
+    def test_preview_archive_child_then_parent_uses_zero_remaining_children(self):
+        client = ordered_lifecycle_client()
+        request = {
+            "operation": "bulk_linear_operations",
+            "items": [
+                {
+                    "operation": "archive_linear_entity",
+                    "target": {
+                        "type": "issue",
+                        "selector": {"identifier": "SIS-232"},
+                    },
+                    "change": {},
+                },
+                {
+                    "operation": "archive_linear_entity",
+                    "target": {
+                        "type": "issue",
+                        "selector": {"identifier": "SIS-136"},
+                    },
+                    "change": {},
+                },
+            ],
+        }
+
+        result = execute_pm_command(
+            route.parse_linear_request(request).command,
+            lane=lane,
+            client=client,
+            journal_path=PREVIEW_JOURNAL,
+        )["result"]
+
+        self.assertEqual(client.writes, [])
+        self.assertEqual(
+            result["items"][0]["before"]["impact_counts"]["children"], 1
+        )
+        self.assertEqual(
+            result["items"][1]["before"]["impact_counts"]["children"], 0
+        )
+        self.assertEqual(result["items"][1]["before"]["impact"]["children"], [])
+
+    def test_preview_reparent_into_later_archived_parent_fails_closed(self):
+        client = ordered_lifecycle_client()
+        moved = next(
+            issue
+            for issue in client.entities["issues"]
+            if issue["identifier"] == "SIS-232"
+        )
+        moved["parent"] = None
+        request = {
+            "operation": "bulk_linear_operations",
+            "items": [
+                {
+                    "operation": "update_issue",
+                    "target": {"type": "issue", "identifier": "SIS-232"},
+                    "change": {"parent_identifier": "SIS-136"},
+                },
+                {
+                    "operation": "archive_linear_entity",
+                    "target": {
+                        "type": "issue",
+                        "selector": {"identifier": "SIS-136"},
+                    },
+                    "change": {},
+                },
+            ],
+        }
+
+        with self.assertRaisesRegex(
+            lane.ContractError, "unsupported cross-item lifecycle dependency"
+        ):
+            execute_pm_command(
+                route.parse_linear_request(request).command,
+                lane=lane,
+                client=client,
+                journal_path=PREVIEW_JOURNAL,
+            )
+        self.assertEqual(client.writes, [])
+
+    def test_preview_delete_child_before_parent_archive_fails_closed(self):
+        client = ordered_lifecycle_client()
+        items = [
+            {
+                "operation": "delete_linear_entity",
+                "target": {
+                    "type": "issue",
+                    "selector": {"identifier": "SIS-232"},
+                },
+                "change": {},
+            },
+            {
+                "operation": "archive_linear_entity",
+                "target": {
+                    "type": "issue",
+                    "selector": {"identifier": "SIS-136"},
+                },
+                "change": {},
+            },
+        ]
+
+        with self.assertRaisesRegex(
+            lane.ContractError, "unsupported cross-item lifecycle dependency"
+        ):
+            execute_pm_command(
+                route.parse_linear_request(
+                    {"operation": "bulk_linear_operations", "items": items}
+                ).command,
+                lane=lane,
+                client=client,
+                journal_path=PREVIEW_JOURNAL,
+            )
+        self.assertEqual(client.writes, [])
+
+    def test_preview_non_direct_child_archive_dependency_fails_closed(self):
+        client = ordered_lifecycle_client()
+        items = [
+            {
+                "operation": "archive_linear_entity",
+                "target": {
+                    "type": "issue",
+                    "selector": {"identifier": "SIS-233"},
+                },
+                "change": {},
+            },
+            {
+                "operation": "archive_linear_entity",
+                "target": {
+                    "type": "issue",
+                    "selector": {"identifier": "SIS-136"},
+                },
+                "change": {},
+            },
+        ]
+
+        with self.assertRaisesRegex(
+            lane.ContractError, "unsupported cross-item lifecycle dependency"
+        ):
+            execute_pm_command(
+                route.parse_linear_request(
+                    {"operation": "bulk_linear_operations", "items": items}
+                ).command,
+                lane=lane,
+                client=client,
+                journal_path=PREVIEW_JOURNAL,
+            )
+        self.assertEqual(client.writes, [])
+
+    def test_preview_parent_archive_before_child_update_fails_closed(self):
+        client = ordered_lifecycle_client()
+        items = [
+            {
+                "operation": "archive_linear_entity",
+                "target": {
+                    "type": "issue",
+                    "selector": {"identifier": "SIS-136"},
+                },
+                "change": {},
+            },
+            {
+                "operation": "update_issue",
+                "target": {"type": "issue", "identifier": "SIS-232"},
+                "change": {"description": "not allowed after parent archive"},
+            },
+        ]
+
+        with self.assertRaisesRegex(
+            lane.ContractError, "unsupported cross-item lifecycle dependency"
+        ):
+            execute_pm_command(
+                route.parse_linear_request(
+                    {"operation": "bulk_linear_operations", "items": items}
+                ).command,
+                lane=lane,
+                client=client,
+                journal_path=PREVIEW_JOURNAL,
+            )
+        self.assertEqual(client.writes, [])
+
+    def test_preview_update_impacted_child_before_parent_archive_fails_closed(self):
+        client = ordered_lifecycle_client()
+        items = [
+            {
+                "operation": "update_issue",
+                "target": {"type": "issue", "identifier": "SIS-232"},
+                "change": {"description": "unsupported impact change"},
+            },
+            {
+                "operation": "archive_linear_entity",
+                "target": {
+                    "type": "issue",
+                    "selector": {"identifier": "SIS-136"},
+                },
+                "change": {},
+            },
+        ]
+
+        with self.assertRaisesRegex(
+            lane.ContractError, "unsupported cross-item lifecycle dependency"
+        ):
+            execute_pm_command(
+                route.parse_linear_request(
+                    {"operation": "bulk_linear_operations", "items": items}
+                ).command,
+                lane=lane,
+                client=client,
+                journal_path=PREVIEW_JOURNAL,
+            )
+        self.assertEqual(client.writes, [])
+
+    def test_preview_relation_change_before_affected_archive_fails_closed(self):
+        client = ordered_lifecycle_client()
+        items = [
+            {
+                "operation": "create_issue_relation",
+                "target": {"type": "issue", "identifier": "SIS-28"},
+                "change": {
+                    "related_identifier": "SIS-136",
+                    "relation_type": "related",
+                },
+            },
+            {
+                "operation": "archive_linear_entity",
+                "target": {
+                    "type": "issue",
+                    "selector": {"identifier": "SIS-136"},
+                },
+                "change": {},
+            },
+        ]
+
+        with self.assertRaisesRegex(
+            lane.ContractError, "unsupported cross-item lifecycle dependency"
+        ):
+            execute_pm_command(
+                route.parse_linear_request(
+                    {"operation": "bulk_linear_operations", "items": items}
+                ).command,
+                lane=lane,
+                client=client,
+                journal_path=PREVIEW_JOURNAL,
+            )
+        self.assertEqual(client.writes, [])
+
+    def test_preview_project_lifecycle_dependency_fails_closed(self):
+        client = ordered_lifecycle_client()
+        impacted = next(
+            copy.deepcopy(issue)
+            for issue in client.entities["issues"]
+            if issue["identifier"] == "SIS-232"
+        )
+        client.project_issues = [impacted]
+        items = [
+            {
+                "operation": "update_issue",
+                "target": {"type": "issue", "identifier": "SIS-232"},
+                "change": {"description": "unsupported project impact change"},
+            },
+            {
+                "operation": "archive_linear_entity",
+                "target": {"type": "project", "selector": {"name": "Empty project"}},
+                "change": {},
+            },
+        ]
+
+        with self.assertRaisesRegex(
+            lane.ContractError, "unsupported cross-item lifecycle dependency"
+        ):
+            execute_pm_command(
+                route.parse_linear_request(
+                    {"operation": "bulk_linear_operations", "items": items}
+                ).command,
+                lane=lane,
+                client=client,
+                journal_path=PREVIEW_JOURNAL,
+            )
+        self.assertEqual(client.writes, [])
+
+    def test_preview_create_child_before_parent_archive_fails_closed(self):
+        client = ordered_lifecycle_client()
+        items = [
+            {
+                "operation": "create_issue",
+                "target": {"type": "team", "identifier": "SIS"},
+                "change": {
+                    "title": "Created into archived parent",
+                    "description": "",
+                    "parent_identifier": "SIS-136",
+                    "state": "Todo",
+                    "priority": "Medium",
+                },
+            },
+            {
+                "operation": "archive_linear_entity",
+                "target": {
+                    "type": "issue",
+                    "selector": {"identifier": "SIS-136"},
+                },
+                "change": {},
+            },
+        ]
+
+        with self.assertRaisesRegex(
+            lane.ContractError, "unsupported cross-item lifecycle dependency"
+        ):
+            execute_pm_command(
+                route.parse_linear_request(
+                    {"operation": "bulk_linear_operations", "items": items}
+                ).command,
+                lane=lane,
+                client=client,
+                journal_path=PREVIEW_JOURNAL,
+            )
+        self.assertEqual(client.writes, [])
+
+    def test_projected_dependency_hash_binds_full_ordered_parent_intent(self):
+        prefix = [
+            {
+                "operation": "update_issue",
+                "target": {"type": "issue", "identifier": "SIS-232"},
+                "change": {"parent_identifier": "SIS-28"},
+            },
+            {
+                "operation": "archive_linear_entity",
+                "target": {
+                    "type": "issue",
+                    "selector": {"identifier": "SIS-136"},
+                },
+                "change": {},
+            },
+        ]
+
+        def projected_hash(description):
+            items = prefix + [
+                {
+                    "operation": "update_issue",
+                    "target": {"type": "issue", "identifier": "SIS-28"},
+                    "change": {"description": description},
+                }
+            ]
+            result = execute_pm_command(
+                route.parse_linear_request(
+                    {"operation": "bulk_linear_operations", "items": items}
+                ).command,
+                lane=lane,
+                client=ordered_lifecycle_client(),
+                journal_path=PREVIEW_JOURNAL,
+            )["result"]
+            return result["before_state_hashes"][1]
+
+        self.assertNotEqual(projected_hash("first"), projected_hash("second"))
+
+    def test_apply_accepts_exact_verified_prefix_effect_only(self):
+        client = ordered_lifecycle_client()
+        items = [
+            {
+                "operation": "update_issue",
+                "target": {"type": "issue", "identifier": "SIS-232"},
+                "change": {"parent_identifier": "SIS-28"},
+            },
+            {
+                "operation": "archive_linear_entity",
+                "target": {
+                    "type": "issue",
+                    "selector": {"identifier": "SIS-136"},
+                },
+                "change": {},
+            },
+        ]
+        preview = execute_pm_command(
+            route.parse_linear_request(
+                {"operation": "bulk_linear_operations", "items": items}
+            ).command,
+            lane=lane,
+            client=client,
+            journal_path=PREVIEW_JOURNAL,
+        )["result"]
+        policy = approval_policy()
+        command = parent(items, policy=policy)
+        policy["approval"]["intent_hash"] = approval_contract.canonical_sha256(
+            bulk.parent_intent(command)
+        )
+        policy["approval"]["before_state_hash"] = preview["before_state_hash"]
+        command = lane.validate_command(command)
+        approval = lane._load_approval()
+        verified = approval.VerifiedOwnerApproval(
+            {},
+            bulk.parent_intent(command),
+            preview["before_state_hash"],
+            policy["approval"]["checksum"],
+            _marker=approval._VERIFIED_MARKER,
+        )
+        consumed = approval.ConsumedOwnerApproval(
+            verified,
+            _marker=approval._CONSUMED_MARKER,
+            command_hash=approval.command_binding_hash(command),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = lane.execute_command(
+                client,
+                command,
+                mode="apply",
+                journal_path=Path(tmp) / "linear.json",
+                owner_approval_authorization=consumed,
+            )
+            bulk_journal = next(
+                path
+                for path in Path(tmp).iterdir()
+                if ".bulk-" in path.name
+                and not path.name.endswith(".lock")
+                and not path.name.endswith(".linear-entity-destruction")
+            )
+            persisted = json.loads(bulk_journal.read_text())
+            self.assertEqual(persisted["schema_version"], 3)
+            self.assertEqual(persisted["items"][1]["producer_indices"], [0])
+            self.assertRegex(
+                persisted["items"][1]["projected_before_hash"], r"^[0-9a-f]{64}$"
+            )
+            serialized_commitments = json.dumps(persisted, sort_keys=True)
+            for hidden_id in (
+                "issue-136-id",
+                "issue-232-id",
+                "issue-233-id",
+            ):
+                self.assertNotIn(hidden_id, serialized_commitments)
+                self.assertNotIn(hidden_id, json.dumps(preview, sort_keys=True))
+
+        self.assertEqual(result["counts"], {"total": 2, "applied": 2, "no_op": 0})
+        self.assertEqual(
+            client.writes,
+            [
+                ("update", "issue", "issue-232-id"),
+                ("archive", "issue", "issue-136-id"),
+            ],
+        )
+
+    def test_initial_hidden_id_drift_is_rejected_before_any_prefix_write(self):
+        client = ordered_lifecycle_client()
+        items = [
+            {
+                "operation": "update_issue",
+                "target": {"type": "issue", "identifier": "SIS-232"},
+                "change": {"parent_identifier": "SIS-28"},
+            },
+            {
+                "operation": "archive_linear_entity",
+                "target": {
+                    "type": "issue",
+                    "selector": {"identifier": "SIS-136"},
+                },
+                "change": {},
+            },
+        ]
+        preview = execute_pm_command(
+            route.parse_linear_request(
+                {"operation": "bulk_linear_operations", "items": items}
+            ).command,
+            lane=lane,
+            client=client,
+            journal_path=PREVIEW_JOURNAL,
+        )["result"]
+        descendant = next(
+            issue
+            for issue in client.entities["issues"]
+            if issue["identifier"] == "SIS-233"
+        )
+        descendant["id"] = "externally-replaced-hidden-id"
+        command, consumed = approved_parent(items, preview["before_state_hash"])
+
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(
+            lane.ContractError, "before-state drifted"
+        ):
+            lane.execute_command(
+                client,
+                command,
+                mode="apply",
+                journal_path=Path(tmp) / "linear.json",
+                owner_approval_authorization=consumed,
+            )
+        self.assertEqual(client.writes, [])
+
+    def test_bulk_lifecycle_child_rejects_aggregate_before_hash(self):
+        client = ordered_lifecycle_client()
+        items = [
+            {
+                "operation": "archive_linear_entity",
+                "target": {
+                    "type": "issue",
+                    "selector": {"identifier": "SIS-136"},
+                },
+                "change": {},
+            }
+        ]
+        preview = execute_pm_command(
+            route.parse_linear_request(
+                {"operation": "bulk_linear_operations", "items": items}
+            ).command,
+            lane=lane,
+            client=client,
+            journal_path=PREVIEW_JOURNAL,
+        )["result"]
+        command, consumed = approved_parent(items, preview["before_state_hash"])
+        child = bulk.derive_child_command(command, 0)
+        approval = lane._load_approval()
+        wrong = approval._mint_bulk_child_authorization(
+            consumed,
+            parent_command=command,
+            child_command=child,
+            before_state_hash=preview["before_state_hash"],
+        )
+
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(
+            lane.ContractError, "before-state drifted"
+        ):
+            lane.execute_command(
+                client,
+                child,
+                mode="apply",
+                journal_path=Path(tmp) / "linear.json",
+                owner_approval_authorization=wrong,
+            )
+        self.assertEqual(client.writes, [])
+
+    def test_remaining_hidden_child_drift_stops_before_parent_archive(self):
+        client = ordered_lifecycle_client()
+        old_parent = next(
+            issue
+            for issue in client.entities["issues"]
+            if issue["identifier"] == "SIS-136"
+        )
+        sibling = copy.deepcopy(old_parent)
+        sibling.update(
+            {
+                "id": "issue-234-id",
+                "identifier": "SIS-234",
+                "title": "Remaining child",
+                "parent": {
+                    "id": old_parent["id"],
+                    "identifier": old_parent["identifier"],
+                },
+            }
+        )
+        client.entities["issues"].append(sibling)
+        items = [
+            {
+                "operation": "update_issue",
+                "target": {"type": "issue", "identifier": "SIS-232"},
+                "change": {"parent_identifier": "SIS-28"},
+            },
+            {
+                "operation": "archive_linear_entity",
+                "target": {
+                    "type": "issue",
+                    "selector": {"identifier": "SIS-136"},
+                },
+                "change": {},
+            },
+        ]
+        preview = execute_pm_command(
+            route.parse_linear_request(
+                {"operation": "bulk_linear_operations", "items": items}
+            ).command,
+            lane=lane,
+            client=client,
+            journal_path=PREVIEW_JOURNAL,
+        )["result"]
+        command, consumed = approved_parent(items, preview["before_state_hash"])
+        update = client.update_issue_fields
+
+        def update_then_drift(issue_id, **fields):
+            update(issue_id, **fields)
+            sibling["id"] = "externally-replaced-hidden-id"
+
+        client.update_issue_fields = update_then_drift
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(
+            RuntimeError, "1 of 2"
+        ):
+            lane.execute_command(
+                client,
+                command,
+                mode="apply",
+                journal_path=Path(tmp) / "linear.json",
+                owner_approval_authorization=consumed,
+            )
+        self.assertEqual(client.writes, [("update", "issue", "issue-232-id")])
+
+    def test_prefix_crash_exact_recovery_unlocks_dependent_archive(self):
+        client = ordered_lifecycle_client()
+        items = [
+            {
+                "operation": "update_issue",
+                "target": {"type": "issue", "identifier": "SIS-232"},
+                "change": {"parent_identifier": "SIS-28"},
+            },
+            {
+                "operation": "archive_linear_entity",
+                "target": {
+                    "type": "issue",
+                    "selector": {"identifier": "SIS-136"},
+                },
+                "change": {},
+            },
+        ]
+        preview = execute_pm_command(
+            route.parse_linear_request(
+                {"operation": "bulk_linear_operations", "items": items}
+            ).command,
+            lane=lane,
+            client=client,
+            journal_path=PREVIEW_JOURNAL,
+        )["result"]
+        command, consumed = approved_parent(items, preview["before_state_hash"])
+        update = client.update_issue_fields
+        crashed = False
+
+        def crash_once_after_update(issue_id, **fields):
+            nonlocal crashed
+            update(issue_id, **fields)
+            if not crashed:
+                crashed = True
+                raise KeyboardInterrupt("process death after exact reparent")
+
+        client.update_issue_fields = crash_once_after_update
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Path(tmp) / "linear.json"
+            with self.assertRaises(KeyboardInterrupt):
+                lane.execute_command(
+                    client,
+                    command,
+                    mode="apply",
+                    journal_path=journal,
+                    owner_approval_authorization=consumed,
+                )
+            self.assertEqual(client.writes, [("update", "issue", "issue-232-id")])
+            result = lane.execute_command(
+                client,
+                command,
+                mode="apply",
+                journal_path=journal,
+                owner_approval_authorization=consumed,
+            )
+
+        self.assertTrue(result["verified"])
+        self.assertEqual(
+            client.writes,
+            [
+                ("update", "issue", "issue-232-id"),
+                ("archive", "issue", "issue-136-id"),
+            ],
+        )
+
     def test_pm_worker_generates_exact_read_only_preview_without_journal(self):
         client = preview_client()
         request = requested_owner_batch()
@@ -412,6 +1189,27 @@ class BulkExecutionTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "preflight failed"):
             bulk.execute_parent(parent([item(0), item(1)]), validate_child=validate, execute_child=execute)
         self.assertEqual(events, ["plan:SIS-1", "plan:SIS-2"])
+
+    def test_invalid_forward_producer_index_fails_before_journal_write(self):
+        def execute(child, mode, _auth=None):
+            result = bulk.fake_result(child, mode, no_op=False)
+            if mode == "plan":
+                result["producer_indices"] = [1]
+                result["dependency_hash"] = "d" * 64
+            return result
+
+        with tempfile.TemporaryDirectory() as tmp:
+            recovery = Path(tmp) / "bulk.json"
+            with self.assertRaisesRegex(
+                RuntimeError, "bulk child lifecycle commitments are invalid"
+            ):
+                bulk.execute_parent(
+                    parent([item(0)]),
+                    validate_child=lambda value: value,
+                    execute_child=execute,
+                    recovery_path=recovery,
+                )
+            self.assertFalse(recovery.exists())
 
     def test_partial_failure_persists_completed_prefix_and_resume_skips_it(self):
         calls: list[tuple[str, str]] = []
@@ -573,6 +1371,9 @@ class BulkExecutionTests(unittest.TestCase):
         }
         owner_item["change"] = {}
         command = parent([owner_item], policy=approval_policy())
+        command["policy"]["approval"]["before_state_hash"] = bulk._hash(
+            [bulk._hash({"value": "before"})]
+        )
         child = bulk.derive_child_command(command, 0)
 
         def evidence(phase="prepared"):
@@ -795,7 +1596,16 @@ class BulkExecutionTests(unittest.TestCase):
         )
         child = bulk.derive_child_command(validated, 1)
         narrowed = approval._mint_bulk_child_authorization(
-            consumed, parent_command=validated, child_command=child
+            consumed,
+            parent_command=validated,
+            child_command=child,
+            before_state_hash="d" * 64,
+        )
+        self.assertEqual(
+            approval.bulk_child_before_state_hash(
+                narrowed, expected_command=child
+            ),
+            "d" * 64,
         )
         approval.require_consumed_owner_approval(
             narrowed,

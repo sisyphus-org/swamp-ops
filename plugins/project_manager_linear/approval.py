@@ -128,7 +128,13 @@ class ConsumedOwnerApproval:
 class BulkChildAuthorization:
     """Opaque child capability minted only from an exact consumed parent claim."""
 
-    __slots__ = ("_intent", "_command_hash", "_parent_command_hash", "_marker")
+    __slots__ = (
+        "_intent",
+        "_command_hash",
+        "_parent_command_hash",
+        "_before_state_hash",
+        "_marker",
+    )
 
     def __init__(
         self,
@@ -136,6 +142,7 @@ class BulkChildAuthorization:
         intent: dict[str, Any],
         command_hash: str,
         parent_command_hash: str,
+        before_state_hash: str,
         _marker: object,
     ) -> None:
         if _marker is not _BULK_CHILD_MARKER:
@@ -143,6 +150,7 @@ class BulkChildAuthorization:
         self._intent = intent
         self._command_hash = command_hash
         self._parent_command_hash = parent_command_hash
+        self._before_state_hash = before_state_hash
         self._marker = _marker
 
 
@@ -151,6 +159,7 @@ def _mint_bulk_child_authorization(
     *,
     parent_command: dict[str, Any],
     child_command: dict[str, Any],
+    before_state_hash: str,
 ) -> BulkChildAuthorization:
     """Narrow one exact durable parent claim to one deterministic child."""
     expected_parent_intent = {
@@ -165,6 +174,10 @@ def _mint_bulk_child_authorization(
     )
     if parent_command.get("operation") != "bulk_linear_operations":
         raise ApprovalError("bulk child authorization requires an exact bulk parent")
+    if not isinstance(before_state_hash, str) or re.fullmatch(
+        r"[0-9a-f]{64}", before_state_hash
+    ) is None:
+        raise ApprovalError("bulk child before-state commitment is invalid")
     child_intent = {
         "operation": child_command.get("operation"),
         "target": child_command.get("target"),
@@ -174,8 +187,33 @@ def _mint_bulk_child_authorization(
         intent=child_intent,
         command_hash=command_binding_hash(child_command),
         parent_command_hash=command_binding_hash(parent_command),
+        before_state_hash=before_state_hash,
         _marker=_BULK_CHILD_MARKER,
     )
+
+
+def bulk_child_before_state_hash(
+    authorization: Any, *, expected_command: dict[str, Any]
+) -> str | None:
+    """Return the exact projected hash only from a valid bulk child capability."""
+    if not isinstance(authorization, BulkChildAuthorization):
+        return None
+    expected_intent = {
+        "operation": expected_command.get("operation"),
+        "target": expected_command.get("target"),
+        "change": expected_command.get("change"),
+    }
+    require_consumed_owner_approval(
+        authorization,
+        expected_intent=expected_intent,
+        expected_command=expected_command,
+    )
+    before_state_hash = authorization._before_state_hash
+    if not isinstance(before_state_hash, str) or re.fullmatch(
+        r"[0-9a-f]{64}", before_state_hash
+    ) is None:
+        raise ApprovalError("bulk child before-state commitment is invalid")
+    return before_state_hash
 
 
 def require_consumed_owner_approval(
