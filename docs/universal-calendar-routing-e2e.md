@@ -24,9 +24,9 @@ Other versions and extra fields fail closed. Secret-shaped values are rejected o
 ## Supported operations
 
 - Reads: `inventory`, `events`, and `freebusy`; windows are only `today`, `next-7-days`, and `next-30-days`.
-- Explicit-intent create: a clear authenticated owner instruction authorizes one exact bounded primary-calendar creation; the worker executes plan → snapshot → attestation → fresh snapshot → apply → read-back in one run without a second conversational confirmation. Standalone events omit `linear_url`; an explicitly requested canonical public Linear issue URL remains optional and is preserved in linked descriptions.
+- Explicit-intent write: a clear authenticated owner instruction authorizes one exact bounded primary-calendar create, update, or delete; the worker executes plan → snapshot → attestation → fresh snapshot → apply → read-back in one run without a second conversational confirmation. Standalone events omit `linear_url`; an explicitly requested canonical public Linear issue URL remains optional and is preserved in linked descriptions.
 - Clarification: the source asks only when title, date/time/duration, or exact update/delete target is genuinely missing or ambiguous after considering the conversation context. The tool itself still requires fully resolved exact fields and never guesses them.
-- Approval: update/delete keep the preview flow. `approve` also accepts opaque references from create previews issued before the single-step contract and remains bound to the same exact source session.
+- Legacy approval: `approve` accepts opaque references from create/update/delete previews issued before the single-step contract and remains bound to the same exact source session. New writes never start a preview-first flow.
 
 The underlying Calendar apply lane uses a deterministic event ID and exact read-back. A read-only snapshot workflow binds the target's complete pre-mutation provider state into the opaque source-session approval reference, the worker rechecks it immediately before apply, and update/delete/restore use the observed event ETag as an atomic `If-Match` precondition. Verified results are written atomically to a profile-local `0600` completion journal; one per-command execution lock serializes load→execute→journal so concurrent retries cannot duplicate external work. A lifecycle failure can therefore retry without repeating external work. Replays reuse the Kanban delivery task; create/update/delete replay converges to a verified no-op rather than a duplicate event or mutation.
 
@@ -55,8 +55,8 @@ On 2026-09-04 the feature worktree ran `google-calendar-write-snapshot` twice ag
 3. Validate Plugin Doctor output and read back both registered tools. Prove the runtime attestation matches `HEAD`, the runtime tree is clean, and `.swamp-sources.yaml` is absent. Restart only owner-approved target gateways/dispatcher; never restart the default Gateway from an agent session.
 4. Audit exact source session/thread wake routing before release.
 5. From one non-default profile, run bounded read inventory/events/freebusy.
-6. Run one clear source-profile create instruction, verify apply/read-back without an intermediate preview, and literal-replay it without additional task/subscription/event/mutation/notification counts.
-7. Verify one genuinely ambiguous request asks a focused clarification and creates no task. Then run an exact cleanup delete instruction, inspect its fresh preview, explicitly approve it in the same source session, and verify absence plus delete replay no-op.
+6. Run clear source-profile create, update, and delete instructions; verify each apply/read-back without an intermediate preview and literal-replay each without additional task/subscription/event/mutation/notification counts.
+7. Verify one genuinely ambiguous request asks a focused clarification and creates no task. Verify exact cleanup delete absence plus delete replay no-op.
 8. Record actual task/run/subscription cursors, immutable workflow artifact versions/checksums, sanitized source replies, and cleanup evidence in the SIS-123 project note. Only then may the production E2E criterion be marked complete.
 
 No production claim is made by this repository state.

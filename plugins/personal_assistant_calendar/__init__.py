@@ -159,8 +159,6 @@ def _validate_command_request(command: dict[str, Any]) -> None:
     expected = {"operation", "block_key", "summary", "start", "end", "linear_url", "details"}
     if set(request) != expected or request.get("operation") not in {"create", "update", "delete"}:
         raise CalendarWorkerError("Calendar write request is invalid")
-    if operation == "execute_write" and request.get("operation") != "create":
-        raise CalendarWorkerError("Calendar direct write is limited to create")
     for field, maximum in (("block_key", 64), ("summary", 200), ("start", 19), ("end", 19), ("linear_url", 500), ("details", 4000)):
         value = request.get(field)
         if not isinstance(value, str) or len(value) > maximum or any(

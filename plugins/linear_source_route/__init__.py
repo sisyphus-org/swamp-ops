@@ -2500,10 +2500,10 @@ CALENDAR_SOURCE_REQUEST_SCHEMA = {
     "description": (
         "Route one bounded Calendar inventory, events, freebusy, or explicit-intent "
         "standalone/optionally Linear-linked write through the Personal Assistant "
-        "Kanban lane. A clear owner create request is executed once "
+        "Kanban lane. A clear owner create, update, or delete request is executed once "
         "with verified read-back and no second confirmation. Ask the owner only when "
-        "required event fields are genuinely missing or ambiguous. Update/delete and "
-        "legacy pending create previews retain explicit approval. Calendar and Linear are independent; "
+        "required event fields or the exact update/delete target are genuinely missing or ambiguous. "
+        "Legacy pending previews retain explicit approval. Calendar and Linear are independent; "
         "never create a Linear issue only to create an event."
     ),
     "parameters": {
