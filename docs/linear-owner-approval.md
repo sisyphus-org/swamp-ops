@@ -1,6 +1,6 @@
 # Linear owner-approved relation, parent, archive, and delete changes
 
-This repository retains the narrowly owner-approved direct destructive slices below. The separately generated preview/confirmation flow introduced for deletion is issue-only; it does not replace or broaden the fixed-approved matrix:
+This repository retains the narrowly owner-approved direct destructive slices below. Separate generated preview/confirmation routes exist for exact issue deletion and ordered `bulk_linear_operations`; they do not replace or broaden the fixed-approved matrix:
 
 1. replace or clear the parent of one exact `SIS-N` issue through parent-only `update_issue`;
 2. remove one exact existing issue relation by two exact `SIS-N` endpoints and `relation_type`;
@@ -95,7 +95,7 @@ Wrong/expired/forged approval, wrong intent, wrong before hash, changed live pla
 
 ## Archive/delete matrix and behavior
 
-The retained direct fixed-approved matrix is deliberately asymmetric. Generated approval-less preview/confirmation is an additional issue-only route:
+The retained direct fixed-approved matrix is deliberately asymmetric. Generated approval-less preview/confirmation has two routes: exact issue deletion and ordered `bulk_linear_operations` containing supported owner-controlled children:
 
 | operation | issue | project | milestone | initiative |
 |---|---:|---:|---:|---:|

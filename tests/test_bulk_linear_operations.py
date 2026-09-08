@@ -433,6 +433,40 @@ class BulkExecutionTests(unittest.TestCase):
         self.assertEqual([call for call in calls if call == ("apply", "SIS-1")], [("apply", "SIS-1")])
         self.assertEqual(result["counts"], {"total": 2, "applied": 2, "no_op": 0})
 
+    def test_hidden_child_commitment_drift_stops_before_destructive_resume(self):
+        hidden_impact_id = {"value": "relation-old"}
+        writes: list[str] = []
+
+        def execute(child, mode, _auth=None):
+            identifier = child["target"]["identifier"]
+            planned = child_plan(
+                child,
+                before={"public": "unchanged"},
+                after={"public": f"after-{identifier}"},
+            )
+            if identifier == "SIS-2":
+                planned["before_state_hash"] = approval_contract.canonical_sha256(
+                    {"hidden_impact_id": hidden_impact_id["value"]}
+                )
+            if mode == "plan":
+                return planned
+            writes.append(identifier)
+            if identifier == "SIS-1":
+                hidden_impact_id["value"] = "relation-drifted"
+            return {**planned, "mode": "apply", "result": "applied", "verified": True}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            recovery = Path(tmp) / "bulk.json"
+            with self.assertRaisesRegex(bulk.PartialFailure, "1 of 2"):
+                bulk.execute_parent(
+                    parent([item(0), item(1)]),
+                    validate_child=lambda value: value,
+                    execute_child=execute,
+                    recovery_path=recovery,
+                )
+
+        self.assertEqual(writes, ["SIS-1"])
+
     def test_cross_target_indirect_drift_stops_before_second_write_and_retry_fails_closed(self):
         live = {"SIS-1": "before-1", "SIS-2": "before-2"}
         writes: list[str] = []

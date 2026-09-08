@@ -326,7 +326,7 @@ def _plan_hashes(plan: dict[str, Any]) -> dict[str, str]:
         "operation_hash": _hash(plan.get("operation")),
         "target_hash": _hash(plan.get("target")),
         "plan_hash": _hash(plan.get("plan")),
-        "before_hash": _hash(plan.get("before")),
+        "before_hash": _before_state_hashes([plan])[0],
         "desired_after_hash": _hash(plan.get("after")),
     }
 
