@@ -61,6 +61,17 @@ READ_OPERATIONS = {
     "preview_bulk_linear_operations",
 }
 _BULK_PREVIEW_PLAN_CAPABILITY = object()
+_BULK_LIFECYCLE_PROJECTION_MARKER = object()
+
+
+class _BulkLifecycleProjection:
+    __slots__ = ("request", "_marker")
+
+    def __init__(self, request: dict[str, Any]) -> None:
+        self.request = request
+        self._marker = _BULK_LIFECYCLE_PROJECTION_MARKER
+
+
 LINEAR_ENTITY_TYPES = ("issues", "projects", "milestones", "initiatives")
 MAX_SEARCH_QUERY = 500
 TERMINAL_STATES = {"Done", "Canceled"}
@@ -2244,6 +2255,7 @@ def execute_command(
     owner_approval_authorization: Any | None = None,
     _lock_held: bool = False,
     _bulk_preview_capability: Any = None,
+    _bulk_lifecycle_projection: Any = None,
 ) -> dict[str, Any]:
     """Plan or execute one validated exact-target command."""
     if mode not in {"plan", "apply"}:
@@ -2253,6 +2265,12 @@ def execute_command(
         or mode != "plan"
     ):
         raise ContractError("bulk preview capability is plan-only")
+    if _bulk_lifecycle_projection is not None and (
+        not isinstance(_bulk_lifecycle_projection, _BulkLifecycleProjection)
+        or _bulk_lifecycle_projection._marker is not _BULK_LIFECYCLE_PROJECTION_MARKER
+        or mode != "plan"
+    ):
+        raise ContractError("bulk lifecycle projection capability is plan-only")
     command = validate_command(
         raw, _bulk_preview_capability=_bulk_preview_capability
     )
@@ -2262,6 +2280,7 @@ def execute_command(
     owner_approved_apply = (
         mode == "apply" and command["policy"].get("mode") == "owner_approved"
     )
+    bulk_child_before_state_hash: str | None = None
     if owner_approved_apply:
         approval = _load_approval()
         try:
@@ -2274,6 +2293,14 @@ def execute_command(
                 },
                 expected_command=command,
             )
+            extractor = getattr(approval, "bulk_child_before_state_hash", None)
+            if callable(extractor):
+                extracted_hash = extractor(
+                    owner_approval_authorization, expected_command=command
+                )
+                if extracted_hash is not None and not isinstance(extracted_hash, str):
+                    raise ContractError("bulk child before-state commitment is invalid")
+                bulk_child_before_state_hash = extracted_hash
         except approval.ApprovalError as exc:
             raise ContractError(str(exc)) from exc
     elif owner_approval_authorization is not None:
@@ -2318,16 +2345,25 @@ def execute_command(
     if command["operation"] == "preview_bulk_linear_operations":
         bulk = _load_bulk()
 
-        def plan_preview_child(child: dict[str, Any]) -> dict[str, Any]:
+        def plan_preview_child(
+            child: dict[str, Any], projection: dict[str, Any] | None = None
+        ) -> dict[str, Any]:
             return execute_command(
                 client,
                 child,
                 mode="plan",
                 journal_path=None,
                 _bulk_preview_capability=_BULK_PREVIEW_PLAN_CAPABILITY,
+                _bulk_lifecycle_projection=(
+                    _BulkLifecycleProjection(projection)
+                    if projection is not None
+                    else None
+                ),
             )
 
-        return bulk.preview_parent(command, plan_child=plan_preview_child)
+        return bulk.preview_parent(
+            command, plan_child=plan_preview_child, error_cls=ContractError
+        )
 
     if command["operation"] == "bulk_linear_operations":
         bulk = _load_bulk()
@@ -2347,11 +2383,17 @@ def execute_command(
             }
             if child_mode == "apply":
                 kwargs["_lock_held"] = True
-            if authorization is not None:
+            if child_mode == "plan" and authorization is not None:
+                kwargs["_bulk_lifecycle_projection"] = _BulkLifecycleProjection(
+                    authorization
+                )
+            elif authorization is not None:
                 kwargs["owner_approval_authorization"] = authorization
             return execute_command(client, child, **kwargs)
 
-        def authorize_bulk_child(child: dict[str, Any]) -> Any:
+        def authorize_bulk_child(
+            child: dict[str, Any], before_state_hash: str
+        ) -> Any:
             if child["policy"].get("mode") != "owner_approved":
                 return None
             approval = _load_approval()
@@ -2360,6 +2402,7 @@ def execute_command(
                     owner_approval_authorization,
                     parent_command=command,
                     child_command=child,
+                    before_state_hash=before_state_hash,
                 )
             except approval.ApprovalError as exc:
                 raise ContractError(str(exc)) from exc
@@ -2439,6 +2482,12 @@ def execute_command(
                 key_hash=key_hash,
                 request_hash=request_hash,
                 error_cls=ContractError,
+                projection=(
+                    _bulk_lifecycle_projection.request
+                    if _bulk_lifecycle_projection is not None
+                    else None
+                ),
+                authorized_before_state_hash=bulk_child_before_state_hash,
             )
         )
 

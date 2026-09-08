@@ -205,6 +205,85 @@ def _trusted_before_state(
     }
 
 
+def _project_issue_archive_impact(
+    entity: dict[str, Any],
+    raw_impact: dict[str, list[Any]],
+    projection: dict[str, Any],
+) -> dict[str, list[Any]]:
+    """Remove only producer-committed direct-child subtrees from issue impact."""
+    producers = projection.get("producers")
+    if (
+        set(projection)
+        != {"version", "parent_intent_hash", "archive_target", "producers"}
+        or projection.get("version") != 1
+        or not isinstance(projection.get("parent_intent_hash"), str)
+        or len(projection["parent_intent_hash"]) != 64
+        or projection.get("archive_target") != entity.get("identifier")
+        or not isinstance(producers, list)
+        or not producers
+    ):
+        raise RuntimeError("bulk lifecycle projection is invalid")
+    children = raw_impact.get("children")
+    if not isinstance(children, list):
+        raise RuntimeError("bulk lifecycle projection requires issue child impact")
+    roots: set[str] = set()
+    producer_indices: set[int] = set()
+    for producer in producers:
+        if (
+            not isinstance(producer, dict)
+            or set(producer) != {"index", "kind", "root_identifier"}
+            or producer.get("kind")
+            not in {"reparent_from_direct_parent", "archive_direct_child"}
+            or not isinstance(producer.get("index"), int)
+            or producer["index"] < 0
+            or producer["index"] in producer_indices
+            or not isinstance(producer.get("root_identifier"), str)
+            or producer["root_identifier"] in roots
+        ):
+            raise RuntimeError("bulk lifecycle projection is invalid")
+        producer_indices.add(producer["index"])
+        roots.add(producer["root_identifier"])
+    by_identifier: dict[str, dict[str, Any]] = {}
+    for child in children:
+        identifier = child.get("identifier") if isinstance(child, dict) else None
+        if not isinstance(identifier, str) or identifier in by_identifier:
+            raise RuntimeError("bulk lifecycle child impact is ambiguous")
+        by_identifier[identifier] = child
+    entity_id = entity.get("id")
+    for root in roots:
+        child = by_identifier.get(root)
+        parent = child.get("parent") if isinstance(child, dict) else None
+        if (
+            child is None
+            or not isinstance(parent, dict)
+            or parent.get("identifier") != entity.get("identifier")
+            or (
+                isinstance(entity_id, str)
+                and parent.get("id") != entity_id
+            )
+        ):
+            raise RuntimeError(
+                "bulk lifecycle projection root is not an exact direct child"
+            )
+    excluded = set(roots)
+    changed = True
+    while changed:
+        changed = False
+        for identifier, child in by_identifier.items():
+            parent = child.get("parent")
+            parent_identifier = (
+                parent.get("identifier") if isinstance(parent, dict) else None
+            )
+            if identifier not in excluded and parent_identifier in excluded:
+                excluded.add(identifier)
+                changed = True
+    projected = copy.deepcopy(raw_impact)
+    projected["children"] = [
+        child for child in children if child.get("identifier") not in excluded
+    ]
+    return projected
+
+
 def _load(path: Path) -> dict[str, dict[str, Any]]:
     if not path.exists():
         return {}
@@ -520,6 +599,8 @@ def _verify_delete_impact(
 def execute(
     client: Any, command: dict[str, Any], *, mode: str, journal_path: Path | None,
     key_hash: str, request_hash: str, error_cls: type[Exception],
+    projection: dict[str, Any] | None = None,
+    authorized_before_state_hash: str | None = None,
 ) -> dict[str, Any]:
     operation = command["operation"]
     if mode == "apply":
@@ -621,10 +702,32 @@ def execute(
         raise error_cls(f"exact active Linear {entity_type} not found")
     entity = active[0]
     raw_impact = _impact(client, entity_type, entity)
+    initial_before_state_hash = _hash(_trusted_before_state(entity, raw_impact))
+    dependency_hash: str | None = None
+    if projection is not None:
+        if mode != "plan" or operation != "archive_linear_entity" or entity_type != "issue":
+            raise error_cls("bulk lifecycle projection is unsupported for this operation")
+        try:
+            raw_impact = _project_issue_archive_impact(entity, raw_impact, projection)
+        except RuntimeError as exc:
+            raise error_cls(str(exc)) from exc
+        dependency_hash = _hash(projection)
     impact = _canonical_impact(raw_impact)
     impact_counts = {key: len(items) for key, items in impact.items()}
     trusted_before = _trusted_before_state(entity, raw_impact)
-    before_state_hash = _hash(trusted_before)
+    projected_before_state_hash = _hash(trusted_before)
+    before_state_hash = (
+        _hash(
+            {
+                "version": 1,
+                "initial_before_state_hash": initial_before_state_hash,
+                "projected_before_state_hash": projected_before_state_hash,
+                "dependency_hash": dependency_hash,
+            }
+        )
+        if dependency_hash is not None
+        else projected_before_state_hash
+    )
     before = {
         "entity": _scrub(entity), "archived": False,
         "impact": impact, "impact_counts": impact_counts,
@@ -639,11 +742,23 @@ def execute(
         "affected_entities": copy.deepcopy(impact),
     }]
     if mode == "plan":
-        return {
+        result = {
             **base, "result": "planned", "before": before, "after": after,
             "plan": plan, "no_op": False, "verified": False,
             "before_state_hash": before_state_hash,
         }
+        if projection is not None:
+            result.update(
+                {
+                    "initial_before_state_hash": initial_before_state_hash,
+                    "projected_before_state_hash": projected_before_state_hash,
+                    "dependency_hash": dependency_hash,
+                    "producer_indices": [
+                        producer["index"] for producer in projection["producers"]
+                    ],
+                }
+            )
+        return result
     if recovery_path is None:
         raise error_cls("entity destruction apply requires recovery journal")
     recovery_manifest = (
@@ -652,9 +767,16 @@ def execute(
         else _delete_recovery_manifest(entity_type, entity, raw_impact)
     )
     manifest_hash = _hash(recovery_manifest)
+    expected_before_state_hash = (
+        authorized_before_state_hash
+        if authorized_before_state_hash is not None
+        else approval_ref.get("before_state_hash")
+        if isinstance(approval_ref, dict)
+        else None
+    )
     if (
         not isinstance(approval_ref, dict)
-        or approval_ref.get("before_state_hash") != before_state_hash
+        or expected_before_state_hash != before_state_hash
     ):
         raise error_cls("entity destruction final before-state drifted from approval")
     entry = {
