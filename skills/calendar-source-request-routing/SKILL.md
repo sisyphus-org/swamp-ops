@@ -1,7 +1,7 @@
 ---
 name: calendar-source-request-routing
 description: Route Calendar reads and explicit-intent writes to PA.
-version: 1.2.1
+version: 1.3.0
 author: sisyphus-org
 platforms: [linux, macos]
 metadata:
@@ -21,7 +21,7 @@ Call exactly one of `inventory`, `events`, or `freebusy` with `window` equal to 
 
 Calendar and Linear are independent operations. A normal Calendar request must not create or require a Linear issue. Link them only when the owner explicitly supplies an SIS issue or asks for the connection.
 
-An explicit owner instruction to create or add a Calendar event is the authorization for that exact bounded creation. Do **not** ask for a second confirmation after the create request is already clear. Update and delete retain the existing preview/approval flow because they modify or remove an existing target.
+An explicit owner instruction to create, update, or delete a Calendar event is the authorization for that exact bounded write. Do **not** ask for a second confirmation when the requested fields and target are already clear.
 
 Before calling the tool, resolve required fields from the current request and unambiguous conversation context:
 
@@ -34,22 +34,14 @@ Ask one focused clarification only when a required value is genuinely missing or
 
 1. For a standalone event, omit `linear_url`. Choose a stable safe `block_key` that includes the event date/time or another unique discriminator so separate events do not collide.
 2. When the owner explicitly supplies `SIS-N` without its URL, resolve it through the Linear source route and pass only the returned canonical public `https://linear.app/.../issue/SIS-N/...` URL. Never pass Linear credentials or an internal ID.
-3. For create, call `calendar_source_request` once with exact `block_key`, `summary`, local Kyiv `start`/`end`, `details`, and optional canonical `linear_url`.
-4. After `queued`, stop. On exact-session wake, replay the literal create request once and report only sanitized verified read-back.
+3. For create or update, call `calendar_source_request` once with exact `block_key`, `summary`, local Kyiv `start`/`end`, `details`, and optional canonical `linear_url`. For delete, use the exact target `block_key` and empty event fields.
+4. After `queued`, stop. On exact-session wake, replay the literal write request once and report only sanitized verified read-back.
 
 The routed worker still performs a protected plan, before-state snapshot, attestation workflow, fresh snapshot comparison, provider mutation, and exact read-back in one run. The source agent never receives workflow run IDs, OAuth data, event IDs, artifact versions, checksums, before-state hashes, or internal routing fields. If routing is unavailable, report the truthful capability error; never instruct the owner to upload an OAuth JSON file.
 
-### Preview-gated update and delete
+### Legacy previews
 
-For a new update or delete request, retain the existing two-step flow:
-
-1. Call `calendar_source_request` with the exact update/delete fields. Delete requires empty event fields.
-2. After `queued`, stop. On exact-session wake, replay that literal request once to obtain the exact machine preview and opaque approval reference.
-3. Show the material target/action fields to the owner and ask for explicit confirmation.
-4. Only after confirmation in the same source session, call `operation=approve` with the exact opaque reference.
-5. After `queued`, stop. On wake, replay the exact approval call and report sanitized verified read-back.
-
-`operation=approve` also remains available for create previews issued before this single-step contract was deployed. A literal same-session replay of such a create must return the existing protected preview; it must never create a new direct-execution task. Never create a new preview-first flow for an ordinary create.
+`operation=approve` remains available for create/update/delete previews issued before this single-step contract was deployed. A literal same-session replay of any such write must return the existing protected preview; it must never create a new direct-execution task. Never create a new preview-first flow for an ordinary write.
 
 ### Literal field preservation
 

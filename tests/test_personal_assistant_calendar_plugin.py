@@ -146,6 +146,26 @@ class Workflows:
         return {"operation": "create", "status": "verified", "reused": False, "linearIssue": "SIS-123", "blockKey": "primary"}
 
 
+class DirectWriteWorkflows(Workflows):
+    def __init__(self):
+        super().__init__()
+        self.request = {}
+
+    def plan(self, request):
+        self.request = request
+        planned = super().plan(request)
+        if request["operation"] == "delete":
+            planned["preview"]["event"] = {}
+        return planned
+
+    def apply(self, plan_reference, approval_reference):
+        self.calls.append(("apply", plan_reference, approval_reference))
+        return {
+            "operation": self.request["operation"], "status": "verified", "reused": False,
+            "linearIssue": "SIS-123", "blockKey": self.request["block_key"],
+        }
+
+
 def environ():
     return {
         "HERMES_PROFILE": "personal-assistant",
@@ -233,24 +253,42 @@ class PersonalAssistantCalendarWorkerTests(unittest.TestCase):
         self.assertNotIn("approval_reference", persisted)
         self.assertEqual(persisted["data"]["status"], "verified")
 
-    def test_execute_write_rejects_non_create_before_workflow_access(self):
-        raw = command({
-            "operation": "delete", "block_key": "primary", "summary": "",
-            "start": "", "end": "", "details": "",
-        })
-        raw["operation"] = "execute_write"
-        lifecycle = Lifecycle()
-        workflows = Workflows()
+    def test_execute_write_applies_update_and_delete_without_preview(self):
+        requests = (
+            {
+                "operation": "update", "block_key": "primary", "summary": "Updated",
+                "start": "2026-09-07T10:00", "end": "2026-09-07T10:30",
+                "linear_url": "https://linear.app/sisyphusx/issue/SIS-123/calendar-routing",
+                "details": "",
+            },
+            {
+                "operation": "delete", "block_key": "primary", "summary": "",
+                "start": "", "end": "",
+                "linear_url": "https://linear.app/sisyphusx/issue/SIS-123/calendar-routing",
+                "details": "",
+            },
+        )
+        for request in requests:
+            with self.subTest(operation=request["operation"]):
+                raw = command(request)
+                self.assertEqual(raw["operation"], "execute_write")
+                lifecycle = Lifecycle()
+                workflows = DirectWriteWorkflows()
 
-        output = json.loads(handle_pa_calendar_execute(
-            {}, environ=environ(), task_loader=lambda *_args: task_record(raw),
-            run_reserver=lambda *_args: True, lifecycle_factory=lambda _task_id: lifecycle,
-            workflow_runner_factory=lambda: workflows,
-        ))
+                output = json.loads(handle_pa_calendar_execute(
+                    {}, environ=environ(), task_loader=lambda *_args: task_record(raw),
+                    run_reserver=lambda *_args: True, lifecycle_factory=lambda _task_id: lifecycle,
+                    workflow_runner_factory=lambda: workflows,
+                ))
 
-        self.assertEqual(output["status"], "blocked")
-        self.assertEqual(workflows.calls, [])
-        self.assertEqual(lifecycle.completed, [])
+                self.assertEqual(output["status"], "completed")
+                self.assertEqual([call[0] for call in workflows.calls], [
+                    "plan", "snapshot", "start_approval", "approve", "resume_approval", "snapshot", "apply",
+                ])
+                persisted = json.loads(lifecycle.completed[0]["result"])
+                self.assertEqual(persisted["data"]["operation"], request["operation"])
+                self.assertNotIn("preview", persisted)
+                self.assertNotIn("approval_reference", persisted)
 
     def test_execute_write_journal_rejects_wrong_operation_or_block_key(self):
         raw = command({

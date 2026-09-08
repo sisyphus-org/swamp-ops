@@ -360,8 +360,9 @@ class CalendarSourcePluginTests(unittest.TestCase):
             "unambiguous conversation context",
             "через час после этой",
             "protected plan, before-state snapshot, attestation workflow",
-            "Preview-gated update and delete",
-            "Only after confirmation in the same source session",
+            "create, update, or delete",
+            "Do **not** ask for a second confirmation",
+            "Legacy previews",
         ):
             self.assertIn(required, guidance)
         self.assertIn("Never create a new preview-first flow", guidance)

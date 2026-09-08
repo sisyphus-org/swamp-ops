@@ -67,7 +67,7 @@ class CalendarCommandTests(unittest.TestCase):
         self.assertEqual(command["request"], {**request, "linear_url": ""})
         self.assertEqual(command["source_profile"], "ideas")
 
-    def test_update_and_delete_remain_preview_gated(self):
+    def test_update_and_delete_execute_without_preview(self):
         update = calendar_route.parse_calendar_request(
             {
                 "operation": "update", "block_key": "primary", "summary": "Updated",
@@ -82,8 +82,8 @@ class CalendarCommandTests(unittest.TestCase):
             },
             source_profile="default",
         ).command
-        self.assertEqual(update["operation"], "plan_write")
-        self.assertEqual(delete["operation"], "plan_write")
+        self.assertEqual(update["operation"], "execute_write")
+        self.assertEqual(delete["operation"], "execute_write")
 
     def test_write_request_rejects_non_positive_interval_before_queueing(self):
         for end in ("2026-09-07T10:00", "2026-09-07T09:59"):

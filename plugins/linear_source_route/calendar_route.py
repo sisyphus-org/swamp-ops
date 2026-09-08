@@ -137,11 +137,8 @@ def _parse_calendar_request(
             raise CalendarRouteError("Calendar read request is outside the bounded allowlist")
         command_operation = operation
         canonical_request = {"window": request["window"]}
-    elif operation == "create":
+    elif operation in {"create", "update", "delete"}:
         command_operation = "execute_write"
-        canonical_request = _write_request(request)
-    elif operation in {"update", "delete"}:
-        command_operation = "plan_write"
         canonical_request = _write_request(request)
     elif operation == "approve":
         if set(request) != {"operation", "approval_reference"}:
