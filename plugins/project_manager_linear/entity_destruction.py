@@ -361,13 +361,27 @@ def _state_hash_except(value: dict[str, Any], fields: set[str]) -> str:
 
 
 def _archive_recovery_manifest(
-    entity_type: str, impact: dict[str, list[Any]]
+    entity_type: str, raw: dict[str, list[Any]]
 ) -> dict[str, Any]:
+    if entity_type == "issue":
+        return {
+            "schema_version": 2,
+            "operation": "archive_linear_entity",
+            "entity_type": entity_type,
+            "children": [
+                {"id": child["id"], "state_hash": _hash(child)}
+                for child in raw.get("children", [])
+            ],
+            "relations": [
+                {"id": relation["id"], "state_hash": _hash(relation)}
+                for relation in raw.get("relations", [])
+            ],
+        }
     return {
         "schema_version": 1,
         "operation": "archive_linear_entity",
         "entity_type": entity_type,
-        "impact_hash": _hash(impact),
+        "impact_hash": _hash(_canonical_impact(raw)),
     }
 
 
@@ -442,12 +456,41 @@ def _delete_recovery_manifest(
 
 
 def _valid_recovery_manifest(value: Any) -> bool:
-    if not isinstance(value, dict) or value.get("schema_version") != 1:
+    if (
+        not isinstance(value, dict)
+        or value.get("schema_version") not in {1, 2}
+    ):
         return False
     operation = value.get("operation")
     entity_type = value.get("entity_type")
     if not isinstance(operation, str) or not isinstance(entity_type, str):
         return False
+    if operation == "archive_linear_entity" and entity_type == "issue":
+        children = value.get("children")
+        relations = value.get("relations")
+        if not isinstance(children, list) or not isinstance(relations, list):
+            return False
+        dependencies = [*children, *relations]
+        return bool(
+            set(value)
+            == {
+                "schema_version",
+                "operation",
+                "entity_type",
+                "children",
+                "relations",
+            }
+            and value.get("schema_version") == 2
+            and all(
+                isinstance(item, dict)
+                and set(item) == {"id", "state_hash"}
+                and isinstance(item.get("id"), str)
+                and item["id"]
+                and isinstance(item.get("state_hash"), str)
+                and len(item["state_hash"]) == 64
+                for item in dependencies
+            )
+        )
     if operation == "archive_linear_entity":
         return (
             set(value)
@@ -512,6 +555,16 @@ def _verify_archive_impact(
     client: Any, entity_type: str, entity: dict[str, Any],
     manifest: dict[str, Any], error_cls: type[Exception],
 ) -> None:
+    if entity_type == "issue" and manifest.get("schema_version") == 2:
+        for child in manifest["children"]:
+            current = _direct_lookup(client, "issue", child["id"])
+            if not isinstance(current, dict) or _hash(current) != child["state_hash"]:
+                raise error_cls("archive_linear_entity impacted child read-back drifted")
+        for relation in manifest["relations"]:
+            current = client.get_issue_relation(relation["id"])
+            if not isinstance(current, dict) or _hash(current) != relation["state_hash"]:
+                raise error_cls("archive_linear_entity impacted relation read-back drifted")
+        return
     actual = _canonical_impact(_impact(client, entity_type, entity))
     if _hash(actual) != manifest["impact_hash"]:
         raise error_cls("archive_linear_entity impacted entity read-back drifted")
@@ -604,11 +657,16 @@ def execute(
 ) -> dict[str, Any]:
     operation = command["operation"]
     if mode == "apply":
-        required = (
+        required = [
             "get_linear_entity",
             "list_issue_relations",
             "list_project_initiatives",
-        )
+        ]
+        if (
+            operation == "archive_linear_entity"
+            and command.get("target", {}).get("type") == "issue"
+        ):
+            required.append("get_issue_relation")
         missing = [
             capability
             for capability in required
@@ -762,7 +820,7 @@ def execute(
     if recovery_path is None:
         raise error_cls("entity destruction apply requires recovery journal")
     recovery_manifest = (
-        _archive_recovery_manifest(entity_type, impact)
+        _archive_recovery_manifest(entity_type, raw_impact)
         if operation == "archive_linear_entity"
         else _delete_recovery_manifest(entity_type, entity, raw_impact)
     )
