@@ -118,6 +118,16 @@ class DestructiveClient:
     def list_issue_relations(self, identifier):
         return copy.deepcopy(self.issue_relations)
 
+    def get_issue_relation(self, relation_id):
+        return next(
+            (
+                copy.deepcopy(relation)
+                for relation in self.issue_relations
+                if relation.get("id") == relation_id
+            ),
+            None,
+        )
+
     def archive_linear_entity(self, entity_type, entity_id):
         self.writes.append(("archive", entity_type, entity_id))
         node = next(n for n in self.entities[{"issue": "issues", "project": "projects", "initiative": "initiatives"}[entity_type]] if n["id"] == entity_id)
@@ -328,6 +338,29 @@ class LinearEntityDestructionTests(unittest.TestCase):
                     self.assertEqual(result["before"]["entity"]["description"], result["after"]["entity"]["description"])
                 else:
                     self.assertEqual(result["after"], {"present": False})
+
+    def test_issue_archive_verifies_relations_when_target_relation_view_disappears(self):
+        class ArchivedTargetHidesRelations(DestructiveClient):
+            def list_issue_relations(self, identifier):
+                target = self.entities["issues"][0]
+                if target.get("archivedAt") is not None:
+                    raise lane.ContractError("exact active Linear issue not found")
+                return super().list_issue_relations(identifier)
+
+        client = ArchivedTargetHidesRelations()
+        client.configure_nonempty_impact("issue")
+        raw = destructive_command(
+            "archive_linear_entity",
+            "issue",
+            {"identifier": "SIS-77"},
+            key="linear:destroy:archive-hidden-relation-view",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.apply(raw, client, Path(tmp) / "journal.json")["result"]
+
+        self.assertEqual(result["result"], "applied")
+        self.assertTrue(result["verified"])
+        self.assertEqual(client.writes, [("archive", "issue", "issue-id")])
 
     def test_unsafe_matrix_entries_are_rejected_before_linear_access(self):
         unsupported = (
@@ -849,6 +882,12 @@ class LinearEntityDestructionTests(unittest.TestCase):
                         )
                     if drift == "child":
                         client.children[0]["description"] = "dependency drift"
+                        child = next(
+                            item
+                            for item in client.entities["issues"]
+                            if item["id"] == "child-id"
+                        )
+                        child["description"] = "dependency drift"
                     else:
                         client.issue_relations[0]["type"] = "blocks"
                     with self.assertRaisesRegex(lane.ContractError, "impact.*drift"):
