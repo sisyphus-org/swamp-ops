@@ -1496,7 +1496,7 @@ class PluginTests(unittest.TestCase):
                 },
                 parameters,
             )
-        self.assertEqual(len(parameters["oneOf"]), 28)
+        self.assertEqual(len(parameters["oneOf"]), 29)
         self.assertEqual(
             parameters["properties"]["description_transform"]["enum"],
             ["remove_links"],
@@ -1528,6 +1528,7 @@ class PluginTests(unittest.TestCase):
                 "search_linear",
                 "inventory_linear",
                 "approve_delete_linear_entity",
+                "approve_bulk_linear_operations",
                 "archive_linear_entity",
                 "delete_linear_entity",
             ],
@@ -1543,6 +1544,7 @@ class PluginTests(unittest.TestCase):
                 "delete_linear_entity",
                 "delete_linear_entity",
                 "approve_delete_linear_entity",
+                "approve_bulk_linear_operations",
                 "archive_linear_entity",
                 "change_state",
                 "move_issue",

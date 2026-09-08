@@ -262,14 +262,14 @@ class PolicyValidationTests(unittest.TestCase):
 
 class PmExecutionBoundaryTests(unittest.TestCase):
     @staticmethod
-    def bind_owner_command(raw, before):
+    def bind_owner_command(raw, before, *, before_hash=None):
         bound = copy.deepcopy(raw)
         exact_intent = {
             "operation": bound["operation"],
             "target": bound["target"],
             "change": bound["change"],
         }
-        before_hash = owner_approval.canonical_sha256(before)
+        before_hash = before_hash or owner_approval.canonical_sha256(before)
         bound["policy"]["approval"]["intent_hash"] = (
             owner_approval.canonical_sha256(exact_intent)
         )
@@ -894,7 +894,11 @@ class PmExecutionBoundaryTests(unittest.TestCase):
             key="linear:v2:public-owner-bulk-crash-restart"
         )
         initial = lane.execute_command(client, raw, mode="plan")
-        raw, verified = self.bind_owner_command(raw, initial["before"])
+        raw, verified = self.bind_owner_command(
+            raw,
+            initial["before"],
+            before_hash=initial["before_state_hash"],
+        )
         with tempfile.TemporaryDirectory() as tmp, mock.patch(
             "plugins.project_manager_linear.approval.verify_owner_approval",
             return_value=verified,

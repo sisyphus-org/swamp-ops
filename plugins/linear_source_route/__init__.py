@@ -14,6 +14,7 @@ from .calendar_route import (
 from .route import (
     COMMENT_REQUEST,
     CREDENTIAL_SHAPES,
+    LINEAR_BULK_APPROVAL_REFERENCE,
     LINEAR_DELETE_APPROVAL_REFERENCE,
     RouteError,
     SourceContext,
@@ -247,6 +248,7 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                     "search_linear",
                     "inventory_linear",
                     "approve_delete_linear_entity",
+                    "approve_bulk_linear_operations",
                     "archive_linear_entity",
                     "delete_linear_entity",
                 ],
@@ -311,7 +313,7 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
             },
             "approval_reference": {
                 "type": "string",
-                "pattern": "^linear-delete-approval:v1:[0-9a-f]{64}$",
+                "pattern": "^linear-(?:delete|bulk)-approval:v1:[0-9a-f]{64}$",
             },
             "identifier": {
                 "type": "string",
@@ -571,6 +573,13 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                 "maxProperties": 2,
                 "properties": {
                     "operation": {"const": "approve_delete_linear_entity"}
+                },
+            },
+            {
+                "required": ["operation", "approval_reference"],
+                "maxProperties": 2,
+                "properties": {
+                    "operation": {"const": "approve_bulk_linear_operations"}
                 },
             },
             {
@@ -1039,6 +1048,84 @@ class HermesKanbanBoard:
         """Backward-compatible projection of the legacy plan linkage."""
         return self.calendar_approval_write_identity(reference, source)["linear_issue"]
 
+    def record_bulk_preview(
+        self,
+        task_id: str,
+        source: SourceContext,
+        result: dict[str, Any],
+    ) -> None:
+        """Persist the exact protected batch binding for the owner broker."""
+        reference = result.get("approval_reference")
+        if (
+            not isinstance(reference, str)
+            or LINEAR_BULK_APPROVAL_REFERENCE.fullmatch(reference) is None
+        ):
+            raise RouteError("bulk preview approval reference is invalid")
+        payload = {
+            "schema_version": "linear-bulk-preview.v1",
+            "approval_reference": reference,
+            "source": {
+                "profile": source.profile,
+                "platform": source.platform,
+                "chat_id": source.chat_id,
+                "user_id": source.user_id,
+                "thread_id": source.thread_id,
+                "session_id": source.session_id,
+            },
+            "approval_intent": result.get("approval_intent"),
+            "before_state_hash": result.get("before_state_hash"),
+            "expires_at": result.get("expires_at"),
+        }
+        conn = self._connect()
+        try:
+            with self.kb.write_txn(conn):
+                task = self.kb.get_task(conn, task_id)
+                if (
+                    task is None
+                    or getattr(task, "status", None) != "done"
+                    or getattr(task, "assignee", None) != "project-manager"
+                    or getattr(task, "session_id", None) != source.session_id
+                ):
+                    raise RouteError("bulk preview task binding is invalid")
+                rows = conn.execute(
+                    "SELECT platform, chat_id, thread_id, user_id, chat_type, "
+                    "notifier_profile, delivery_mode FROM kanban_notify_subs "
+                    "WHERE task_id = ?",
+                    (task_id,),
+                ).fetchall()
+                route_fields = (
+                    "platform", "chat_id", "thread_id", "user_id", "chat_type",
+                    "notifier_profile", "delivery_mode",
+                )
+                expected_route = (
+                    source.platform,
+                    source.chat_id,
+                    source.thread_id,
+                    source.user_id,
+                    "dm",
+                    source.profile,
+                    "wake",
+                )
+                actual_routes = [tuple(row[key] for key in route_fields) for row in rows]
+                if actual_routes != [expected_route]:
+                    raise RouteError("bulk preview source route binding is invalid")
+                prior = conn.execute(
+                    "SELECT payload FROM task_events WHERE task_id = ? AND kind = ?",
+                    (task_id, "linear_bulk_preview_ready"),
+                ).fetchall()
+                if prior:
+                    if len(prior) != 1 or json.loads(prior[0]["payload"]) != payload:
+                        raise RouteError("bulk preview protected binding conflicts")
+                    return
+                self.kb._append_event(
+                    conn,
+                    task_id,
+                    "linear_bulk_preview_ready",
+                    payload,
+                )
+        finally:
+            conn.close()
+
     def record_delete_preview(
         self,
         task_id: str,
@@ -1134,6 +1221,128 @@ class HermesKanbanBoard:
         if attempts not in {0, 1} or grants not in {0, 1}:
             raise RouteError("delete approval attempt state is invalid")
         return attempts == 1 and grants == 0
+
+    def bulk_preview_requires_successor(self, task_id: str) -> bool:
+        """Refresh a consumed bulk reference whose approval outcome is unknown."""
+        conn = self._connect()
+        try:
+            attempts = conn.execute(
+                "SELECT COUNT(*) FROM task_events WHERE task_id = ? AND kind = ?",
+                (task_id, "linear_bulk_approval_attempted"),
+            ).fetchone()[0]
+            grants = conn.execute(
+                "SELECT COUNT(*) FROM task_events WHERE task_id = ? AND kind = ?",
+                (task_id, "linear_bulk_approval_granted"),
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        if attempts not in {0, 1} or grants not in {0, 1}:
+            raise RouteError("bulk approval attempt state is invalid")
+        return attempts == 1 and grants == 0
+
+    def approved_bulk_request(
+        self, reference: str, source: SourceContext
+    ) -> dict[str, Any]:
+        """Load one exact broker-granted batch without exposing its policy."""
+        if LINEAR_BULK_APPROVAL_REFERENCE.fullmatch(reference) is None:
+            raise RouteError("bulk approval reference is invalid")
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT t.id, t.status, t.assignee, t.session_id, e.payload "
+                "FROM task_events e JOIN tasks t ON t.id = e.task_id "
+                "WHERE e.kind = ? AND e.payload LIKE ?",
+                ("linear_bulk_preview_ready", f'%\"approval_reference\": \"{reference}\"%'),
+            ).fetchall()
+            if len(rows) != 1:
+                raise RouteError("bulk preview approval binding is missing or ambiguous")
+            row = rows[0]
+            if (
+                row["status"] != "done"
+                or row["assignee"] != "project-manager"
+                or row["session_id"] != source.session_id
+            ):
+                raise RouteError("bulk preview approval task/session binding is invalid")
+            preview = json.loads(row["payload"])
+            grants = conn.execute(
+                "SELECT payload FROM task_events WHERE task_id = ? AND kind = ?",
+                (row["id"], "linear_bulk_approval_granted"),
+            ).fetchall()
+            attempts = conn.execute(
+                "SELECT payload FROM task_events WHERE task_id = ? AND kind = ?",
+                (row["id"], "linear_bulk_approval_attempted"),
+            ).fetchall()
+            if len(grants) != 1 or len(attempts) != 1:
+                raise RouteError("bulk approval is missing or ambiguous")
+            grant = json.loads(grants[0]["payload"])
+            attempt = json.loads(attempts[0]["payload"])
+        finally:
+            conn.close()
+        expected_source = {
+            "profile": source.profile,
+            "platform": source.platform,
+            "chat_id": source.chat_id,
+            "user_id": source.user_id,
+            "thread_id": source.thread_id,
+            "session_id": source.session_id,
+        }
+        preview_hash = _canonical_sha256(preview)
+        expected_attempt = {
+            "schema_version": "linear-bulk-approval-attempt.v1",
+            "approval_reference": reference,
+            "preview_hash": preview_hash,
+        }
+        if (
+            not isinstance(preview, dict)
+            or preview.get("schema_version") != "linear-bulk-preview.v1"
+            or preview.get("approval_reference") != reference
+            or preview.get("source") != expected_source
+            or attempt != expected_attempt
+            or not isinstance(grant, dict)
+            or set(grant)
+            != {
+                "schema_version",
+                "approval_reference",
+                "preview_hash",
+                "policy",
+            }
+            or grant.get("schema_version") != "linear-bulk-approval.v1"
+            or grant.get("approval_reference") != reference
+            or grant.get("preview_hash") != preview_hash
+        ):
+            raise RouteError("bulk approval protected binding is invalid")
+        intent = preview.get("approval_intent")
+        if (
+            not isinstance(intent, dict)
+            or set(intent) != {"operation", "target", "change"}
+            or intent.get("operation") != "bulk_linear_operations"
+            or intent.get("target")
+            != {"type": "workspace", "identifier": "current"}
+            or not isinstance(intent.get("change"), dict)
+            or set(intent["change"]) != {"items"}
+            or not isinstance(intent["change"].get("items"), list)
+        ):
+            raise RouteError("bulk approval intent is invalid")
+        policy = grant.get("policy")
+        approval = _validate_approval_reference(
+            policy.get("approval") if isinstance(policy, dict) else None
+        )
+        if (
+            policy != {"mode": "owner_approved", "approval": approval}
+            or approval["intent_hash"] != _canonical_sha256(intent)
+            or approval["before_state_hash"] != preview.get("before_state_hash")
+            or approval["expires_at"] != preview.get("expires_at")
+            or datetime.strptime(approval["expires_at"], "%Y-%m-%dT%H:%M:%SZ").replace(
+                tzinfo=timezone.utc
+            )
+            <= datetime.now(timezone.utc)
+        ):
+            raise RouteError("bulk approval is stale or does not match the preview")
+        return {
+            "operation": "bulk_linear_operations",
+            "items": [dict(item) for item in intent["change"]["items"]],
+            "approval": approval,
+        }
 
     def approved_delete_request(
         self, reference: str, source: SourceContext
@@ -1552,6 +1761,149 @@ def _public_target(result: dict[str, Any]) -> tuple[dict[str, Any], dict[str, An
     """Return only validated user-relevant target facts from one PM result."""
     operation = result.get("operation")
     after = result.get("after")
+    if operation == "preview_bulk_linear_operations":
+        target = result.get("target")
+        items = result.get("items")
+        intent = result.get("approval_intent")
+        reference = result.get("approval_reference")
+        expires_at = result.get("expires_at")
+        intent_items = (
+            intent.get("change", {}).get("items")
+            if isinstance(intent, dict)
+            else None
+        )
+        if (
+            target != {"type": "workspace", "identifier": "current"}
+            or not isinstance(items, list)
+            or not 1 <= len(items) <= 50
+            or not isinstance(intent_items, list)
+            or len(intent_items) != len(items)
+            or not isinstance(reference, str)
+            or LINEAR_BULK_APPROVAL_REFERENCE.fullmatch(reference) is None
+            or not isinstance(expires_at, str)
+            or re.fullmatch(
+                r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z",
+                expires_at,
+            )
+            is None
+        ):
+            raise RouteError("verified bulk preview lacks exact public facts")
+        public_items: list[dict[str, Any]] = []
+        for index, (item, intent_item) in enumerate(zip(items, intent_items)):
+            if (
+                not isinstance(item, dict)
+                or set(item)
+                != {"index", "operation", "target", "before", "after", "plan"}
+                or not isinstance(intent_item, dict)
+                or set(intent_item) != {"operation", "target", "change"}
+                or item.get("index") != index
+                or item.get("operation") != intent_item.get("operation")
+            ):
+                raise RouteError("verified bulk preview contains an invalid ordered item")
+            operation_value = item["operation"]
+            public_item: dict[str, Any] = {
+                "index": index,
+                "operation": operation_value,
+                "target": dict(intent_item["target"]),
+                "change": dict(intent_item["change"]),
+            }
+            before_value = item.get("before")
+            after_value = item.get("after")
+            if (
+                operation_value == "update_issue"
+                and set(intent_item["change"]) == {"parent_identifier"}
+            ):
+                if (
+                    not isinstance(before_value, dict)
+                    or not isinstance(after_value, dict)
+                    or before_value.get("identifier")
+                    != intent_item["target"].get("identifier")
+                    or after_value.get("identifier")
+                    != intent_item["target"].get("identifier")
+                    or after_value.get("parent_identifier")
+                    != intent_item["change"].get("parent_identifier")
+                ):
+                    raise RouteError("verified bulk parent preview is invalid")
+                prior_parent = before_value.get("parent_identifier")
+                if prior_parent is not None and (
+                    not isinstance(prior_parent, str)
+                    or PUBLIC_ISSUE_IDENTIFIER.fullmatch(prior_parent) is None
+                ):
+                    raise RouteError("verified bulk parent preview is invalid")
+                public_item["impact"] = {
+                    "before_parent_identifier": prior_parent,
+                    "after_parent_identifier": after_value["parent_identifier"],
+                }
+            elif operation_value in {"archive_linear_entity", "delete_linear_entity"}:
+                selector = intent_item["target"].get("selector")
+                entity_type = intent_item["target"].get("type")
+                entity = (
+                    before_value.get("entity")
+                    if isinstance(before_value, dict)
+                    else None
+                )
+                impact = (
+                    before_value.get("impact")
+                    if isinstance(before_value, dict)
+                    else None
+                )
+                counts = (
+                    before_value.get("impact_counts")
+                    if isinstance(before_value, dict)
+                    else None
+                )
+                if (
+                    not isinstance(selector, dict)
+                    or not isinstance(entity, dict)
+                    or not isinstance(impact, dict)
+                    or not isinstance(counts, dict)
+                    or set(impact) != set(counts)
+                    or any(
+                        not isinstance(values, list)
+                        or counts.get(kind) != len(values)
+                        for kind, values in impact.items()
+                    )
+                ):
+                    raise RouteError("verified bulk lifecycle preview impact is invalid")
+                if entity_type == "issue":
+                    identifier = selector.get("identifier")
+                    if (
+                        not isinstance(identifier, str)
+                        or PUBLIC_ISSUE_IDENTIFIER.fullmatch(identifier) is None
+                        or entity.get("identifier") != identifier
+                    ):
+                        raise RouteError("verified bulk issue lifecycle preview is invalid")
+                    public_entity = {
+                        "identifier": identifier,
+                        "title": _public_text(entity.get("title"), "issue title"),
+                        "url": _public_issue_target(
+                            {
+                                "type": "issue",
+                                "identifier": identifier,
+                                "url": entity.get("url"),
+                            }
+                        )["url"],
+                    }
+                else:
+                    name = selector.get("name")
+                    if not isinstance(name, str) or entity.get("name") != name:
+                        raise RouteError("verified bulk lifecycle entity is invalid")
+                    public_entity = {"name": _public_text(name, "entity name")}
+                public_item["entity"] = public_entity
+                public_item["impact_counts"] = dict(counts)
+            else:
+                plan = item.get("plan")
+                if not isinstance(plan, list):
+                    raise RouteError("verified bulk preview plan is invalid")
+                public_item["impact"] = {
+                    "planned_actions": len(plan),
+                    "already_converged": len(plan) == 0,
+                }
+            public_items.append(public_item)
+        return {"type": "workspace", "identifier": "current"}, {
+            "bulk_preview": {"items": public_items, "expires_at": expires_at},
+            "approval_reference": reference,
+        }
     if operation == "bulk_linear_operations":
         target = result.get("target")
         items = result.get("items")
@@ -2165,6 +2517,16 @@ def _public_result(result: dict[str, Any]) -> dict[str, Any]:
             "changed": outcome == "applied",
         }
         target, context = _public_target(verified)
+        if verified.get("operation") == "preview_bulk_linear_operations":
+            if (
+                not isinstance(context, dict)
+                or set(context) != {"bulk_preview", "approval_reference"}
+            ):
+                raise RouteError("completed bulk preview lacks public approval facts")
+            public["phase"] = "awaiting_approval"
+            public["preview"] = context["bulk_preview"]
+            public["approval_reference"] = context["approval_reference"]
+            return public
         if verified.get("operation") == "preview_delete_linear_entity":
             if (
                 not isinstance(context, dict)
@@ -2210,6 +2572,16 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
                 {"operation", "items"},
                 {"operation", "items", "approval"},
             )
+        ):
+            request = dict(args)
+        elif (
+            args.get("operation") == "approve_bulk_linear_operations"
+            and set(args) == {"operation", "approval_reference"}
+            and isinstance(args.get("approval_reference"), str)
+            and LINEAR_BULK_APPROVAL_REFERENCE.fullmatch(
+                args["approval_reference"]
+            )
+            is not None
         ):
             request = dict(args)
         elif (
@@ -2424,6 +2796,13 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
         board = board_factory(source_profile=source.profile)
         if isinstance(request, dict) and request.get("operation") == "approve_delete_linear_entity":
             request = board.approved_delete_request(
+                request["approval_reference"], source
+            )
+        elif (
+            isinstance(request, dict)
+            and request.get("operation") == "approve_bulk_linear_operations"
+        ):
+            request = board.approved_bulk_request(
                 request["approval_reference"], source
             )
         route_options = {}

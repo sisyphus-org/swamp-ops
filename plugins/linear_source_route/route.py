@@ -8,7 +8,7 @@ import json
 import re
 import uuid
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable
 
 
@@ -22,6 +22,9 @@ SPECIAL_PROFILES = {"broker", "project-manager"}
 NUMERIC_ID = re.compile(r"^[1-9][0-9]*$")
 LINEAR_DELETE_APPROVAL_REFERENCE = re.compile(
     r"^linear-delete-approval:v1:[0-9a-f]{64}$"
+)
+LINEAR_BULK_APPROVAL_REFERENCE = re.compile(
+    r"^linear-bulk-approval:v1:[0-9a-f]{64}$"
 )
 TERMINAL_IN_FLIGHT = {"todo", "ready", "running", "review"}
 CREDENTIAL_SHAPES = (
@@ -160,6 +163,41 @@ def _delete_preview_reference(
         "expires_at": result.get("expires_at"),
     }
     return f"linear-delete-approval:v1:{_canonical_sha256(binding)}"
+
+
+def _bulk_preview_reference(
+    task: dict[str, Any], result: dict[str, Any], source: SourceContext
+) -> str:
+    task_id = task.get("id")
+    session_id = task.get("session_id")
+    source_profile = result.get("source_profile")
+    if (
+        not isinstance(task_id, str)
+        or not re.fullmatch(r"t_[a-f0-9]{8,}", task_id)
+        or not isinstance(session_id, str)
+        or not session_id
+        or not isinstance(source_profile, str)
+        or not source_profile
+        or source.session_id != session_id
+        or source.profile != source_profile
+    ):
+        raise RouteError("bulk preview lacks an exact task/session binding")
+    binding = {
+        "task_id": task_id,
+        "session_id": session_id,
+        "source": {
+            "profile": source.profile,
+            "platform": source.platform,
+            "chat_id": source.chat_id,
+            "user_id": source.user_id,
+            "thread_id": source.thread_id,
+            "session_id": source.session_id,
+        },
+        "approval_intent": result.get("approval_intent"),
+        "before_state_hash": result.get("before_state_hash"),
+        "expires_at": result.get("expires_at"),
+    }
+    return f"linear-bulk-approval:v1:{_canonical_sha256(binding)}"
 
 
 def _semantic_key(command: dict[str, Any]) -> str:
@@ -721,7 +759,7 @@ def _bulk_conflict_selector(item: dict[str, Any]) -> dict[str, Any]:
 
 def _validate_bulk_request(
     request: dict[str, Any],
-) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None, bool]:
     expected = {"operation", "items"}
     if "approval" in request:
         expected.add("approval")
@@ -774,11 +812,9 @@ def _validate_bulk_request(
         if "approval" in request
         else None
     )
-    if owner_required and approval is None:
-        raise RouteError("bulk request with owner-controlled items requires one owner approval")
     if not owner_required and approval is not None:
         raise RouteError("bulk owner approval is allowed only when an item requires it")
-    return validated, approval
+    return validated, approval, owner_required
 def _issue_identifier(request: dict[str, Any]) -> str:
     """Resolve one exact SIS target from an identifier or bounded issue number."""
     has_identifier = "identifier" in request
@@ -823,7 +859,9 @@ def parse_linear_request(
     elif isinstance(request, dict):
         operation = request.get("operation")
         if operation == "bulk_linear_operations":
-            items, approval_reference = _validate_bulk_request(request)
+            items, approval_reference, owner_required = _validate_bulk_request(request)
+            if owner_required and approval_reference is None:
+                operation = "preview_bulk_linear_operations"
             target = {"type": "workspace", "identifier": "current"}
             change = {"items": items}
         elif operation == "change_state":
@@ -1429,6 +1467,77 @@ def _verified_replay(
             raise _ExpiredDeletePreview("completed delete preview has expired")
         result = dict(result)
         result["approval_reference"] = approval_reference
+    elif operation == "preview_bulk_linear_operations":
+        expected_intent = {
+            "operation": "bulk_linear_operations",
+            "target": persisted["target"],
+            "change": persisted["change"],
+        }
+        before = result.get("before")
+        after = result.get("after")
+        plans = result.get("plan")
+        items = result.get("items")
+        expires_at = result.get("expires_at")
+        before_state_hash = result.get("before_state_hash")
+        before_state_hashes = result.get("before_state_hashes")
+        expected_count = len(persisted["change"]["items"])
+        if (
+            target != {"type": "workspace", "identifier": "current"}
+            or not isinstance(before, list)
+            or len(before) != expected_count
+            or not isinstance(after, list)
+            or len(after) != expected_count
+            or not isinstance(plans, list)
+            or len(plans) != expected_count
+            or not isinstance(items, list)
+            or len(items) != expected_count
+            or result.get("approval_intent") != expected_intent
+            or not isinstance(before_state_hash, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", before_state_hash)
+            or not isinstance(before_state_hashes, list)
+            or len(before_state_hashes) != expected_count
+            or any(
+                not isinstance(value, str)
+                or re.fullmatch(r"[0-9a-f]{64}", value) is None
+                for value in before_state_hashes
+            )
+            or before_state_hash != _canonical_sha256(before_state_hashes)
+            or not isinstance(expires_at, str)
+            or not re.fullmatch(
+                r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z",
+                expires_at,
+            )
+            or any(
+                not isinstance(item, dict)
+                or set(item)
+                != {"index", "operation", "target", "before", "after", "plan"}
+                or item.get("index") != index
+                or item.get("operation")
+                != persisted["change"]["items"][index]["operation"]
+                or item.get("before") != before[index]
+                or item.get("after") != after[index]
+                or item.get("plan") != plans[index]
+                for index, item in enumerate(items)
+            )
+        ):
+            raise RouteError("completed bulk preview has an invalid protected binding")
+        try:
+            expiry = datetime.strptime(expires_at, "%Y-%m-%dT%H:%M:%SZ").replace(
+                tzinfo=timezone.utc
+            )
+        except ValueError as exc:
+            raise RouteError(
+                "completed bulk preview has an invalid protected binding"
+            ) from exc
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise RouteError("bulk preview clock must be timezone-aware")
+        current = now.astimezone(timezone.utc)
+        if expiry <= current or expiry > current + timedelta(minutes=15):
+            raise _ExpiredDeletePreview(
+                "completed bulk preview has expired or invalid TTL"
+            )
+        result = dict(result)
+        result["approval_reference"] = _bulk_preview_reference(task, result, source)
     elif operation in {"archive_linear_entity", "delete_linear_entity"}:
         if target != persisted["target"]:
             raise RouteError("completed replay target does not match persisted command")
@@ -1618,20 +1727,28 @@ def route_request(
         )
         generation = 0
         while (
-            command["operation"] == "preview_delete_linear_entity"
+            command["operation"]
+            in {"preview_delete_linear_entity", "preview_bulk_linear_operations"}
             and not created
             and task.get("status") == "done"
         ):
             try:
+                bulk_preview = command["operation"] == "preview_bulk_linear_operations"
                 requires_successor = getattr(
-                    board, "delete_preview_requires_successor", None
+                    board,
+                    (
+                        "bulk_preview_requires_successor"
+                        if bulk_preview
+                        else "delete_preview_requires_successor"
+                    ),
+                    None,
                 )
                 if (
                     callable(requires_successor)
                     and requires_successor(task["id"]) is True
                 ):
                     raise _ExpiredDeletePreview(
-                        "delete approval attempt has an unknown outcome"
+                        "approval attempt has an unknown outcome"
                     )
                 completed = _verified_replay(
                     task, command, delivery_key, source, now_factory()
@@ -1639,7 +1756,7 @@ def route_request(
             except _ExpiredDeletePreview:
                 generation += 1
                 if generation > MAX_DELETE_PREVIEW_GENERATIONS:
-                    raise RouteError("delete preview successor chain exceeds the bound")
+                    raise RouteError("preview successor chain exceeds the bound")
                 delivery_key = _delete_preview_successor_key(
                     delivery_key, task.get("id", "")
                 )
@@ -1649,9 +1766,14 @@ def route_request(
                     **task_fields,
                 )
                 continue
-            board.record_delete_preview(
-                task["id"], source, completed["linear_result"]
-            )
+            if bulk_preview:
+                board.record_bulk_preview(
+                    task["id"], source, completed["linear_result"]
+                )
+            else:
+                board.record_delete_preview(
+                    task["id"], source, completed["linear_result"]
+                )
             return completed
     replayed = not created
 
@@ -1667,6 +1789,10 @@ def route_request(
             )
             if command["operation"] == "preview_delete_linear_entity":
                 board.record_delete_preview(
+                    task["id"], source, completed["linear_result"]
+                )
+            elif command["operation"] == "preview_bulk_linear_operations":
+                board.record_bulk_preview(
                     task["id"], source, completed["linear_result"]
                 )
             return completed
