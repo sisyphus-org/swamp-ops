@@ -13,6 +13,7 @@ import json
 import os
 import uuid
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -214,6 +215,64 @@ def parent_intent(command: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def preview_parent(
+    command: dict[str, Any],
+    *,
+    plan_child: Callable[[dict[str, Any]], dict[str, Any]],
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Build one authoritative ordered preview without apply/journal authority."""
+    children = [
+        derive_child_command(command, index)
+        for index in range(len(command["change"]["items"]))
+    ]
+    plans = [plan_child(child) for child in children]
+    if any(not _valid_plan(plan) for plan in plans):
+        raise RuntimeError("bulk child preflight returned an invalid result")
+    before_values = [plan.get("before") for plan in plans]
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None or current.utcoffset() is None:
+        raise RuntimeError("bulk preview clock must be timezone-aware")
+    expires_at = (current.astimezone(timezone.utc) + timedelta(minutes=15)).replace(
+        microsecond=0
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return {
+        "schema_version": "linear-result.v2",
+        "command_id": command["command_id"],
+        "correlation_id": command["correlation_id"],
+        "idempotency_key": command["idempotency_key"],
+        "source_profile": command["source_profile"],
+        "operation": "preview_bulk_linear_operations",
+        "mode": "apply",
+        "target": {"type": "workspace", "identifier": "current"},
+        "result": "read",
+        "before": before_values,
+        "after": [plan.get("after") for plan in plans],
+        "plan": [plan.get("plan") for plan in plans],
+        "items": [
+            {
+                "index": index,
+                "operation": child["operation"],
+                "target": plan.get("target"),
+                "before": plan.get("before"),
+                "after": plan.get("after"),
+                "plan": plan.get("plan"),
+            }
+            for index, (child, plan) in enumerate(zip(children, plans))
+        ],
+        "approval_intent": {
+            "operation": "bulk_linear_operations",
+            "target": command["target"],
+            "change": command["change"],
+        },
+        "before_state_hash": _aggregate_before_state_hash(plans),
+        "before_state_hashes": _before_state_hashes(plans),
+        "expires_at": expires_at,
+        "no_op": True,
+        "verified": True,
+    }
+
+
 def derive_child_command(parent: dict[str, Any], index: int) -> dict[str, Any]:
     """Derive all child identities from exact ordered parent semantics and index."""
     items = parent["change"]["items"]
@@ -248,12 +307,26 @@ def _plan_binding(plan: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _before_state_hashes(plans: list[dict[str, Any]]) -> list[str]:
+    commitments: list[str] = []
+    for plan in plans:
+        trusted_hash = plan.get("before_state_hash")
+        if not isinstance(trusted_hash, str) or len(trusted_hash) != 64:
+            trusted_hash = _hash(plan.get("before"))
+        commitments.append(trusted_hash)
+    return commitments
+
+
+def _aggregate_before_state_hash(plans: list[dict[str, Any]]) -> str:
+    return _hash(_before_state_hashes(plans))
+
+
 def _plan_hashes(plan: dict[str, Any]) -> dict[str, str]:
     return {
         "operation_hash": _hash(plan.get("operation")),
         "target_hash": _hash(plan.get("target")),
         "plan_hash": _hash(plan.get("plan")),
-        "before_hash": _hash(plan.get("before")),
+        "before_hash": _before_state_hashes([plan])[0],
         "desired_after_hash": _hash(plan.get("after")),
     }
 
@@ -470,6 +543,7 @@ def execute_parent(
     if any(not _valid_plan(plan) for plan in plans):
         raise error_cls("bulk child preflight returned an invalid result")
     aggregate_plan_hash = _hash([_plan_binding(plan) for plan in plans])
+    aggregate_before_state_hash = _aggregate_before_state_hash(plans)
     base = {
         "schema_version": "linear-result.v2",
         "command_id": command["command_id"],
@@ -497,7 +571,7 @@ def execute_parent(
             "approval_checksum": reference["checksum"],
             "intent_hash": reference["intent_hash"],
             "command_hash": _hash(command),
-            "before_state_hash": before_hash or _hash(before_values),
+            "before_state_hash": before_hash or aggregate_before_state_hash,
             "after_state_hash": after_hash or _hash(after_values),
             "phase": phase,
         }
@@ -546,6 +620,7 @@ def execute_parent(
             "mode": "apply" if completed_replay else mode,
             "result": "no_op" if completed_replay else "planned",
             "before": before_values,
+            "before_state_hash": aggregate_before_state_hash,
             "after": after_values,
             "plan": [] if completed_replay else [plan.get("plan") for plan in plans],
             "items": [
@@ -580,7 +655,7 @@ def execute_parent(
         state = _load_state(recovery_path, binding, len(children), error_cls)
         if state["aggregate_plan_hash"] is None:
             state["aggregate_plan_hash"] = aggregate_plan_hash
-            state["before_state_hash"] = _hash(before_values)
+            state["before_state_hash"] = aggregate_before_state_hash
             state["after_state_hash"] = _hash(after_values)
             for item_state, plan in zip(state["items"], plans):
                 item_state.update(_plan_hashes(plan))
@@ -670,6 +745,7 @@ def execute_parent(
             **base,
             "result": "no_op" if replay else "applied",
             "before": before_values,
+            "before_state_hash": aggregate_before_state_hash,
             "after": after_values,
             "plan": [] if replay else [plan.get("plan") for plan in plans],
             "items": outcomes,

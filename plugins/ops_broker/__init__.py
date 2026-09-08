@@ -54,6 +54,7 @@ OPS_BROKER_SCHEMA = {
                     "start_linear_destructive_owner_approval_attest",
                     "approve_linear_destructive_owner_approval_attest",
                     "approve_linear_delete_preview",
+                    "approve_linear_bulk_preview",
                     "get_result",
                 ],
             },

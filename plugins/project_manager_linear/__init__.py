@@ -149,6 +149,7 @@ def execute_pm_command(
         "search_linear",
         "inventory_linear",
         "preview_delete_linear_entity",
+        "preview_bulk_linear_operations",
     }:
         result = lane.execute_command(
             client,
@@ -285,7 +286,11 @@ def execute_pm_command(
             before_state_hash = (
                 plan.get("before_state_hash")
                 if validated["operation"]
-                in {"archive_linear_entity", "delete_linear_entity"}
+                in {
+                    "archive_linear_entity",
+                    "delete_linear_entity",
+                    "bulk_linear_operations",
+                }
                 else contract.canonical_sha256(plan.get("before"))
             )
             if not isinstance(before_state_hash, str):
@@ -379,7 +384,12 @@ def execute_pm_command(
                 or not live_before_matches
                 or (
                     live_plan.get("before_state_hash")
-                    if operation in {"archive_linear_entity", "delete_linear_entity"}
+                    if operation
+                    in {
+                        "archive_linear_entity",
+                        "delete_linear_entity",
+                        "bulk_linear_operations",
+                    }
                     else contract.canonical_sha256(live_plan.get("before"))
                 ) != before_state_hash
                 or contract.canonical_sha256(live_plan_binding)

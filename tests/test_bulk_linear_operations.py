@@ -2,14 +2,32 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import tempfile
 import threading
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
 from plugins.linear_source_route import route
-from plugins.project_manager_linear import approval_contract, bulk, lane
+from plugins.linear_source_route import (
+    HermesKanbanBoard,
+    handle_linear_source_request,
+)
+from plugins.project_manager_linear import (
+    approval_contract,
+    bulk,
+    execute_pm_command,
+    lane,
+)
+from plugins.ops_broker.broker import (
+    _load_linear_delete_preview,
+    _record_linear_delete_approval,
+    _record_linear_delete_approval_attempt,
+    execute_request as execute_broker_request,
+)
+from tests.test_linear_entity_destruction import DestructiveClient
 
 
 PARENT_IDS = {
@@ -53,6 +71,58 @@ def parent(items: list[dict], *, policy: dict | None = None) -> dict:
         "change": {"items": items},
         "policy": policy or {"mode": "standard"},
     }
+
+
+def requested_owner_batch() -> dict:
+    return {
+        "operation": "bulk_linear_operations",
+        "items": [
+            {
+                "operation": "update_issue",
+                "target": {"type": "issue", "identifier": "SIS-232"},
+                "change": {"parent_identifier": "SIS-28"},
+            },
+            {
+                "operation": "archive_linear_entity",
+                "target": {
+                    "type": "issue",
+                    "selector": {"identifier": "SIS-77"},
+                },
+                "change": {},
+            },
+        ],
+    }
+
+
+def preview_client() -> DestructiveClient:
+    client = DestructiveClient()
+    source_issue = copy.deepcopy(client.entities["issues"][0])
+    source_issue.update(
+        {
+            "id": "issue-232-id",
+            "identifier": "SIS-232",
+            "title": "Replace my parent",
+            "url": "https://linear.app/acme/issue/SIS-232/replace-my-parent",
+            "parent": {"id": "old-parent-id", "identifier": "SIS-10"},
+        }
+    )
+    old_parent = {
+        **source_issue,
+        "id": "old-parent-id",
+        "identifier": "SIS-10",
+        "title": "Old parent",
+        "url": "https://linear.app/acme/issue/SIS-10/old-parent",
+        "parent": None,
+    }
+    new_parent = {
+        **old_parent,
+        "id": "new-parent-id",
+        "identifier": "SIS-28",
+        "title": "New parent",
+        "url": "https://linear.app/acme/issue/SIS-28/new-parent",
+    }
+    client.entities["issues"].extend([source_issue, old_parent, new_parent])
+    return client
 
 
 def child_plan(
@@ -271,6 +341,62 @@ class BulkContractTests(unittest.TestCase):
 
 
 class BulkExecutionTests(unittest.TestCase):
+    def test_pm_worker_generates_exact_read_only_preview_without_journal(self):
+        client = preview_client()
+        request = requested_owner_batch()
+        command = route.parse_linear_request(request).command
+
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Path(tmp) / "must-not-exist.json"
+            output = execute_pm_command(
+                command,
+                lane=lane,
+                client=client,
+                journal_path=journal,
+            )
+
+            self.assertFalse(journal.exists())
+            self.assertEqual(list(Path(tmp).iterdir()), [])
+        result = output["result"]
+        self.assertEqual(client.writes, [])
+        self.assertEqual(output["plan"], result)
+        self.assertEqual(result["operation"], "preview_bulk_linear_operations")
+        self.assertEqual(result["result"], "read")
+        self.assertTrue(result["verified"])
+        self.assertTrue(result["no_op"])
+        self.assertEqual(
+            result["approval_intent"],
+            {
+                "operation": "bulk_linear_operations",
+                "target": {"type": "workspace", "identifier": "current"},
+                "change": {"items": request["items"]},
+            },
+        )
+        trusted_archive_before = {
+            "entity": client.entities["issues"][0],
+            "archived": False,
+            "impact": {"children": [], "relations": []},
+            "impact_counts": {"children": 0, "relations": 0},
+        }
+        self.assertEqual(
+            result["before_state_hash"],
+            approval_contract.canonical_sha256(
+                [
+                    approval_contract.canonical_sha256(result["before"][0]),
+                    approval_contract.canonical_sha256(trusted_archive_before),
+                ]
+            ),
+        )
+        self.assertNotEqual(
+            result["before_state_hash"],
+            approval_contract.canonical_sha256(result["before"]),
+        )
+        self.assertEqual([item["index"] for item in result["items"]], [0, 1])
+        self.assertEqual(
+            [item["operation"] for item in result["items"]],
+            ["update_issue", "archive_linear_entity"],
+        )
+
     def test_all_preflights_complete_before_first_write(self):
         events: list[str] = []
 
@@ -306,6 +432,40 @@ class BulkExecutionTests(unittest.TestCase):
             result = bulk.execute_parent(parent([item(0), item(1)]), validate_child=lambda value: value, execute_child=execute, recovery_path=recovery)
         self.assertEqual([call for call in calls if call == ("apply", "SIS-1")], [("apply", "SIS-1")])
         self.assertEqual(result["counts"], {"total": 2, "applied": 2, "no_op": 0})
+
+    def test_hidden_child_commitment_drift_stops_before_destructive_resume(self):
+        hidden_impact_id = {"value": "relation-old"}
+        writes: list[str] = []
+
+        def execute(child, mode, _auth=None):
+            identifier = child["target"]["identifier"]
+            planned = child_plan(
+                child,
+                before={"public": "unchanged"},
+                after={"public": f"after-{identifier}"},
+            )
+            if identifier == "SIS-2":
+                planned["before_state_hash"] = approval_contract.canonical_sha256(
+                    {"hidden_impact_id": hidden_impact_id["value"]}
+                )
+            if mode == "plan":
+                return planned
+            writes.append(identifier)
+            if identifier == "SIS-1":
+                hidden_impact_id["value"] = "relation-drifted"
+            return {**planned, "mode": "apply", "result": "applied", "verified": True}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            recovery = Path(tmp) / "bulk.json"
+            with self.assertRaisesRegex(bulk.PartialFailure, "1 of 2"):
+                bulk.execute_parent(
+                    parent([item(0), item(1)]),
+                    validate_child=lambda value: value,
+                    execute_child=execute,
+                    recovery_path=recovery,
+                )
+
+        self.assertEqual(writes, ["SIS-1"])
 
     def test_cross_target_indirect_drift_stops_before_second_write_and_retry_fails_closed(self):
         live = {"SIS-1": "before-1", "SIS-2": "before-2"}
@@ -664,6 +824,175 @@ class BulkExecutionTests(unittest.TestCase):
 
 
 class BulkSourceTests(unittest.TestCase):
+    def test_handle_round_trip_persists_protected_bulk_preview_in_kanban(self):
+        from hermes_cli import kanban_db as kb
+
+        request = requested_owner_batch()
+        session_values = {
+            "HERMES_SESSION_ID": "20260908_120000_abcdef12",
+            "HERMES_SESSION_PROFILE": "default",
+            "HERMES_SESSION_PLATFORM": "telegram",
+            "HERMES_SESSION_CHAT_ID": "442308262",
+            "HERMES_SESSION_USER_ID": "442308262",
+            "HERMES_SESSION_CHAT_TYPE": "dm",
+            "HERMES_SESSION_THREAD_ID": "454007",
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "kanban.db"
+            with mock.patch.dict(
+                os.environ, {"HERMES_KANBAN_DB": str(db_path)}
+            ), mock.patch.object(kb, "_assert_not_delegated_child_mutation"):
+                kb.init_db(db_path=db_path)
+
+                def board_factory(**kwargs):
+                    return HermesKanbanBoard(
+                        source_profile=kwargs["source_profile"],
+                        kb=kb,
+                        audit_func=lambda *_args, **_kwargs: {"result": "pass"},
+                    )
+
+                options = {
+                    "session_id": session_values["HERMES_SESSION_ID"],
+                    "board_factory": board_factory,
+                    "session_getter": lambda name, default="": session_values.get(
+                        name, default
+                    ),
+                    "runtime_profile_getter": lambda: "default",
+                }
+                queued = json.loads(handle_linear_source_request(request, **options))
+                self.assertEqual(queued, {"status": "queued"})
+
+                conn = kb.connect(db_path=db_path)
+                try:
+                    task = conn.execute("SELECT * FROM tasks").fetchone()
+                    envelope = json.loads(task["body"])
+                    command = envelope["command"]
+                    client = preview_client()
+                    pm_result = execute_pm_command(
+                        command,
+                        lane=lane,
+                        client=client,
+                        journal_path=Path(tmp) / "unused-journal.json",
+                    )["result"]
+                    self.assertTrue(
+                        kb.complete_task(conn, task["id"], result=json.dumps(pm_result))
+                    )
+                finally:
+                    conn.close()
+
+                options["now_factory"] = lambda: datetime.now(timezone.utc)
+                public = json.loads(handle_linear_source_request(request, **options))
+                self.assertEqual(public["phase"], "awaiting_approval")
+                self.assertRegex(
+                    public["approval_reference"],
+                    r"^linear-bulk-approval:v1:[0-9a-f]{64}$",
+                )
+                self.assertEqual(
+                    [entry["operation"] for entry in public["preview"]["items"]],
+                    ["update_issue", "archive_linear_entity"],
+                )
+                self.assertEqual(
+                    public["preview"]["items"][0]["impact"],
+                    {
+                        "before_parent_identifier": "SIS-10",
+                        "after_parent_identifier": "SIS-28",
+                    },
+                )
+                self.assertEqual(
+                    public["preview"]["items"][1]["impact_counts"],
+                    {"children": 0, "relations": 0},
+                )
+                conn = kb.connect(db_path=db_path)
+                try:
+                    rows = conn.execute(
+                        "SELECT payload FROM task_events WHERE task_id = ? AND kind = ?",
+                        (task["id"], "linear_bulk_preview_ready"),
+                    ).fetchall()
+                finally:
+                    conn.close()
+                self.assertEqual(len(rows), 1)
+                protected = json.loads(rows[0]["payload"])
+                self.assertEqual(protected["approval_reference"], public["approval_reference"])
+                self.assertEqual(
+                    protected["source"]["session_id"],
+                    session_values["HERMES_SESSION_ID"],
+                )
+                approval = {
+                    "workflow": "linear-destructive-owner-approval-attest",
+                    "model": "linear-destructive-owner-approval-attest",
+                    "run_id": "55555555-5555-4555-8555-555555555555",
+                    "artifact_version": 1,
+                    "checksum": "a" * 64,
+                    "intent_hash": approval_contract.canonical_sha256(
+                        protected["approval_intent"]
+                    ),
+                    "before_state_hash": protected["before_state_hash"],
+                    "expires_at": protected["expires_at"],
+                }
+                owner_policy = {
+                    "ownerIdentities": [
+                        {
+                            "source": "telegram",
+                            "user_id": "442308262",
+                            "caller": "owner",
+                        }
+                    ]
+                }
+                loaded = _load_linear_delete_preview(
+                    protected["approval_reference"],
+                    session_values["HERMES_SESSION_ID"],
+                    policy=owner_policy,
+                    kb=kb,
+                    now=datetime.now(timezone.utc),
+                )
+                assert loaded is not None
+                _record_linear_delete_approval_attempt(loaded, kb=kb)
+                _record_linear_delete_approval(
+                    loaded,
+                    {"mode": "owner_approved", "approval": approval},
+                    kb=kb,
+                )
+                approved_public = json.loads(
+                    handle_linear_source_request(
+                        {
+                            "operation": "approve_bulk_linear_operations",
+                            "approval_reference": protected["approval_reference"],
+                        },
+                        **options,
+                    )
+                )
+                self.assertEqual(approved_public, {"status": "queued"})
+                self.assertNotIn("private", json.dumps(public, sort_keys=True))
+
+    def test_unapproved_owner_controlled_batch_becomes_read_only_preview(self):
+        request = {
+            "operation": "bulk_linear_operations",
+            "items": [
+                {
+                    "operation": "update_issue",
+                    "target": {"type": "issue", "identifier": "SIS-232"},
+                    "change": {"parent_identifier": "SIS-28"},
+                },
+                {
+                    "operation": "archive_linear_entity",
+                    "target": {
+                        "type": "issue",
+                        "selector": {"identifier": "SIS-136"},
+                    },
+                    "change": {},
+                },
+            ],
+        }
+
+        parsed = route.parse_linear_request(request)
+
+        self.assertEqual(parsed.command["operation"], "preview_bulk_linear_operations")
+        self.assertEqual(parsed.command["target"], {"type": "workspace", "identifier": "current"})
+        self.assertEqual(parsed.command["change"], {"items": request["items"]})
+        self.assertEqual(parsed.command["policy"], {"mode": "standard"})
+        self.assertEqual(lane.validate_command(parsed.command), parsed.command)
+
     def test_duplicate_relation_child_is_standard_safe_in_bulk(self):
         request = {
             "operation": "bulk_linear_operations",
@@ -735,6 +1064,117 @@ class BulkSourceTests(unittest.TestCase):
         self.assertEqual(context, {"items": result["items"], "counts": result["counts"]})
         serialized = json.dumps(context)
         for forbidden in ("command_id", "description", "hash", "task_id", "idempotency"):
+            self.assertNotIn(forbidden, serialized)
+
+
+class BulkBrokerTests(unittest.TestCase):
+    def test_owner_confirmation_consumes_once_and_replays_recorded_bulk_grant(self):
+        session_id = "20260908_120000_abcdef12"
+        reference = "linear-bulk-approval:v1:" + "d" * 64
+        expires_at = (
+            datetime.now(timezone.utc) + timedelta(minutes=10)
+        ).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
+        intent = {
+            "operation": "bulk_linear_operations",
+            "target": {"type": "workspace", "identifier": "current"},
+            "change": {"items": [item(0)]},
+        }
+        preview = {
+            "task_id": "t_abcdef123456",
+            "session_id": session_id,
+            "source_profile": "default",
+            "approval_reference": reference,
+            "approval_intent": intent,
+            "before_state_hash": "c" * 64,
+            "expires_at": expires_at,
+            "preview_hash": "e" * 64,
+        }
+        granted_policy = {
+            "mode": "owner_approved",
+            "approval": {
+                "workflow": "linear-destructive-owner-approval-attest",
+                "model": "linear-destructive-owner-approval-attest",
+                "run_id": "55555555-5555-4555-8555-555555555555",
+                "artifact_version": 1,
+                "checksum": "a" * 64,
+                "intent_hash": approval_contract.canonical_sha256(intent),
+                "before_state_hash": preview["before_state_hash"],
+                "expires_at": expires_at,
+            },
+        }
+        state = {"attempted": False, "grant": None}
+        events: list[str] = []
+
+        def loader(value, exact_session):
+            self.assertEqual((value, exact_session), (reference, session_id))
+            loaded = copy.deepcopy(preview)
+            if state["attempted"]:
+                loaded["approval_attempted"] = True
+            if state["grant"] is not None:
+                loaded["granted_policy"] = copy.deepcopy(state["grant"])
+            return loaded
+
+        def record_attempt(_preview):
+            events.append("consume")
+            state["attempted"] = True
+            return {"claimed": True}
+
+        def issue_attestation(_preview):
+            events.append("attest")
+            return copy.deepcopy(granted_policy)
+
+        def record_grant(_preview, policy):
+            events.append("grant")
+            state["grant"] = copy.deepcopy(policy)
+            return {"ready": True}
+
+        policy = {
+            "peers": {
+                "owner": {"operations": ["swamp.approve_linear_bulk_preview"]}
+            }
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            kwargs = {
+                "caller": "owner",
+                "policy": policy,
+                "runner": mock.Mock(),
+                "workspace": Path(tmp),
+                "audit_path": Path(tmp) / "audit.jsonl",
+                "session_id": session_id,
+                "preview_loader": loader,
+                "attestation_issuer": issue_attestation,
+                "approval_recorder": record_grant,
+                "approval_attempt_recorder": record_attempt,
+                "approval_lock_root": Path(tmp) / "locks",
+            }
+            responses = []
+            for request_id in (
+                "11111111-1111-4111-8111-111111111111",
+                "22222222-2222-4222-8222-222222222222",
+            ):
+                responses.append(
+                    execute_broker_request(
+                        {
+                            "request_id": request_id,
+                            "integration": "swamp",
+                            "operation": "approve_linear_bulk_preview",
+                            "arguments": {"approval_reference": reference},
+                            "mode": "apply",
+                        },
+                        **kwargs,
+                    )
+                )
+
+        self.assertEqual(events, ["consume", "attest", "grant", "grant"])
+        self.assertEqual(
+            [response["result"] for response in responses],
+            [
+                {"approval_reference": reference, "ready": True},
+                {"approval_reference": reference, "ready": True},
+            ],
+        )
+        serialized = json.dumps(responses, sort_keys=True)
+        for forbidden in ("policy", "run_id", "before_state_hash", "intent_hash"):
             self.assertNotIn(forbidden, serialized)
 
 

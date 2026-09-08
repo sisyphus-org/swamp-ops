@@ -1,6 +1,6 @@
 # Linear owner-approved relation, parent, archive, and delete changes
 
-This repository retains the narrowly owner-approved direct destructive slices below. The separately generated preview/confirmation flow introduced for deletion is issue-only; it does not replace or broaden the fixed-approved matrix:
+This repository retains the narrowly owner-approved direct destructive slices below. Separate generated preview/confirmation routes exist for exact issue deletion and ordered `bulk_linear_operations`; they do not replace or broaden the fixed-approved matrix:
 
 1. replace or clear the parent of one exact `SIS-N` issue through parent-only `update_issue`;
 2. remove one exact existing issue relation by two exact `SIS-N` endpoints and `relation_type`;
@@ -24,7 +24,7 @@ persisted linear-command.v2 → PM common approval gate → bounded Linear mutat
 - Broker caller identity comes from the authenticated session. A request body cannot claim owner identity.
 - Only the policy-bound Telegram owner may approve. A2A peers may plan and start the suspended attestation workflow but cannot approve it.
 
-For the generated issue-deletion flow, source does not accept an attestation object from the model. An approval-less exact issue `delete_linear_entity` call queues trusted `preview_delete_linear_entity`; approval-less project, milestone, and initiative deletes are rejected. PM computes the authoritative full before-state and 15-minute expiry without writing a recovery journal. Source persists that protected result on the completed task and returns only safe target/impact facts plus `linear-delete-approval:v1:<opaque>`. The reference binds task, exact source identity/session, exact target, before-state hash, and expiry. Explicit confirmation sends only that reference to broker operation `approve_linear_delete_preview`; the broker serializes by reference, reloads the protected preview inside that lock, verifies authenticated owner/session and any recorded grant, durably consumes the reference before external work, then executes at most one fixed Swamp plan/start/approve sequence and records the grant. Source then queues the exact bound issue delete. Replay reuses the single protected preview/grant/task and cannot create a second mutation. If the process fails after consumption but before a grant is durably recorded, the outcome is intentionally fail-closed: that reference cannot start a second sequence, and the next approval-less delete request creates one deterministic fresh preview successor. The preexisting direct calls carrying the fixed approval object remain accepted for the full delete matrix in this document.
+For generated approval flows, source never accepts an attestation object from the model. The existing approval-less exact issue delete queues `preview_delete_linear_entity` unchanged. An unapproved `bulk_linear_operations` containing an owner-controlled child similarly queues read-only `preview_bulk_linear_operations`; safe-only batches stay direct and an explicitly approved batch stays apply. PM runs every existing child planner in exact order, mutates nothing, writes no recovery journal, and binds the complete ordered trusted child before-state commitments into one aggregate hash with a 15-minute expiry. Source persists the task/source/session/intent/hash/expiry binding and returns only ordered safe impact facts plus `linear-bulk-approval:v1:<opaque>`. Confirmation sends only that reference to owner-only broker operation `approve_linear_bulk_preview`; broker serializes and consumes it before the fixed Swamp plan/start/approve sequence, records one grant, and hides attestation internals. `approve_bulk_linear_operations` accepts only the same opaque reference and reconstructs the original ordered batch and fixed approval internally. PM then re-plans and rejects drift. Replay reuses the recorded grant/task; an attempted-without-grant reference cannot retry and requires a deterministic fresh preview successor. The direct fixed-approval compatibility paths remain accepted.
 
 ## Exact approval intents
 
@@ -95,7 +95,7 @@ Wrong/expired/forged approval, wrong intent, wrong before hash, changed live pla
 
 ## Archive/delete matrix and behavior
 
-The retained direct fixed-approved matrix is deliberately asymmetric. Generated approval-less preview/confirmation is an additional issue-only route:
+The retained direct fixed-approved matrix is deliberately asymmetric. Generated approval-less preview/confirmation has two routes: exact issue deletion and ordered `bulk_linear_operations` containing supported owner-controlled children:
 
 | operation | issue | project | milestone | initiative |
 |---|---:|---:|---:|---:|

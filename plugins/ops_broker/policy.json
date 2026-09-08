@@ -26,6 +26,7 @@
         "swamp.start_linear_destructive_owner_approval_attest",
         "swamp.approve_linear_destructive_owner_approval_attest",
         "swamp.approve_linear_delete_preview",
+        "swamp.approve_linear_bulk_preview",
         "swamp.get_result"
       ]
     },

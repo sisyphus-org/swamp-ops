@@ -35,6 +35,7 @@ ALLOWED_OPERATIONS = {
     ("swamp", "start_linear_destructive_owner_approval_attest"),
     ("swamp", "approve_linear_destructive_owner_approval_attest"),
     ("swamp", "approve_linear_delete_preview"),
+    ("swamp", "approve_linear_bulk_preview"),
     ("swamp", "get_result"),
 }
 
@@ -960,6 +961,23 @@ def _delete_preview_reference(
     return "linear-delete-approval:v1:" + linear_approval.canonical_sha256(binding)
 
 
+def _bulk_preview_reference(
+    task_id: str,
+    session_id: str,
+    result: dict[str, Any],
+    source: dict[str, Any],
+) -> str:
+    binding = {
+        "task_id": task_id,
+        "session_id": session_id,
+        "source": source,
+        "approval_intent": result.get("approval_intent"),
+        "before_state_hash": result.get("before_state_hash"),
+        "expires_at": result.get("expires_at"),
+    }
+    return "linear-bulk-approval:v1:" + linear_approval.canonical_sha256(binding)
+
+
 def _load_linear_delete_preview(
     reference: str,
     session_id: str,
@@ -969,6 +987,33 @@ def _load_linear_delete_preview(
     now: datetime | None = None,
 ) -> dict[str, Any] | None:
     """Load and revalidate one protected PM preview from the shared Kanban DB."""
+    bulk_preview = bool(
+        re.fullmatch(r"linear-bulk-approval:v1:[0-9a-f]{64}", reference)
+    )
+    if not bulk_preview and re.fullmatch(
+        r"linear-delete-approval:v1:[0-9a-f]{64}", reference
+    ) is None:
+        raise BrokerError("Linear approval preview reference is invalid")
+    preview_kind = (
+        "linear_bulk_preview_ready"
+        if bulk_preview
+        else "linear_delete_preview_ready"
+    )
+    grant_kind = (
+        "linear_bulk_approval_granted"
+        if bulk_preview
+        else "linear_delete_approval_granted"
+    )
+    attempt_kind = (
+        "linear_bulk_approval_attempted"
+        if bulk_preview
+        else "linear_delete_approval_attempted"
+    )
+    preview_operation = (
+        "preview_bulk_linear_operations"
+        if bulk_preview
+        else "preview_delete_linear_entity"
+    )
     if kb is None:
         from hermes_cli import kanban_db as kb_module
 
@@ -977,7 +1022,7 @@ def _load_linear_delete_preview(
     try:
         rows = conn.execute(
             "SELECT task_id, payload FROM task_events WHERE kind = ? AND payload LIKE ?",
-            ("linear_delete_preview_ready", f'%\"approval_reference\": \"{reference}\"%'),
+            (preview_kind, f'%\"approval_reference\": \"{reference}\"%'),
         ).fetchall()
         if len(rows) != 1:
             raise BrokerError("Linear delete preview is missing or ambiguous")
@@ -986,11 +1031,11 @@ def _load_linear_delete_preview(
         task = kb.get_task(conn, task_id)
         grant_rows = conn.execute(
             "SELECT payload FROM task_events WHERE task_id = ? AND kind = ?",
-            (task_id, "linear_delete_approval_granted"),
+            (task_id, grant_kind),
         ).fetchall()
         attempt_rows = conn.execute(
             "SELECT payload FROM task_events WHERE task_id = ? AND kind = ?",
-            (task_id, "linear_delete_approval_attempted"),
+            (task_id, attempt_kind),
         ).fetchall()
     finally:
         conn.close()
@@ -1016,14 +1061,16 @@ def _load_linear_delete_preview(
         or _task_value(task, "assignee") != "project-manager"
         or _task_value(task, "session_id") != session_id
         or not isinstance(source, dict)
+        or preview_event.get("schema_version")
+        != ("linear-bulk-preview.v1" if bulk_preview else "linear-delete-preview.v1")
         or source.get("session_id") != session_id
         or source.get("platform") != "telegram"
         or source.get("user_id") not in owner_user_ids
         or not isinstance(command, dict)
-        or command.get("operation") != "preview_delete_linear_entity"
+        or command.get("operation") != preview_operation
         or command.get("source_profile") != source.get("profile")
         or not isinstance(result, dict)
-        or result.get("operation") != "preview_delete_linear_entity"
+        or result.get("operation") != preview_operation
         or result.get("verified") is not True
         or result.get("result") != "read"
         or result.get("target") != command.get("target")
@@ -1033,7 +1080,12 @@ def _load_linear_delete_preview(
         or not isinstance(result.get("before_state_hash"), str)
         or linear_approval.SHA256.fullmatch(result["before_state_hash"]) is None
         or preview_event.get("approval_reference") != reference
-        or _delete_preview_reference(task_id, session_id, result, source) != reference
+        or (
+            _bulk_preview_reference(task_id, session_id, result, source)
+            if bulk_preview
+            else _delete_preview_reference(task_id, session_id, result, source)
+        )
+        != reference
     ):
         raise BrokerError("Linear delete preview protected binding is invalid")
     current = now or datetime.now(timezone.utc)
@@ -1054,7 +1106,11 @@ def _load_linear_delete_preview(
         except (TypeError, json.JSONDecodeError) as exc:
             raise BrokerError("Linear delete approval attempt is malformed") from exc
         if attempt != {
-            "schema_version": "linear-delete-approval-attempt.v1",
+            "schema_version": (
+                "linear-bulk-approval-attempt.v1"
+                if bulk_preview
+                else "linear-delete-approval-attempt.v1"
+            ),
             "approval_reference": reference,
             "preview_hash": linear_approval.canonical_sha256(preview_event),
         }:
@@ -1070,7 +1126,12 @@ def _load_linear_delete_preview(
             not isinstance(grant, dict)
             or set(grant)
             != {"schema_version", "approval_reference", "preview_hash", "policy"}
-            or grant.get("schema_version") != "linear-delete-approval.v1"
+            or grant.get("schema_version")
+            != (
+                "linear-bulk-approval.v1"
+                if bulk_preview
+                else "linear-delete-approval.v1"
+            )
             or grant.get("approval_reference") != reference
             or grant.get("preview_hash")
             != linear_approval.canonical_sha256(preview_event)
@@ -1172,8 +1233,28 @@ def _record_linear_delete_approval(
 
         kb = kb_module
     task_id = preview.get("task_id")
+    bulk_preview = bool(
+        re.fullmatch(
+            r"linear-bulk-approval:v1:[0-9a-f]{64}",
+            str(preview.get("approval_reference") or ""),
+        )
+    )
+    grant_kind = (
+        "linear_bulk_approval_granted"
+        if bulk_preview
+        else "linear_delete_approval_granted"
+    )
+    attempt_kind = (
+        "linear_bulk_approval_attempted"
+        if bulk_preview
+        else "linear_delete_approval_attempted"
+    )
     payload = {
-        "schema_version": "linear-delete-approval.v1",
+        "schema_version": (
+            "linear-bulk-approval.v1"
+            if bulk_preview
+            else "linear-delete-approval.v1"
+        ),
         "approval_reference": preview.get("approval_reference"),
         "preview_hash": preview.get("preview_hash"),
         "policy": granted_policy,
@@ -1190,10 +1271,14 @@ def _record_linear_delete_approval(
                 raise BrokerError("Linear delete approval task binding is invalid")
             attempts = conn.execute(
                 "SELECT payload FROM task_events WHERE task_id = ? AND kind = ?",
-                (task_id, "linear_delete_approval_attempted"),
+                (task_id, attempt_kind),
             ).fetchall()
             expected_attempt = {
-                "schema_version": "linear-delete-approval-attempt.v1",
+                "schema_version": (
+                    "linear-bulk-approval-attempt.v1"
+                    if bulk_preview
+                    else "linear-delete-approval-attempt.v1"
+                ),
                 "approval_reference": preview.get("approval_reference"),
                 "preview_hash": preview.get("preview_hash"),
             }
@@ -1204,7 +1289,7 @@ def _record_linear_delete_approval(
                 raise BrokerError("Linear delete approval attempt is missing or invalid")
             rows = conn.execute(
                 "SELECT payload FROM task_events WHERE task_id = ? AND kind = ?",
-                (task_id, "linear_delete_approval_granted"),
+                (task_id, grant_kind),
             ).fetchall()
             if rows:
                 if len(rows) != 1 or json.loads(rows[0]["payload"]) != payload:
@@ -1213,7 +1298,7 @@ def _record_linear_delete_approval(
             kb._append_event(
                 conn,
                 task_id,
-                "linear_delete_approval_granted",
+                grant_kind,
                 payload,
             )
     finally:
@@ -1232,8 +1317,28 @@ def _record_linear_delete_approval_attempt(
 
         kb = kb_module
     task_id = preview.get("task_id")
+    bulk_preview = bool(
+        re.fullmatch(
+            r"linear-bulk-approval:v1:[0-9a-f]{64}",
+            str(preview.get("approval_reference") or ""),
+        )
+    )
+    grant_kind = (
+        "linear_bulk_approval_granted"
+        if bulk_preview
+        else "linear_delete_approval_granted"
+    )
+    attempt_kind = (
+        "linear_bulk_approval_attempted"
+        if bulk_preview
+        else "linear_delete_approval_attempted"
+    )
     payload = {
-        "schema_version": "linear-delete-approval-attempt.v1",
+        "schema_version": (
+            "linear-bulk-approval-attempt.v1"
+            if bulk_preview
+            else "linear-delete-approval-attempt.v1"
+        ),
         "approval_reference": preview.get("approval_reference"),
         "preview_hash": preview.get("preview_hash"),
     }
@@ -1249,13 +1354,13 @@ def _record_linear_delete_approval_attempt(
                 raise BrokerError("Linear delete approval attempt task binding is invalid")
             grants = conn.execute(
                 "SELECT payload FROM task_events WHERE task_id = ? AND kind = ?",
-                (task_id, "linear_delete_approval_granted"),
+                (task_id, grant_kind),
             ).fetchall()
             if grants:
                 raise BrokerError("Linear delete approval was already granted")
             rows = conn.execute(
                 "SELECT payload FROM task_events WHERE task_id = ? AND kind = ?",
-                (task_id, "linear_delete_approval_attempted"),
+                (task_id, attempt_kind),
             ).fetchall()
             if rows:
                 if len(rows) != 1 or json.loads(rows[0]["payload"]) != payload:
@@ -1264,7 +1369,7 @@ def _record_linear_delete_approval_attempt(
             kb._append_event(
                 conn,
                 task_id,
-                "linear_delete_approval_attempted",
+                attempt_kind,
                 payload,
             )
     finally:
@@ -1296,9 +1401,21 @@ def execute_request(
         peer = policy.get("peers", {}).get(caller, {})
         if operation_key not in peer.get("operations", []):
             raise BrokerError("operation is not allowed for caller")
-        if operation_key == "swamp.approve_linear_delete_preview":
+        if operation_key in {
+            "swamp.approve_linear_delete_preview",
+            "swamp.approve_linear_bulk_preview",
+        }:
+            bulk_approval = operation_key == "swamp.approve_linear_bulk_preview"
+            approval_label = "Linear bulk" if bulk_approval else "Linear delete"
+            reference_pattern = (
+                r"linear-bulk-approval:v1:[0-9a-f]{64}"
+                if bulk_approval
+                else r"linear-delete-approval:v1:[0-9a-f]{64}"
+            )
             if caller != "owner":
-                raise BrokerError("Linear delete approval requires authenticated owner")
+                raise BrokerError(
+                    f"{approval_label} approval requires authenticated owner"
+                )
             arguments = request.get("arguments")
             reference = (
                 arguments.get("approval_reference")
@@ -1307,8 +1424,7 @@ def execute_request(
             )
             if (
                 not isinstance(reference, str)
-                or re.fullmatch(r"linear-delete-approval:v1:[0-9a-f]{64}", reference)
-                is None
+                or re.fullmatch(reference_pattern, reference) is None
             ):
                 raise BrokerError("Linear delete approval reference is invalid")
             if not session_id:
@@ -1547,6 +1663,7 @@ def validate_request(payload: dict[str, Any]) -> dict[str, Any]:
         "start_linear_destructive_owner_approval_attest",
         "approve_linear_destructive_owner_approval_attest",
         "approve_linear_delete_preview",
+        "approve_linear_bulk_preview",
     }
     expected_mode = "apply" if operation in apply_operations else "plan"
     if mode != expected_mode:

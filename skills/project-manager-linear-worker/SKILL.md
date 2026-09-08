@@ -30,7 +30,7 @@ Do not use this skill for ordinary chat, fuzzy targets, arbitrary Linear operati
 
 1. Call `pm_linear_execute` once with no arguments. Do not copy, reconstruct, normalize, expand, or repair the task command.
 2. The tool reads the persisted command from its own current Kanban task, proves the task/assignee/status/run binding, and CAS-extends the exact dispatcher claim before Linear access.
-3. Stop after the tool returns. For reads, including delete preview, the tool executes one verified read with no mutation or journal write. Delete preview returns the exact full before-state hash only to the trusted route; source receives only safe impact facts and an opaque reference. For mutations, it performs plan, apply, exact read-back, and idempotency handling. It owns the terminal Kanban complete/block transition in both cases.
+3. Stop after the tool returns. For reads, including delete and owner-controlled bulk previews, the tool executes one verified read with no mutation or journal write. Bulk preview uses only the module-private plan-only child capability, preserves order, and aggregates complete trusted child before-state commitments; source receives only safe impact facts and an opaque 15-minute reference. For mutations, it performs plan, apply, exact read-back, and idempotency handling. It owns the terminal Kanban complete/block transition in both cases.
 
 For a batch, the tool validates every child and completes every read-only preflight before the first write. It then executes the exact ordered unfinished suffix under one parent claim, fsyncing per-item recovery state before each write. Never invoke or reconstruct an internal child execution authorization; it is valid only when narrowed from the opaque exact parent claim.
 

@@ -24,6 +24,7 @@ PROFILE_NAME = re.compile(r"^[a-z][a-z0-9-]{1,30}$")
 IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:._/-]{7,199}$")
 OPERATIONS = {
     "bulk_linear_operations",
+    "preview_bulk_linear_operations",
     "read_issue",
     "change_state",
     "move_issue",
@@ -57,7 +58,9 @@ READ_OPERATIONS = {
     "search_linear",
     "inventory_linear",
     "preview_delete_linear_entity",
+    "preview_bulk_linear_operations",
 }
+_BULK_PREVIEW_PLAN_CAPABILITY = object()
 LINEAR_ENTITY_TYPES = ("issues", "projects", "milestones", "initiatives")
 MAX_SEARCH_QUERY = 500
 TERMINAL_STATES = {"Done", "Canceled"}
@@ -1345,8 +1348,18 @@ class LinearClient:
             raise ContractError("Linear hierarchy issue update did not succeed")
 
 
-def validate_command(raw: Any) -> dict[str, Any]:
+def validate_command(
+    raw: Any, *, _bulk_preview_capability: Any = None
+) -> dict[str, Any]:
     """Validate the exact linear-command.v2 envelope and return it unchanged."""
+    if (
+        _bulk_preview_capability is not None
+        and _bulk_preview_capability is not _BULK_PREVIEW_PLAN_CAPABILITY
+    ):
+        raise ContractError("bulk preview plan capability is invalid")
+    owner_preview_plan = (
+        _bulk_preview_capability is _BULK_PREVIEW_PLAN_CAPABILITY
+    )
     if not isinstance(raw, dict) or set(raw) != ROOT_FIELDS:
         raise ContractError("command must contain exactly the linear-command.v2 fields")
     if raw["schema_version"] != "linear-command.v2":
@@ -1374,10 +1387,14 @@ def validate_command(raw: Any) -> dict[str, Any]:
         "delete_linear_entity",
     }
     delete_preview = operation == "preview_delete_linear_entity"
-    if operation == "bulk_linear_operations":
+    bulk_operation = operation in {
+        "bulk_linear_operations",
+        "preview_bulk_linear_operations",
+    }
+    if bulk_operation:
         if target != {"type": "workspace", "identifier": "current"}:
             raise ContractError(
-                "bulk_linear_operations target must be the current workspace"
+                f"{operation} target must be the current workspace"
             )
     elif destructive_operation or delete_preview:
         if delete_preview and (
@@ -1391,7 +1408,7 @@ def validate_command(raw: Any) -> dict[str, Any]:
         )
     elif not isinstance(target, dict) or set(target) != {"type", "identifier"}:
         raise ContractError("target must contain exactly type and identifier")
-    if destructive_operation or delete_preview or operation == "bulk_linear_operations":
+    if destructive_operation or delete_preview or bulk_operation:
         pass
     elif operation in {
         "create_issue",
@@ -1423,18 +1440,25 @@ def validate_command(raw: Any) -> dict[str, Any]:
     change = raw["change"]
     if not isinstance(change, dict):
         raise ContractError("change must be an object")
-    if operation == "bulk_linear_operations":
+    if bulk_operation:
         if set(change) != {"items"}:
             raise ContractError(
-                "bulk_linear_operations change must contain exactly items"
+                f"{operation} change must contain exactly items"
             )
         bulk = _load_bulk()
 
         bulk.validate_items(
-            change.get("items"), parent_policy=raw["policy"], error_cls=ContractError
+            change.get("items"),
+            parent_policy=(
+                {"mode": "owner_approved"}
+                if operation == "preview_bulk_linear_operations"
+                else raw["policy"]
+            ),
+            error_cls=ContractError,
         )
-        for index in range(len(change["items"])):
-            validate_command(bulk.derive_child_command(raw, index))
+        if operation == "bulk_linear_operations":
+            for index in range(len(change["items"])):
+                validate_command(bulk.derive_child_command(raw, index))
     elif destructive_operation or delete_preview:
         if change:
             raise ContractError(f"{operation} change must be empty")
@@ -1756,9 +1780,13 @@ def validate_command(raw: Any) -> dict[str, Any]:
         )
     if operation in {"remove_issue_relation", "replace_issue_relation"} and raw[
         "policy"
-    ].get("mode") != "owner_approved":
+    ].get("mode") != "owner_approved" and not owner_preview_plan:
         raise ContractError(f"{operation} requires owner_approved policy")
-    if destructive_operation and raw["policy"].get("mode") != "owner_approved":
+    if (
+        destructive_operation
+        and raw["policy"].get("mode") != "owner_approved"
+        and not owner_preview_plan
+    ):
         raise ContractError(f"{operation} requires owner_approved policy")
     return raw
 
@@ -2213,13 +2241,24 @@ def execute_command(
     *,
     mode: str,
     journal_path: Path | None = None,
-    owner_approval_authorization: Any = None,
+    owner_approval_authorization: Any | None = None,
     _lock_held: bool = False,
+    _bulk_preview_capability: Any = None,
 ) -> dict[str, Any]:
     """Plan or execute one validated exact-target command."""
     if mode not in {"plan", "apply"}:
         raise ContractError("mode must be plan or apply")
-    command = validate_command(raw)
+    if _bulk_preview_capability is not None and (
+        _bulk_preview_capability is not _BULK_PREVIEW_PLAN_CAPABILITY
+        or mode != "plan"
+    ):
+        raise ContractError("bulk preview capability is plan-only")
+    command = validate_command(
+        raw, _bulk_preview_capability=_bulk_preview_capability
+    )
+    owner_preview_plan = (
+        _bulk_preview_capability is _BULK_PREVIEW_PLAN_CAPABILITY
+    )
     owner_approved_apply = (
         mode == "apply" and command["policy"].get("mode") == "owner_approved"
     )
@@ -2275,6 +2314,20 @@ def execute_command(
             latest[key_hash] = request_hash
             write_journal(journal_path, latest)
         return result
+
+    if command["operation"] == "preview_bulk_linear_operations":
+        bulk = _load_bulk()
+
+        def plan_preview_child(child: dict[str, Any]) -> dict[str, Any]:
+            return execute_command(
+                client,
+                child,
+                mode="plan",
+                journal_path=None,
+                _bulk_preview_capability=_BULK_PREVIEW_PLAN_CAPABILITY,
+            )
+
+        return bulk.preview_parent(command, plan_child=plan_preview_child)
 
     if command["operation"] == "bulk_linear_operations":
         bulk = _load_bulk()
@@ -3652,7 +3705,11 @@ def execute_command(
                     and current_parent["identifier"] != requested_parent
                 )
             )
-            if replacing_parent and command["policy"].get("mode") != "owner_approved":
+            if (
+                replacing_parent
+                and command["policy"].get("mode") != "owner_approved"
+                and not owner_preview_plan
+            ):
                 raise ContractError(OWNER_APPROVAL_PARENT_BLOCKER)
             if requested_parent is None:
                 desired_parent_id = None
