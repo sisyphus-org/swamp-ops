@@ -251,7 +251,9 @@ def _lifecycle_projection(
         if isinstance(child, dict) and isinstance(child.get("identifier"), str)
     }
     producers: list[dict[str, Any]] = []
-    for index, (child, plan) in enumerate(zip(children[:consumer_index], plans)):
+    for index, (child, plan) in enumerate(
+        zip(children[:consumer_index], plans, strict=True)
+    ):
         operation = child.get("operation")
         child_target = child.get("target", {})
         child_identifier = (
@@ -334,8 +336,10 @@ def _lifecycle_projection(
                 else None
             )
             if (
-                isinstance(parent, dict)
-                and parent.get("identifier") == parent_identifier
+                (
+                    isinstance(parent, dict)
+                    and parent.get("identifier") == parent_identifier
+                )
                 or producer_identifier in impacted_identifiers
             ):
                 raise error_cls(
@@ -448,7 +452,9 @@ def _plan_ordered_children(
             else None
         )
         current_parent = child.get("change", {}).get("parent_identifier")
-        for producer, producer_plan in zip(children[:index], plans):
+        for producer, producer_plan in zip(
+            children[:index], plans, strict=True
+        ):
             if producer.get("operation") not in {
                 "archive_linear_entity",
                 "delete_linear_entity",
@@ -609,7 +615,9 @@ def _aggregate_before_state_hash(plans: list[dict[str, Any]]) -> str:
     return _hash(_before_state_hashes(plans))
 
 
-def _plan_hashes(plan: dict[str, Any]) -> dict[str, Any]:
+def _plan_hashes(
+    plan: dict[str, Any], item_index: int | None = None
+) -> dict[str, Any]:
     before_hash = _before_state_hashes([plan])[0]
     projected_before_hash = plan.get("projected_before_state_hash", before_hash)
     dependency_hash = plan.get("dependency_hash", _hash(None))
@@ -621,6 +629,10 @@ def _plan_hashes(plan: dict[str, Any]) -> dict[str, Any]:
         or len(dependency_hash) != 64
         or not isinstance(producer_indices, list)
         or any(not isinstance(index, int) or index < 0 for index in producer_indices)
+        or (
+            item_index is not None
+            and any(index >= item_index for index in producer_indices)
+        )
         or producer_indices != sorted(set(producer_indices))
     ):
         raise RuntimeError("bulk child lifecycle commitments are invalid")
@@ -1016,8 +1028,10 @@ def execute_parent(
             state["aggregate_plan_hash"] = aggregate_plan_hash
             state["before_state_hash"] = aggregate_before_state_hash
             state["after_state_hash"] = _hash(after_values)
-            for item_state, plan in zip(state["items"], plans):
-                item_state.update(_plan_hashes(plan))
+            for index, (item_state, plan) in enumerate(
+                zip(state["items"], plans, strict=True)
+            ):
+                item_state.update(_plan_hashes(plan, index))
             _write_state(recovery_path, state)
         was_complete = all(item["phase"] == "completed" for item in state["items"])
         outcomes: list[dict[str, Any]] = []

@@ -767,13 +767,12 @@ def execute(
         else _delete_recovery_manifest(entity_type, entity, raw_impact)
     )
     manifest_hash = _hash(recovery_manifest)
-    expected_before_state_hash = (
-        authorized_before_state_hash
-        if authorized_before_state_hash is not None
-        else approval_ref.get("before_state_hash")
-        if isinstance(approval_ref, dict)
-        else None
-    )
+    if authorized_before_state_hash is not None:
+        expected_before_state_hash = authorized_before_state_hash
+    elif isinstance(approval_ref, dict):
+        expected_before_state_hash = approval_ref.get("before_state_hash")
+    else:
+        expected_before_state_hash = None
     if (
         not isinstance(approval_ref, dict)
         or expected_before_state_hash != before_state_hash

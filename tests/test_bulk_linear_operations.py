@@ -34,6 +34,7 @@ PARENT_IDS = {
     "command_id": "11111111-1111-4111-8111-111111111111",
     "correlation_id": "22222222-2222-4222-8222-222222222222",
 }
+PREVIEW_JOURNAL = Path(tempfile.gettempdir()) / "preview-must-not-write.json"
 
 
 def item(index: int, operation: str = "update_issue") -> dict:
@@ -495,7 +496,7 @@ class BulkExecutionTests(unittest.TestCase):
             route.parse_linear_request(request).command,
             lane=lane,
             client=client,
-            journal_path=Path("/tmp/preview-must-not-write.json"),
+            journal_path=PREVIEW_JOURNAL,
         )["result"]
 
         self.assertEqual(client.writes, [])
@@ -541,7 +542,7 @@ class BulkExecutionTests(unittest.TestCase):
                 route.parse_linear_request(request).command,
                 lane=lane,
                 client=client,
-                journal_path=Path("/tmp/preview-must-not-write.json"),
+                journal_path=PREVIEW_JOURNAL,
             )
         self.assertEqual(client.writes, [])
 
@@ -575,7 +576,7 @@ class BulkExecutionTests(unittest.TestCase):
                 ).command,
                 lane=lane,
                 client=client,
-                journal_path=Path("/tmp/preview-must-not-write.json"),
+                journal_path=PREVIEW_JOURNAL,
             )
         self.assertEqual(client.writes, [])
 
@@ -609,7 +610,7 @@ class BulkExecutionTests(unittest.TestCase):
                 ).command,
                 lane=lane,
                 client=client,
-                journal_path=Path("/tmp/preview-must-not-write.json"),
+                journal_path=PREVIEW_JOURNAL,
             )
         self.assertEqual(client.writes, [])
 
@@ -640,7 +641,7 @@ class BulkExecutionTests(unittest.TestCase):
                 ).command,
                 lane=lane,
                 client=client,
-                journal_path=Path("/tmp/preview-must-not-write.json"),
+                journal_path=PREVIEW_JOURNAL,
             )
         self.assertEqual(client.writes, [])
 
@@ -671,7 +672,7 @@ class BulkExecutionTests(unittest.TestCase):
                 ).command,
                 lane=lane,
                 client=client,
-                journal_path=Path("/tmp/preview-must-not-write.json"),
+                journal_path=PREVIEW_JOURNAL,
             )
         self.assertEqual(client.writes, [])
 
@@ -705,7 +706,7 @@ class BulkExecutionTests(unittest.TestCase):
                 ).command,
                 lane=lane,
                 client=client,
-                journal_path=Path("/tmp/preview-must-not-write.json"),
+                journal_path=PREVIEW_JOURNAL,
             )
         self.assertEqual(client.writes, [])
 
@@ -739,7 +740,7 @@ class BulkExecutionTests(unittest.TestCase):
                 ).command,
                 lane=lane,
                 client=client,
-                journal_path=Path("/tmp/preview-must-not-write.json"),
+                journal_path=PREVIEW_JOURNAL,
             )
         self.assertEqual(client.writes, [])
 
@@ -776,7 +777,7 @@ class BulkExecutionTests(unittest.TestCase):
                 ).command,
                 lane=lane,
                 client=client,
-                journal_path=Path("/tmp/preview-must-not-write.json"),
+                journal_path=PREVIEW_JOURNAL,
             )
         self.assertEqual(client.writes, [])
 
@@ -811,7 +812,7 @@ class BulkExecutionTests(unittest.TestCase):
                 ).command,
                 lane=lane,
                 client=ordered_lifecycle_client(),
-                journal_path=Path("/tmp/preview-must-not-write.json"),
+                journal_path=PREVIEW_JOURNAL,
             )["result"]
             return result["before_state_hashes"][1]
 
@@ -840,7 +841,7 @@ class BulkExecutionTests(unittest.TestCase):
             ).command,
             lane=lane,
             client=client,
-            journal_path=Path("/tmp/preview-must-not-write.json"),
+            journal_path=PREVIEW_JOURNAL,
         )["result"]
         policy = approval_policy()
         command = parent(items, policy=policy)
@@ -925,7 +926,7 @@ class BulkExecutionTests(unittest.TestCase):
             ).command,
             lane=lane,
             client=client,
-            journal_path=Path("/tmp/preview-must-not-write.json"),
+            journal_path=PREVIEW_JOURNAL,
         )["result"]
         descendant = next(
             issue
@@ -965,7 +966,7 @@ class BulkExecutionTests(unittest.TestCase):
             ).command,
             lane=lane,
             client=client,
-            journal_path=Path("/tmp/preview-must-not-write.json"),
+            journal_path=PREVIEW_JOURNAL,
         )["result"]
         command, consumed = approved_parent(items, preview["before_state_hash"])
         child = bulk.derive_child_command(command, 0)
@@ -1030,7 +1031,7 @@ class BulkExecutionTests(unittest.TestCase):
             ).command,
             lane=lane,
             client=client,
-            journal_path=Path("/tmp/preview-must-not-write.json"),
+            journal_path=PREVIEW_JOURNAL,
         )["result"]
         command, consumed = approved_parent(items, preview["before_state_hash"])
         update = client.update_issue_fields
@@ -1075,7 +1076,7 @@ class BulkExecutionTests(unittest.TestCase):
             ).command,
             lane=lane,
             client=client,
-            journal_path=Path("/tmp/preview-must-not-write.json"),
+            journal_path=PREVIEW_JOURNAL,
         )["result"]
         command, consumed = approved_parent(items, preview["before_state_hash"])
         update = client.update_issue_fields
@@ -1188,6 +1189,27 @@ class BulkExecutionTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "preflight failed"):
             bulk.execute_parent(parent([item(0), item(1)]), validate_child=validate, execute_child=execute)
         self.assertEqual(events, ["plan:SIS-1", "plan:SIS-2"])
+
+    def test_invalid_forward_producer_index_fails_before_journal_write(self):
+        def execute(child, mode, _auth=None):
+            result = bulk.fake_result(child, mode, no_op=False)
+            if mode == "plan":
+                result["producer_indices"] = [1]
+                result["dependency_hash"] = "d" * 64
+            return result
+
+        with tempfile.TemporaryDirectory() as tmp:
+            recovery = Path(tmp) / "bulk.json"
+            with self.assertRaisesRegex(
+                RuntimeError, "bulk child lifecycle commitments are invalid"
+            ):
+                bulk.execute_parent(
+                    parent([item(0)]),
+                    validate_child=lambda value: value,
+                    execute_child=execute,
+                    recovery_path=recovery,
+                )
+            self.assertFalse(recovery.exists())
 
     def test_partial_failure_persists_completed_prefix_and_resume_skips_it(self):
         calls: list[tuple[str, str]] = []
