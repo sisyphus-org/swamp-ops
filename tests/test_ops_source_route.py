@@ -157,6 +157,41 @@ class OperationsSourceRouteTests(unittest.TestCase):
         self.assertEqual(replay["operation"], "github.repository_access")
         self.assertEqual(replay["result"], result["result"])
 
+    def test_completed_replay_accepts_verified_list_result(self):
+        request = {
+            **REQUEST,
+            "operation": "list_pull_requests",
+        }
+        first = FakeBoard()
+        route_operations_request(request, source=source(), board=first)
+        body = first.created_kwargs["body"]
+        command = json.loads(body)["command"]
+        result = {
+            "schema_version": "operations-result.v1",
+            "command_id": command["command_id"],
+            "idempotency_key": command["idempotency_key"],
+            "source_profile": "swe",
+            "caller": "swe",
+            "request_id": request["request_id"],
+            "integration": "github",
+            "operation": "github.list_pull_requests",
+            "mode": "plan",
+            "status": "ok",
+            "result": [],
+            "verified": True,
+        }
+        task = {
+            "id": "t_12345678",
+            "status": "done",
+            "session_id": source().session_id,
+            "idempotency_key": first.created_kwargs["idempotency_key"],
+            "body": body,
+            "result": json.dumps(result, sort_keys=True),
+        }
+        replay = route_operations_request(request, source=source(), board=FakeBoard(task))
+        self.assertEqual(replay["status"], "completed")
+        self.assertEqual(replay["result"], [])
+
     def test_completed_replay_rejects_wrong_worker_contract(self):
         first = FakeBoard()
         route_operations_request(REQUEST, source=source(), board=first)

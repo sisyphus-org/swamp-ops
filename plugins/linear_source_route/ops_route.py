@@ -269,7 +269,7 @@ def _load_completed(
         or result.get("operation")
         != f"{persisted['request'].get('integration')}.{persisted['request'].get('operation')}"
         or result.get("mode") != persisted["request"].get("mode")
-        or not isinstance(result.get("result"), dict)
+        or not isinstance(result.get("result"), (dict, list))
     ):
         raise OperationsRouteError("completed operations result is not bound to its command")
     serialized = json.dumps(result, ensure_ascii=False, sort_keys=True)
