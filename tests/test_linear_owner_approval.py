@@ -1289,12 +1289,7 @@ class PmVerifierTests(unittest.TestCase):
 
 class BrokerFoundationTests(unittest.TestCase):
     def broker_policy(self):
-        root = ROOT / "plugins" / "ops_broker"
-        policy_value = json.loads((root / "policy.json").read_text())
-        owner_policy = json.loads((root / "policy-owner-bridge.json").read_text())
-        policy_value["peers"].update(owner_policy["peers"])
-        policy_value["ownerIdentities"] = owner_policy["ownerIdentities"]
-        return policy_value
+        return json.loads((ROOT / "plugins" / "ops_broker" / "policy.json").read_text())
 
     def test_plan_start_and_approve_build_only_fixed_typed_swamp_argv(self):
         encoded = owner_approval.encode_intent(intent())
