@@ -103,7 +103,7 @@ If authoritative mutation-scoped provenance identifies one exact compatible resu
 3. Do not call Linear MCP, GraphQL, `terminal`, a direct read client, Kanban inspection commands, or another Linear tool from the source profile.
 4. After `queued`, reply only that the requested action is being handled, then stop. Do not inspect the task, worker, protocol, or board while it runs.
 5. After `completed`, report only the user-visible outcome: what changed or was reused, the final issue identifier/title/state when relevant, and the canonical Linear URL. Do not narrate routing or verification machinery.
-6. On a Kanban wake, call `linear_source_request` once with the literal original semantic request to obtain the sanitized completion, then send one concise answer. Do not repeat raw lifecycle text.
+6. On a Kanban wake for either asynchronous `ops_broker` approval, replay the literal original five-field `ops_broker` request once and wait for its sanitized completed result; call `linear_source_request` with the approval-reference-only request only after that result reports `ready=true`. For every other Linear task wake, call `linear_source_request` once with the literal original semantic request to obtain the sanitized completion, then send one concise answer. Do not repeat raw lifecycle text.
 7. For a blocker, preserve the tool's sanitized factual `message`; never infer a
    different capability limitation, required parent, hierarchy shape, or other
    cause from the operation type. A factual pre-write rejection may be reported

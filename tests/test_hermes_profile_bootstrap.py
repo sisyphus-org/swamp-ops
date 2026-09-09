@@ -20,6 +20,23 @@ SPEC.loader.exec_module(bootstrap)
 
 
 class BootstrapContractTests(unittest.TestCase):
+    def test_linear_source_skill_routes_async_approvals_before_linear_replay(self):
+        skill = (
+            SCRIPT.parents[1]
+            / "skills"
+            / "linear-source-request-routing"
+            / "SKILL.md"
+        ).read_text()
+        wake_rule = next(
+            line for line in skill.splitlines() if line.startswith("6. On a Kanban wake")
+        )
+        self.assertIn(
+            "replay the literal original five-field `ops_broker` request once",
+            wake_rule,
+        )
+        self.assertIn("only after that result reports `ready=true`", wake_rule)
+        self.assertIn("For every other Linear task wake", wake_rule)
+
     def test_calendar_source_skill_requires_literal_user_identifiers(self):
         skill = " ".join(
             (
