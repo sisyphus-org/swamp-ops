@@ -758,10 +758,20 @@ class PolicyTests(unittest.TestCase):
         runbook = (
             Path(__file__).parents[1] / "docs" / "ops-broker.md"
         ).read_text()
-        self.assertIn("generate one new peer token", runbook)
-        self.assertIn("restore it in default `A2A_PEER_TOKENS`", runbook)
-        self.assertIn("update that peer's `OPS_BROKER_A2A_TOKEN`", runbook)
-        self.assertIn("restart both default and that peer Gateway", runbook)
+        steps = [
+            "generate one new peer token",
+            "restore it in default `A2A_PEER_TOKENS`",
+            "update that peer's `OPS_BROKER_A2A_TOKEN`",
+            "restore the identity in `A2A_TRUSTED_PEERS`",
+            "restart both default and that peer Gateway",
+            "only then re-enable the peer",
+        ]
+        for step in steps:
+            self.assertIn(step, runbook)
+        positions = [runbook.index(step) for step in steps]
+        self.assertTrue(
+            all(left < right for left, right in zip(positions, positions[1:]))
+        )
 
 
 class ExecutionTests(unittest.TestCase):
