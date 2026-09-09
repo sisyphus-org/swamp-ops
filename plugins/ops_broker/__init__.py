@@ -138,10 +138,16 @@ def handle_ops_broker(args: dict[str, Any], **kwargs: Any) -> str:
         ).expanduser().resolve()
         workspace = configured_workspace
         _verify_runtime_workspace(policy, workspace)
-        audit_path = _path_from_env(
-            "OPS_BROKER_AUDIT",
-            hermes_home / "plugin-data" / "ops-broker" / "audit.jsonl",
-        )
+        audit_path_value = policy.get("auditPath")
+        if audit_path_value is not None:
+            if not isinstance(audit_path_value, str) or not audit_path_value:
+                raise BrokerError("audit path policy must be a non-empty string")
+            audit_path = Path(audit_path_value).expanduser().resolve()
+        else:
+            audit_path = _path_from_env(
+                "OPS_BROKER_AUDIT",
+                hermes_home / "plugin-data" / "ops-broker" / "audit.jsonl",
+            )
         preview_loader = kwargs.get("preview_loader") or (
             lambda reference, exact_session: _load_linear_delete_preview(
                 reference,
