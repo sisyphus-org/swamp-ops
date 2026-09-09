@@ -25,6 +25,9 @@ REPO_ROOT = Path(__file__).parents[1]
 SOURCE_PLUGIN = REPO_ROOT / "plugins" / "linear_source_route"
 SOURCE_SKILL = REPO_ROOT / "skills" / "linear-source-request-routing"
 CALENDAR_SOURCE_SKILL = REPO_ROOT / "skills" / "calendar-source-request-routing"
+OPERATIONS_SOURCE_SKILL = REPO_ROOT / "skills" / "operations-source-request-routing"
+OPERATIONS_MANAGER_PLUGIN = REPO_ROOT / "plugins" / "ops_broker"
+OPERATIONS_MANAGER_SKILL = REPO_ROOT / "skills" / "operations-manager-worker"
 PA_CALENDAR_PLUGIN = REPO_ROOT / "plugins" / "personal_assistant_calendar"
 PA_CALENDAR_SKILL = REPO_ROOT / "skills" / "personal-assistant-calendar-worker"
 HERMES_PYTHON = Path("/Users/hermes/.hermes/hermes-agent/venv/bin/python")
@@ -60,8 +63,6 @@ OPTIONAL_PROFILE_ENV_VARS = [
         "name": "TELEGRAM_ALLOWED_USERS",
         "purpose": "optional profile override for the shared Telegram allowlist",
     },
-    {"name": "GH_TOKEN", "purpose": "scoped GitHub access when the role needs it"},
-    {"name": "SWAMP_API_KEY", "purpose": "profile-scoped Swamp access when needed"},
     {"name": "XAI_API_KEY", "purpose": "xAI/Grok access when needed"},
 ]
 
@@ -181,6 +182,24 @@ kanban:
   dispatch_in_gateway: false
 
 """ + LINEAR_MCP_CONFIG,
+    "operations-manager": """\
+gateway:
+  multiplex_profiles: false
+  platforms:
+    telegram:
+      enabled: false
+
+kanban:
+  dispatch_in_gateway: false
+
+plugins:
+  enabled:
+    - ops-broker
+  disabled: []
+  entries:
+    ops-broker:
+      allow_tool_override: false
+""",
 }
 
 
@@ -299,6 +318,11 @@ def main() -> int:
             ["personal-assistant role requires canonical profile name 'personal-assistant'"],
             args.mode,
         )
+    if args.role == "operations-manager" and name != "operations-manager":
+        return fail(
+            ["operations-manager role requires canonical profile name 'operations-manager'"],
+            args.mode,
+        )
 
     try:
         provider, default_model = parse_model(args.model)
@@ -316,8 +340,12 @@ def main() -> int:
     source_routing_enabled = args.role == "general"
     calendar_worker_enabled = args.role == "personal-assistant"
     calendar_source_enabled = args.role == "general"
+    operations_worker_enabled = args.role == "operations-manager"
+    operations_source_enabled = args.role == "general"
     telegram_prepared = args.role == "general"
     profile_linear_present = env_has_key(profile_dir / ".env", "LINEAR_TOKEN")
+    profile_github_present = env_has_key(profile_dir / ".env", "GH_TOKEN")
+    profile_swamp_present = env_has_key(profile_dir / ".env", "SWAMP_API_KEY")
     shared_telegram_allowlist_present = env_has_key(
         SHARED_ENV, "TELEGRAM_ALLOWED_USERS"
     )
@@ -335,11 +363,26 @@ def main() -> int:
                 "purpose": "separately scoped Linear credential for Project Manager only",
             }
         ]
+    elif operations_worker_enabled:
+        required_profile_env = [
+            {
+                "name": "GH_TOKEN",
+                "required": True,
+                "purpose": "separately scoped GitHub credential for Operations Manager only",
+            },
+            {
+                "name": "SWAMP_API_KEY",
+                "required": True,
+                "purpose": "separately scoped Swamp credential for Operations Manager only",
+            },
+        ]
     elif telegram_prepared:
         required_profile_env = PROFILE_ENV_VARS
     else:
         required_profile_env = []
-    optional_profile_env = list(OPTIONAL_PROFILE_ENV_VARS)
+    optional_profile_env = (
+        list(OPTIONAL_PROFILE_ENV_VARS) if args.role == "general" else []
+    )
     owner_steps = [
         "authenticate the profile's model provider without copying auth files",
         "review and install the dedicated system LaunchDaemon draft",
@@ -370,6 +413,19 @@ def main() -> int:
                 "verify the reviewed Calendar workflow revision before activation",
                 "restart only the Personal Assistant Gateway after plugin installation",
                 "run owner-gated preview, same-session approval, replay, and cleanup proof",
+            ]
+        )
+    if operations_worker_enabled:
+        owner_steps[:0] = [
+            f"create {profile_dir / '.env'} with separately scoped GH_TOKEN and SWAMP_API_KEY",
+            "chmod 600 the profile .env",
+        ]
+        owner_steps.extend(
+            [
+                "verify the reviewed immutable runtime revision before activation",
+                "restart operations-manager only after plugin installation",
+                "restart broker after the worker toolset is installed",
+                "run real routed read-only GitHub and Swamp operations plus negative capability probes",
             ]
         )
     planned = {
@@ -420,6 +476,25 @@ def main() -> int:
             "directGoogleAccessAvailable": calendar_worker_enabled,
             "directLinearAccessAvailable": False,
         },
+        "operationsRouting": {
+            "enabled": operations_source_enabled or operations_worker_enabled,
+            "sourceTool": "ops_broker" if operations_source_enabled else None,
+            "sourceSkill": "operations-source-request-routing" if operations_source_enabled else None,
+            "workerPlugin": "ops-broker" if operations_worker_enabled else None,
+            "workerSkill": "operations-manager-worker" if operations_worker_enabled else None,
+            "workerProfile": "operations-manager",
+            "dispatcherProfile": "broker",
+            "workerEnabled": operations_worker_enabled,
+            "dispatcherEnabled": False,
+            "ownerAuthority": False,
+            "directExecutionAvailable": operations_worker_enabled,
+            "profileGitHubTokenPresent": (
+                profile_github_present if operations_worker_enabled else None
+            ),
+            "profileSwampTokenPresent": (
+                profile_swamp_present if operations_worker_enabled else None
+            ),
+        },
         "verificationGates": (
             [
                 "run config check and a real model response",
@@ -442,6 +517,14 @@ def main() -> int:
                 "verify a real Project Manager Linear read with exact read-back",
             ]
             if linear_enabled
+            else [
+                "run config check and a real model response",
+                "run a real Russian STT transcription",
+                "verify profile-local GH_TOKEN and SWAMP_API_KEY presence without exposing values",
+                "run Plugin Doctor and read back ops-broker enabled only in operations-manager",
+                "verify routed GitHub and Swamp read-back, exact-session wake, replay, and negative probes",
+            ]
+            if operations_worker_enabled
             else []
         ),
         "telegram": {
@@ -451,6 +534,7 @@ def main() -> int:
                 "broker",
                 "personal-assistant",
                 "project-manager",
+                "operations-manager",
             },
         },
         "telegramAllowlist": {
@@ -512,6 +596,10 @@ def main() -> int:
                 CALENDAR_SOURCE_SKILL,
                 profile_dir / "skills" / CALENDAR_SOURCE_SKILL.name,
             )
+            shutil.copytree(
+                OPERATIONS_SOURCE_SKILL,
+                profile_dir / "skills" / OPERATIONS_SOURCE_SKILL.name,
+            )
         if calendar_worker_enabled:
             shutil.copytree(
                 PA_CALENDAR_PLUGIN,
@@ -520,6 +608,15 @@ def main() -> int:
             shutil.copytree(
                 PA_CALENDAR_SKILL,
                 profile_dir / "skills" / PA_CALENDAR_SKILL.name,
+            )
+        if operations_worker_enabled:
+            shutil.copytree(
+                OPERATIONS_MANAGER_PLUGIN,
+                profile_dir / "plugins" / OPERATIONS_MANAGER_PLUGIN.name,
+            )
+            shutil.copytree(
+                OPERATIONS_MANAGER_SKILL,
+                profile_dir / "skills" / OPERATIONS_MANAGER_SKILL.name,
             )
     except OSError as exc:
         if created:

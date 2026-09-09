@@ -7,6 +7,6 @@ tags:
   domain: infrastructure
   integration: github-cloudflare
   safety: checksum-bound-plan-and-approval-gated-apply
-  owner: default-broker
+  owner: operations-manager
 globalArguments: {}
 methods: {}

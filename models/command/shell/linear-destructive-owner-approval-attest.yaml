@@ -6,6 +6,6 @@ version: 1
 tags:
   domain: linear
   safety: owner-approved-attestation-only
-  owner: default-broker
+  owner: operations-manager
 globalArguments: {}
 methods: {}

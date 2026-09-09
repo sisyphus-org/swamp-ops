@@ -112,7 +112,10 @@ class CalendarSourcePluginTests(unittest.TestCase):
     def test_plugin_registers_bounded_calendar_source_tool(self):
         registry = Registry()
         register(registry)
-        self.assertEqual(set(registry.tools), {"linear_source_request", "calendar_source_request"})
+        self.assertEqual(
+            set(registry.tools),
+            {"linear_source_request", "calendar_source_request", "ops_broker"},
+        )
         schema = CALENDAR_SOURCE_REQUEST_SCHEMA["parameters"]
         self.assertIn("standalone", CALENDAR_SOURCE_REQUEST_SCHEMA["description"].lower())
         self.assertIn("no second confirmation", CALENDAR_SOURCE_REQUEST_SCHEMA["description"].lower())

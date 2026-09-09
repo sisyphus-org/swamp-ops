@@ -11,6 +11,7 @@ from .calendar_route import (
     approval_plan_write_identity,
     route_calendar_request,
 )
+from .ops_route import OperationsRouteError, route_operations_request
 from .route import (
     COMMENT_REQUEST,
     CREDENTIAL_SHAPES,
@@ -2874,6 +2875,78 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
         )
 
 
+OPS_BROKER_SOURCE_SCHEMA = {
+    "name": "ops_broker",
+    "description": (
+        "Route one typed, policy-allowlisted GitHub or Swamp operation through "
+        "the credential-free Kanban broker to Operations Manager. The source "
+        "profile never receives shared integration credentials or executes the operation."
+    ),
+    "parameters": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "request_id": {"type": "string", "format": "uuid"},
+            "integration": {"type": "string", "enum": ["github", "swamp"]},
+            "operation": {
+                "type": "string",
+                "enum": [
+                    "repository_access", "list_pull_requests", "pull_request_checks",
+                    "auth_whoami", "validate_model", "validate_workflow",
+                    "run_readonly_workflow", "plan_github_cloudflare_repository",
+                    "start_github_cloudflare_repository_apply",
+                    "approve_github_cloudflare_repository_apply",
+                    "plan_linear_destructive_owner_approval",
+                    "start_linear_destructive_owner_approval_attest",
+                    "approve_linear_destructive_owner_approval_attest",
+                    "approve_linear_delete_preview", "approve_linear_bulk_preview",
+                    "get_result",
+                ],
+            },
+            "arguments": {"type": "object", "maxProperties": 6},
+            "mode": {"type": "string", "enum": ["plan", "apply"]},
+        },
+        "required": ["request_id", "integration", "operation", "arguments", "mode"],
+    },
+}
+
+
+def handle_operations_source_request(args: dict[str, Any], **kwargs: Any) -> str:
+    """Route GitHub/Swamp work without local execution or credential access."""
+    try:
+        if not isinstance(args, dict):
+            raise OperationsRouteError("tool input must be an object")
+        session_getter = kwargs.get("session_getter") or _default_session_getter
+        runtime_profile_getter = kwargs.get("runtime_profile_getter") or _default_runtime_profile_getter
+        source = _source_context(
+            handler_session_id=str(kwargs.get("session_id") or ""),
+            runtime_profile=str(runtime_profile_getter() or ""),
+            session_getter=session_getter,
+        )
+        board_factory = kwargs.get("board_factory") or HermesKanbanBoard
+        board = board_factory(source_profile=source.profile)
+        return json.dumps(
+            route_operations_request(dict(args), source=source, board=board),
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    except OperationsRouteError as exc:
+        return json.dumps(
+            {"status": "rejected", "message": str(exc)},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    except Exception:
+        return json.dumps(
+            {
+                "status": "rejected",
+                "message": "GitHub or Swamp routing is unavailable or outside the safe capability.",
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+
+
 CALENDAR_SOURCE_REQUEST_SCHEMA = {
     "name": "calendar_source_request",
     "description": (
@@ -2995,4 +3068,12 @@ def register(ctx: Any) -> None:
         handler=handle_calendar_source_request,
         description=CALENDAR_SOURCE_REQUEST_SCHEMA["description"],
         emoji="📅",
+    )
+    ctx.register_tool(
+        name="ops_broker",
+        toolset="linear-source-route",
+        schema=OPS_BROKER_SOURCE_SCHEMA,
+        handler=handle_operations_source_request,
+        description=OPS_BROKER_SOURCE_SCHEMA["description"],
+        emoji="🛡️",
     )

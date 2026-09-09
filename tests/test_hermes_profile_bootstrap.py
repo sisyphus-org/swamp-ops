@@ -277,6 +277,64 @@ class BootstrapContractTests(unittest.TestCase):
         )
         self.assertFalse(profile_dir.exists())
 
+    def test_operations_manager_role_is_canonical_headless_executor(self):
+        rendered = bootstrap.render_config(
+            "openai-codex",
+            "gpt-5.6-sol-900k",
+            Path("/Users/hermes/workspaces"),
+            role="operations-manager",
+        )
+        parsed = yaml.safe_load(rendered)
+        self.assertFalse(parsed["gateway"]["platforms"]["telegram"]["enabled"])
+        self.assertFalse(parsed["kanban"]["dispatch_in_gateway"])
+        self.assertNotIn("mcp_servers", parsed)
+        self.assertNotIn("secrets", parsed)
+        self.assertEqual(parsed["plugins"]["enabled"], ["ops-broker"])
+
+        old_argv = sys.argv
+        old_root = bootstrap.HERMES_ROOT
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                bootstrap.HERMES_ROOT = Path(tmp) / "profiles"
+                sys.argv = [
+                    str(SCRIPT), "--profile", "operations-manager",
+                    "--role", "operations-manager", "--mode", "plan",
+                ]
+                with contextlib.redirect_stdout(io.StringIO()) as output:
+                    self.assertEqual(bootstrap.main(), 0)
+                payload = json.loads(output.getvalue())
+        finally:
+            bootstrap.HERMES_ROOT = old_root
+            sys.argv = old_argv
+        self.assertEqual(
+            {item["name"] for item in payload["requiredProfileEnv"]},
+            {"GH_TOKEN", "SWAMP_API_KEY"},
+        )
+        self.assertTrue(payload["operationsRouting"]["workerEnabled"])
+        self.assertEqual(payload["operationsRouting"]["workerProfile"], "operations-manager")
+        self.assertFalse(payload["operationsRouting"]["dispatcherEnabled"])
+        self.assertFalse(payload["operationsRouting"]["ownerAuthority"])
+        self.assertFalse(payload["operationsRouting"]["profileGitHubTokenPresent"])
+        self.assertFalse(payload["operationsRouting"]["profileSwampTokenPresent"])
+
+    def test_operations_manager_role_rejects_noncanonical_profile_name(self):
+        old_argv = sys.argv
+        old_root = bootstrap.HERMES_ROOT
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                bootstrap.HERMES_ROOT = Path(tmp) / "profiles"
+                sys.argv = [
+                    str(SCRIPT), "--profile", "ops-fixture",
+                    "--role", "operations-manager", "--mode", "plan",
+                ]
+                with contextlib.redirect_stdout(io.StringIO()) as output:
+                    self.assertEqual(bootstrap.main(), 1)
+                payload = json.loads(output.getvalue())
+        finally:
+            bootstrap.HERMES_ROOT = old_root
+            sys.argv = old_argv
+        self.assertIn("canonical profile name", payload["issues"][0])
+
     def test_broker_plan_requires_no_shared_or_profile_secrets(self):
         proc = subprocess.run(
             [
@@ -406,7 +464,7 @@ class BootstrapContractTests(unittest.TestCase):
         parsed = yaml.safe_load(workflow_path.read_text())
         self.assertEqual(
             parsed["inputs"]["role"]["enum"],
-            ["general", "broker", "personal-assistant", "project-manager"],
+            ["general", "broker", "operations-manager", "personal-assistant", "project-manager"],
         )
         command = parsed["jobs"][0]["steps"][0]["task"]["inputs"]["run"]
         self.assertIn("--role '${{ inputs.role }}'", command)
@@ -441,6 +499,9 @@ class BootstrapContractTests(unittest.TestCase):
                 self.assertTrue((profile / "config.yaml").is_file())
                 self.assertTrue((profile / "plugins" / "linear_source_route" / "plugin.yaml").is_file())
                 self.assertTrue((profile / "skills" / "linear-source-request-routing" / "SKILL.md").is_file())
+                self.assertTrue((profile / "skills" / "operations-source-request-routing" / "SKILL.md").is_file())
+                self.assertNotIn("GH_TOKEN", (profile / "config.yaml").read_text())
+                self.assertNotIn("SWAMP_API_KEY", (profile / "config.yaml").read_text())
                 self.assertFalse((profile / ".env").exists())
                 self.assertEqual((profile / "config.yaml").stat().st_mode & 0o777, 0o600)
 
@@ -453,6 +514,34 @@ class BootstrapContractTests(unittest.TestCase):
                 setattr(bootstrap, "HERMES_ROOT", old_root)
                 setattr(bootstrap, "SHARED_ENV", old_shared_env)
                 sys.argv = old_argv
+    def test_apply_installs_operations_manager_worker_without_secrets(self):
+        old_root = bootstrap.HERMES_ROOT
+        old_argv = sys.argv
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                bootstrap.HERMES_ROOT = Path(tmp) / "profiles"
+                sys.argv = [
+                    str(SCRIPT), "--profile", "operations-manager",
+                    "--role", "operations-manager", "--mode", "apply",
+                ]
+                with contextlib.redirect_stdout(io.StringIO()) as output:
+                    self.assertEqual(bootstrap.main(), 0)
+                profile = bootstrap.HERMES_ROOT / "operations-manager"
+                self.assertTrue((profile / "plugins" / "ops_broker" / "plugin.yaml").is_file())
+                self.assertTrue((profile / "skills" / "operations-manager-worker" / "SKILL.md").is_file())
+                self.assertFalse((profile / ".env").exists())
+                parsed = yaml.safe_load((profile / "config.yaml").read_text())
+                self.assertEqual(parsed["plugins"]["enabled"], ["ops-broker"])
+                self.assertFalse(parsed["kanban"]["dispatch_in_gateway"])
+                payload = json.loads(output.getvalue())
+                self.assertEqual(
+                    {item["name"] for item in payload["requiredProfileEnv"]},
+                    {"GH_TOKEN", "SWAMP_API_KEY"},
+                )
+        finally:
+            bootstrap.HERMES_ROOT = old_root
+            sys.argv = old_argv
+
     def test_apply_installs_personal_assistant_worker_plugin_and_skill(self):
         old_root = bootstrap.HERMES_ROOT
         old_argv = sys.argv

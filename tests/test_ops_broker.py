@@ -739,7 +739,7 @@ class PolicyTests(unittest.TestCase):
         self.assertNotEqual(policy["workspace"], "/Users/hermes/workspaces/swamp-ops")
         self.assertEqual(
             policy["workspaceRevisionFile"],
-            "/Users/hermes/.hermes/plugin-data/ops-broker/runtime-revision",
+            "/Users/hermes/.hermes/profiles/operations-manager/plugin-data/ops-broker/runtime-revision",
         )
         self.assertEqual(
             policy["swamp"]["repositoryBootstrapWorkflow"],
@@ -754,24 +754,18 @@ class PolicyTests(unittest.TestCase):
             policy["swamp"]["data"],
         )
 
-    def test_peer_rotation_runbook_updates_both_ends_before_reenable(self):
+    def test_runbook_removes_direct_a2a_executor_and_keeps_broker_unprivileged(self):
         runbook = (
             Path(__file__).parents[1] / "docs" / "ops-broker.md"
         ).read_text()
-        steps = [
-            "generate one new peer token",
-            "restore it in default `A2A_PEER_TOKENS`",
-            "update that peer's `OPS_BROKER_A2A_TOKEN`",
-            "restore the identity in `A2A_TRUSTED_PEERS`",
-            "restart both default and that peer Gateway",
-            "only then re-enable the peer",
-        ]
-        for step in steps:
-            self.assertIn(step, runbook)
-        positions = [runbook.index(step) for step in steps]
-        self.assertTrue(
-            all(left < right for left, right in zip(positions, positions[1:]))
-        )
+        self.assertIn("`broker` has no operations plugin, A2A executor listener", runbook)
+        self.assertIn("Source profiles have no shared `GH_TOKEN`", runbook)
+        self.assertIn("Do not bypass Kanban", (
+            Path(__file__).parents[1]
+            / "skills" / "operations-source-request-routing" / "SKILL.md"
+        ).read_text())
+        self.assertNotIn("A2A_PEER_TOKENS", runbook)
+        self.assertNotIn("OPS_BROKER_A2A_TOKEN", runbook)
 
 
 class ExecutionTests(unittest.TestCase):
