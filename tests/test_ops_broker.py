@@ -754,6 +754,15 @@ class PolicyTests(unittest.TestCase):
             policy["swamp"]["data"],
         )
 
+    def test_peer_rotation_runbook_updates_both_ends_before_reenable(self):
+        runbook = (
+            Path(__file__).parents[1] / "docs" / "ops-broker.md"
+        ).read_text()
+        self.assertIn("generate one new peer token", runbook)
+        self.assertIn("restore it in default `A2A_PEER_TOKENS`", runbook)
+        self.assertIn("update that peer's `OPS_BROKER_A2A_TOKEN`", runbook)
+        self.assertIn("restart both default and that peer Gateway", runbook)
+
 
 class ExecutionTests(unittest.TestCase):
     def test_repository_access_uses_fixed_gh_argv(self):

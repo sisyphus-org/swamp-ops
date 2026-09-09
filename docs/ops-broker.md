@@ -307,7 +307,7 @@ It must identify each authenticated peer and contain no credential-shaped output
 ## Recovery and rotation
 
 - Plugin failure: disable `ops-broker`, remove A2A from secondary Telegram toolsets, restart affected gateways.
-- Revoke one peer: remove that identity from `A2A_PEER_TOKENS` and `A2A_TRUSTED_PEERS`, restart default, then rotate only that profile's `OPS_BROKER_A2A_TOKEN` before re-enabling it.
+- Revoke one peer: remove that identity from default `A2A_PEER_TOKENS` and `A2A_TRUSTED_PEERS`, then generate one new peer token, restore it in default `A2A_PEER_TOKENS`, update that peer's `OPS_BROKER_A2A_TOKEN`, restore the identity in `A2A_TRUSTED_PEERS`, restart both default and that peer Gateway, and only then re-enable the peer.
 - Suspected broker compromise: disable inbound A2A, rotate all peer tokens, then rotate every upstream credential the broker could use (`GH_TOKEN`/`GITHUB_TOKEN`, `SWAMP_API_KEY`).
 - Policy change: update `policy.json`, rerun unit tests and Plugin Doctor, reinstall the reviewed plugin version, restart default, and repeat negative tests.
 
