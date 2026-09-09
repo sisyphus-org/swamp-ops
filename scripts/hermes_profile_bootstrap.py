@@ -339,6 +339,11 @@ def main() -> int:
             ["personal-assistant role requires canonical profile name 'personal-assistant'"],
             args.mode,
         )
+    if args.role == "broker" and name != "broker":
+        return fail(
+            ["broker role requires canonical profile name 'broker'"],
+            args.mode,
+        )
 
     try:
         provider, default_model = parse_model(args.model)

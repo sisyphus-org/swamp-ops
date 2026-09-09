@@ -291,7 +291,7 @@ class BootstrapContractTests(unittest.TestCase):
                 sys.executable,
                 str(SCRIPT),
                 "--profile",
-                "broker-contract-test",
+                "broker",
                 "--role",
                 "broker",
                 "--mode",
@@ -477,12 +477,12 @@ class BootstrapContractTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmp:
                 setattr(bootstrap, "HERMES_ROOT", Path(tmp) / "profiles")
                 sys.argv = [
-                    str(SCRIPT), "--profile", "broker-contract-test",
+                    str(SCRIPT), "--profile", "broker",
                     "--role", "broker", "--mode", "apply",
                 ]
                 with contextlib.redirect_stdout(io.StringIO()) as output:
                     self.assertEqual(bootstrap.main(), 0)
-                profile = bootstrap.HERMES_ROOT / "broker-contract-test"
+                profile = bootstrap.HERMES_ROOT / "broker"
                 self.assertTrue(
                     (profile / "plugins" / "ops_broker" / "plugin.yaml").is_file()
                 )
@@ -492,6 +492,29 @@ class BootstrapContractTests(unittest.TestCase):
         finally:
             setattr(bootstrap, "HERMES_ROOT", old_root)
             sys.argv = old_argv
+
+    def test_broker_role_rejects_noncanonical_profile_name(self):
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "--profile",
+                "broker-contract-test",
+                "--role",
+                "broker",
+                "--mode",
+                "plan",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        payload = json.loads(proc.stdout)
+        self.assertIn(
+            "broker role requires canonical profile name 'broker'",
+            payload["issues"],
+        )
 
     def test_apply_installs_personal_assistant_worker_plugin_and_skill(self):
         old_root = bootstrap.HERMES_ROOT
