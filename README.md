@@ -4,7 +4,9 @@ Operational workflows and the reviewed Hermes operations-broker plugin. Runtime 
 
 ## `ops-broker`
 
-`plugins/ops_broker` is the narrow A2A capability surface for the trusted `default` Hermes Manager. It derives caller identity from the authenticated A2A session, validates an exact request contract, applies per-peer/target allowlists, executes only fixed `shell=False` argv, and writes secret-free audit records.
+`plugins/ops_broker` is the narrow A2A capability surface owned by the dedicated headless `broker` profile. It derives caller identity from the authenticated A2A session, validates an exact request contract, applies per-peer/target allowlists, executes only fixed `shell=False` argv, and writes secret-free audit records under broker-owned profile state.
+
+The production package has two fail-closed policies. `policy.json` is the broker executor policy: it accepts authenticated `default`, `swe`, `ideas`, `books`, and `crypto-analyst` peers but contains no owner principal or approval capability. `policy-owner-bridge.json` is installed only in `default`; it accepts only the exact owner Telegram identity and only the four approval operations required to preserve same-session destructive Linear and repository gates. Default no longer exposes the shared inbound A2A broker endpoint.
 
 The initial surface is read-only: GitHub repository/PR/check reads and allowlisted Swamp identity/validation/run/result operations. `mode: apply`, arbitrary commands, URLs, credentials, and unlisted targets fail closed.
 
@@ -22,7 +24,7 @@ Writes are scoped to `/Users/hermes/.hermes/profiles/<name>/` only; existing pro
 Role baselines fail closed:
 
 - `general`: universal Linear plus Calendar source-routing plugin/skills enabled, Telegram allowlist-only shared fallback, and no Linear MCP, `LINEAR_TOKEN`, Google client, or Google OAuth injection.
-- `broker`: Telegram explicitly disabled, dispatcher left disabled for the separate cutover slice, and no Linear MCP, Google client, or shared secret helper.
+- `broker`: Telegram explicitly disabled; sole Kanban dispatcher and localhost A2A `ops-broker` endpoint enabled; broker plugin installed; no Linear MCP, Google client, or shared secret helper. Its `GH_TOKEN`, `SWAMP_API_KEY`, and A2A credentials are separately scoped and owner-provided.
 - `personal-assistant`: headless Calendar worker plugin/skill enabled; existing profile-local Google OAuth is not copied by bootstrap, and Linear MCP/client/credentials are absent. This role is accepted only for the canonical profile name `personal-assistant`, matching task assignment and runtime attestation paths.
 - `project-manager`: Linear MCP enabled through the profile-local `LINEAR_TOKEN`; Telegram explicitly disabled.
 

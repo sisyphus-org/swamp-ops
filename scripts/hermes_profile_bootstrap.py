@@ -27,6 +27,7 @@ SOURCE_SKILL = REPO_ROOT / "skills" / "linear-source-request-routing"
 CALENDAR_SOURCE_SKILL = REPO_ROOT / "skills" / "calendar-source-request-routing"
 PA_CALENDAR_PLUGIN = REPO_ROOT / "plugins" / "personal_assistant_calendar"
 PA_CALENDAR_SKILL = REPO_ROOT / "skills" / "personal-assistant-calendar-worker"
+OPS_BROKER_PLUGIN = REPO_ROOT / "plugins" / "ops_broker"
 HERMES_PYTHON = Path("/Users/hermes/.hermes/hermes-agent/venv/bin/python")
 DEFAULT_MODEL = "openai-codex/gpt-5.6-sol-900k"
 DEFAULT_WORKSPACE = WORKSPACES_ROOT
@@ -63,6 +64,28 @@ OPTIONAL_PROFILE_ENV_VARS = [
     {"name": "GH_TOKEN", "purpose": "scoped GitHub access when the role needs it"},
     {"name": "SWAMP_API_KEY", "purpose": "profile-scoped Swamp access when needed"},
     {"name": "XAI_API_KEY", "purpose": "xAI/Grok access when needed"},
+]
+BROKER_PROFILE_ENV_VARS = [
+    {
+        "name": "GH_TOKEN",
+        "required": True,
+        "purpose": "separately scoped GitHub credential for broker operations",
+    },
+    {
+        "name": "SWAMP_API_KEY",
+        "required": True,
+        "purpose": "broker-owned Swamp credential",
+    },
+    {
+        "name": "A2A_PEER_TOKENS",
+        "required": True,
+        "purpose": "distinct inbound credentials for approved source profiles",
+    },
+    {
+        "name": "A2A_TRUSTED_PEERS",
+        "required": True,
+        "purpose": "exact allowlist matching the inbound peer credentials",
+    },
 ]
 
 BASELINE_CONFIG = """\
@@ -146,10 +169,27 @@ gateway:
   platforms:
     telegram:
       enabled: false
+    a2a:
+      enabled: true
+      extra:
+        port: 9900
+        advertised_toolsets:
+          - ops-broker
 
-# SIS-58 performs the production single-dispatcher cutover.
 kanban:
-  dispatch_in_gateway: false
+  dispatch_in_gateway: true
+
+platform_toolsets:
+  a2a:
+    - ops-broker
+
+plugins:
+  enabled:
+    - ops-broker
+  disabled: []
+  entries:
+    ops-broker:
+      allow_tool_override: false
 """,
     "personal-assistant": """\
 gateway:
@@ -299,6 +339,11 @@ def main() -> int:
             ["personal-assistant role requires canonical profile name 'personal-assistant'"],
             args.mode,
         )
+    if args.role == "broker" and name != "broker":
+        return fail(
+            ["broker role requires canonical profile name 'broker'"],
+            args.mode,
+        )
 
     try:
         provider, default_model = parse_model(args.model)
@@ -316,6 +361,7 @@ def main() -> int:
     source_routing_enabled = args.role == "general"
     calendar_worker_enabled = args.role == "personal-assistant"
     calendar_source_enabled = args.role == "general"
+    operations_broker_enabled = args.role == "broker"
     telegram_prepared = args.role == "general"
     profile_linear_present = env_has_key(profile_dir / ".env", "LINEAR_TOKEN")
     shared_telegram_allowlist_present = env_has_key(
@@ -327,7 +373,9 @@ def main() -> int:
             f"TELEGRAM_ALLOWED_USERS is missing from {SHARED_ENV}"
         )
     required_shared_env = SHARED_ENV_VARS if args.role == "general" else []
-    if args.role == "project-manager":
+    if operations_broker_enabled:
+        required_profile_env = BROKER_PROFILE_ENV_VARS
+    elif args.role == "project-manager":
         required_profile_env = [
             {
                 "name": "LINEAR_TOKEN",
@@ -355,6 +403,12 @@ def main() -> int:
         owner_steps[:0] = [
             f"create {profile_dir / '.env'} with a separately scoped LINEAR_TOKEN",
             "chmod 600 the profile .env",
+        ]
+    if operations_broker_enabled:
+        owner_steps[:0] = [
+            f"create {profile_dir / '.env'} with separately scoped GH_TOKEN and SWAMP_API_KEY plus fresh per-peer A2A credentials",
+            "chmod 600 the profile .env",
+            "verify swamp auth whoami and one bounded GitHub read without exposing credentials",
         ]
     if source_routing_enabled:
         owner_steps.extend(
@@ -409,6 +463,14 @@ def main() -> int:
             ),
             "directLinearMutationAvailable": False if source_routing_enabled else None,
         },
+        "operationsBroker": {
+            "enabled": operations_broker_enabled,
+            "profile": "broker" if operations_broker_enabled else None,
+            "plugin": "ops-broker" if operations_broker_enabled else None,
+            "a2aEnabled": operations_broker_enabled,
+            "soleDispatcher": operations_broker_enabled,
+            "usesSharedCredentials": False if operations_broker_enabled else None,
+        },
         "calendarRouting": {
             "enabled": calendar_source_enabled or calendar_worker_enabled,
             "sourceToolPlugin": "linear-source-route" if calendar_source_enabled else None,
@@ -442,6 +504,14 @@ def main() -> int:
                 "verify a real Project Manager Linear read with exact read-back",
             ]
             if linear_enabled
+            else [
+                "run config check and a real model response",
+                "run a real Russian STT transcription",
+                "run Plugin Doctor and verify ops-broker is the only advertised A2A toolset",
+                "verify separately scoped broker GitHub and Swamp reads",
+                "verify one dispatcher lock owner and one real request from every configured peer",
+            ]
+            if operations_broker_enabled
             else []
         ),
         "telegram": {
@@ -520,6 +590,11 @@ def main() -> int:
             shutil.copytree(
                 PA_CALENDAR_SKILL,
                 profile_dir / "skills" / PA_CALENDAR_SKILL.name,
+            )
+        if operations_broker_enabled:
+            shutil.copytree(
+                OPS_BROKER_PLUGIN,
+                profile_dir / "plugins" / OPS_BROKER_PLUGIN.name,
             )
     except OSError as exc:
         if created:

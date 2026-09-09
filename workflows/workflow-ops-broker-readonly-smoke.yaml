@@ -6,7 +6,7 @@ description: >-
 tags:
   domain: hermes-platform
   safety: read-only
-  owner: default
+  owner: broker
 jobs:
   - name: main
     description: Verify the broker workflow runtime with a fixed command.

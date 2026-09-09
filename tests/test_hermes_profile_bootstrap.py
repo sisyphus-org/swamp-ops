@@ -75,7 +75,7 @@ class BootstrapContractTests(unittest.TestCase):
         self.assertIn("dispatch_in_gateway: false", rendered)
         self.assertEqual(yaml.safe_load(rendered)["_config_version"], 38)
 
-    def test_broker_role_is_headless_and_has_no_linear_mcp(self):
+    def test_broker_role_owns_dispatcher_and_operations_broker(self):
         rendered = bootstrap.render_config(
             "openai-codex",
             "gpt-5.6-sol-900k",
@@ -84,7 +84,15 @@ class BootstrapContractTests(unittest.TestCase):
         )
         parsed = yaml.safe_load(rendered)
         self.assertFalse(parsed["gateway"]["platforms"]["telegram"]["enabled"])
-        self.assertFalse(parsed["kanban"]["dispatch_in_gateway"])
+        self.assertTrue(parsed["gateway"]["platforms"]["a2a"]["enabled"])
+        self.assertEqual(parsed["gateway"]["platforms"]["a2a"]["extra"]["port"], 9900)
+        self.assertEqual(
+            parsed["gateway"]["platforms"]["a2a"]["extra"]["advertised_toolsets"],
+            ["ops-broker"],
+        )
+        self.assertEqual(parsed["platform_toolsets"]["a2a"], ["ops-broker"])
+        self.assertTrue(parsed["kanban"]["dispatch_in_gateway"])
+        self.assertEqual(parsed["plugins"]["enabled"], ["ops-broker"])
         self.assertNotIn("mcp_servers", parsed)
         self.assertNotIn("secrets", parsed)
 
@@ -277,13 +285,13 @@ class BootstrapContractTests(unittest.TestCase):
         )
         self.assertFalse(profile_dir.exists())
 
-    def test_broker_plan_requires_no_shared_or_profile_secrets(self):
+    def test_broker_plan_requires_separately_scoped_operations_credentials(self):
         proc = subprocess.run(
             [
                 sys.executable,
                 str(SCRIPT),
                 "--profile",
-                "broker-contract-test",
+                "broker",
                 "--role",
                 "broker",
                 "--mode",
@@ -296,7 +304,15 @@ class BootstrapContractTests(unittest.TestCase):
         payload = json.loads(proc.stdout)
         self.assertEqual(payload["role"], "broker")
         self.assertEqual(payload["requiredSharedEnv"], [])
-        self.assertEqual(payload["requiredProfileEnv"], [])
+        self.assertEqual(
+            [item["name"] for item in payload["requiredProfileEnv"]],
+            ["GH_TOKEN", "SWAMP_API_KEY", "A2A_PEER_TOKENS", "A2A_TRUSTED_PEERS"],
+        )
+        self.assertEqual(payload["operationsBroker"]["profile"], "broker")
+        self.assertEqual(payload["operationsBroker"]["plugin"], "ops-broker")
+        self.assertTrue(payload["operationsBroker"]["a2aEnabled"])
+        self.assertTrue(payload["operationsBroker"]["soleDispatcher"])
+        self.assertFalse(payload["operationsBroker"]["usesSharedCredentials"])
         self.assertFalse(payload["linear"]["enabled"])
         self.assertFalse(payload["telegram"]["preparedForOwnerToken"])
         self.assertFalse(payload["telegramAllowlist"]["profileOverrideSupported"])
@@ -453,6 +469,53 @@ class BootstrapContractTests(unittest.TestCase):
                 setattr(bootstrap, "HERMES_ROOT", old_root)
                 setattr(bootstrap, "SHARED_ENV", old_shared_env)
                 sys.argv = old_argv
+
+    def test_apply_installs_operations_broker_only_in_broker_profile(self):
+        old_root = bootstrap.HERMES_ROOT
+        old_argv = sys.argv
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                setattr(bootstrap, "HERMES_ROOT", Path(tmp) / "profiles")
+                sys.argv = [
+                    str(SCRIPT), "--profile", "broker",
+                    "--role", "broker", "--mode", "apply",
+                ]
+                with contextlib.redirect_stdout(io.StringIO()) as output:
+                    self.assertEqual(bootstrap.main(), 0)
+                profile = bootstrap.HERMES_ROOT / "broker"
+                self.assertTrue(
+                    (profile / "plugins" / "ops_broker" / "plugin.yaml").is_file()
+                )
+                self.assertFalse((profile / ".env").exists())
+                payload = json.loads(output.getvalue())
+                self.assertTrue(payload["operationsBroker"]["enabled"])
+        finally:
+            setattr(bootstrap, "HERMES_ROOT", old_root)
+            sys.argv = old_argv
+
+    def test_broker_role_rejects_noncanonical_profile_name(self):
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "--profile",
+                "broker-contract-test",
+                "--role",
+                "broker",
+                "--mode",
+                "plan",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        payload = json.loads(proc.stdout)
+        self.assertIn(
+            "broker role requires canonical profile name 'broker'",
+            payload["issues"],
+        )
+
     def test_apply_installs_personal_assistant_worker_plugin_and_skill(self):
         old_root = bootstrap.HERMES_ROOT
         old_argv = sys.argv

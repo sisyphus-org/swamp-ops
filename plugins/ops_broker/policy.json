@@ -1,16 +1,10 @@
 {
   "version": 1,
   "workspace": "/Users/hermes/workspaces/swamp-ops-runtime",
-  "workspaceRevisionFile": "/Users/hermes/.hermes/plugin-data/ops-broker/runtime-revision",
-  "ownerIdentities": [
-    {
-      "source": "telegram",
-      "user_id": "442308262",
-      "caller": "owner"
-    }
-  ],
+  "workspaceRevisionFile": "/Users/hermes/.hermes/profiles/broker/plugin-data/ops-broker/runtime-revision",
+  "ownerIdentities": [],
   "peers": {
-    "owner": {
+    "default": {
       "operations": [
         "github.repository_access",
         "github.list_pull_requests",
@@ -21,12 +15,8 @@
         "swamp.run_readonly_workflow",
         "swamp.plan_github_cloudflare_repository",
         "swamp.start_github_cloudflare_repository_apply",
-        "swamp.approve_github_cloudflare_repository_apply",
         "swamp.plan_linear_destructive_owner_approval",
         "swamp.start_linear_destructive_owner_approval_attest",
-        "swamp.approve_linear_destructive_owner_approval_attest",
-        "swamp.approve_linear_delete_preview",
-        "swamp.approve_linear_bulk_preview",
         "swamp.get_result"
       ]
     },
@@ -105,5 +95,6 @@
         "name": "result"
       }
     ]
-  }
+  },
+  "auditPath": "/Users/hermes/.hermes/profiles/broker/plugin-data/ops-broker/audit.jsonl"
 }

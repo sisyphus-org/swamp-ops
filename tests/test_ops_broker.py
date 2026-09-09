@@ -714,9 +714,10 @@ class CommandConstructionTests(unittest.TestCase):
 
 
 class PolicyTests(unittest.TestCase):
-    def test_repository_plan_start_are_swe_capabilities_but_approval_is_owner_only(self):
-        path = Path(__file__).parents[1] / "plugins" / "ops_broker" / "policy.json"
-        policy = json.loads(path.read_text())
+    def test_broker_policy_excludes_owner_approval_and_uses_profile_local_runtime_state(self):
+        root = Path(__file__).parents[1] / "plugins" / "ops_broker"
+        policy = json.loads((root / "policy.json").read_text())
+        owner_policy = json.loads((root / "policy-owner-bridge.json").read_text())
         plan_operation = "swamp.plan_github_cloudflare_repository"
         start_operation = "swamp.start_github_cloudflare_repository_apply"
         approve_operation = "swamp.approve_github_cloudflare_repository_apply"
@@ -724,11 +725,10 @@ class PolicyTests(unittest.TestCase):
         self.assertIn(plan_operation, policy["peers"]["swe"]["operations"])
         self.assertIn(start_operation, policy["peers"]["swe"]["operations"])
         self.assertNotIn(approve_operation, policy["peers"]["swe"]["operations"])
-        self.assertIn(approve_operation, policy["peers"]["owner"]["operations"])
-        self.assertEqual(
-            policy["ownerIdentities"],
-            [{"source": "telegram", "user_id": "442308262", "caller": "owner"}],
-        )
+        self.assertIn(plan_operation, policy["peers"]["default"]["operations"])
+        self.assertNotIn(approve_operation, policy["peers"]["default"]["operations"])
+        self.assertNotIn("owner", policy["peers"])
+        self.assertEqual(policy["ownerIdentities"], [])
         for peer in ("books", "crypto-analyst", "ideas"):
             self.assertNotIn(plan_operation, policy["peers"][peer]["operations"])
             self.assertNotIn(start_operation, policy["peers"][peer]["operations"])
@@ -737,9 +737,28 @@ class PolicyTests(unittest.TestCase):
             policy["workspace"], "/Users/hermes/workspaces/swamp-ops-runtime"
         )
         self.assertNotEqual(policy["workspace"], "/Users/hermes/workspaces/swamp-ops")
+        broker_state = "/Users/hermes/.hermes/profiles/broker/plugin-data/ops-broker"
+        self.assertEqual(policy["workspaceRevisionFile"], f"{broker_state}/runtime-revision")
+        self.assertEqual(policy["auditPath"], f"{broker_state}/audit.jsonl")
+
         self.assertEqual(
-            policy["workspaceRevisionFile"],
-            "/Users/hermes/.hermes/plugin-data/ops-broker/runtime-revision",
+            owner_policy["ownerIdentities"],
+            [{"source": "telegram", "user_id": "442308262", "caller": "owner"}],
+        )
+        self.assertEqual(set(owner_policy["peers"]), {"owner"})
+        owner_operations = set(owner_policy["peers"]["owner"]["operations"])
+        self.assertEqual(
+            owner_operations,
+            {
+                "swamp.approve_github_cloudflare_repository_apply",
+                "swamp.approve_linear_destructive_owner_approval_attest",
+                "swamp.approve_linear_delete_preview",
+                "swamp.approve_linear_bulk_preview",
+            },
+        )
+        self.assertEqual(owner_policy["auditPath"], policy["auditPath"])
+        self.assertEqual(
+            owner_policy["workspaceRevisionFile"], policy["workspaceRevisionFile"]
         )
         self.assertEqual(
             policy["swamp"]["repositoryBootstrapWorkflow"],
@@ -753,6 +772,17 @@ class PolicyTests(unittest.TestCase):
             {"model": "github-cloudflare-repo-bootstrap", "name": "result"},
             policy["swamp"]["data"],
         )
+
+    def test_operations_broker_metadata_names_broker_as_runtime_owner(self):
+        root = Path(__file__).parents[1]
+        model = (root / "models" / "command" / "shell" / "ops-broker-readonly-smoke.yaml").read_text()
+        workflow = (root / "workflows" / "workflow-ops-broker-readonly-smoke.yaml").read_text()
+        self.assertIn("owner: broker", model)
+        self.assertIn("owner: broker", workflow)
+        self.assertNotIn("owner: default", model)
+        self.assertNotIn("owner: default", workflow)
+        plugin_yaml = (root / "plugins" / "ops_broker" / "plugin.yaml").read_text()
+        self.assertIn("version: 0.9.0", plugin_yaml)
 
 
 class ExecutionTests(unittest.TestCase):
@@ -1218,6 +1248,16 @@ class ApplyBrokerTests(unittest.TestCase):
                 / "policy.json"
             ).read_text()
         )
+        owner_policy = json.loads(
+            (
+                Path(__file__).parents[1]
+                / "plugins"
+                / "ops_broker"
+                / "policy-owner-bridge.json"
+            ).read_text()
+        )
+        self.policy["peers"].update(owner_policy["peers"])
+        self.policy["ownerIdentities"] = owner_policy["ownerIdentities"]
         self.plan_run_id = "11111111-1111-4111-8111-111111111111"
         self.apply_run_id = "22222222-2222-4222-8222-222222222222"
         self.plan = repository_plan(ready=True)
@@ -1723,6 +1763,7 @@ class PluginHandlerTests(unittest.TestCase):
             revision = "a" * 40
             revision_file = root / "runtime-revision"
             revision_file.write_text(revision + "\n")
+            policy_audit_path = root / "broker-state" / "audit.jsonl"
             policy = {
                 "peers": {
                     "swe": {"operations": ["github.repository_access"]}
@@ -1730,6 +1771,7 @@ class PluginHandlerTests(unittest.TestCase):
                 "github": {"repositories": ["sisyphus-org/swamp-ops"]},
                 "workspace": str(root),
                 "workspaceRevisionFile": str(revision_file),
+                "auditPath": str(policy_audit_path),
             }
             policy_path = root / "policy.json"
             policy_path.write_text(json.dumps(policy))
@@ -1742,7 +1784,7 @@ class PluginHandlerTests(unittest.TestCase):
                     }
                 )
             )
-            audit_path = root / "audit.jsonl"
+            untrusted_audit_path = root / "untrusted-audit.jsonl"
 
             def runner(argv, **_kwargs):
                 if argv == ["git", "rev-parse", "HEAD"]:
@@ -1761,7 +1803,7 @@ class PluginHandlerTests(unittest.TestCase):
                     "HERMES_HOME": str(root),
                     "OPS_BROKER_POLICY": str(untrusted_policy_path),
                     "OPS_BROKER_WORKSPACE": "/Users/hermes/workspaces/swamp-ops",
-                    "OPS_BROKER_AUDIT": str(audit_path),
+                    "OPS_BROKER_AUDIT": str(untrusted_audit_path),
                 },
                 clear=False,
             ), mock.patch(
@@ -1786,6 +1828,8 @@ class PluginHandlerTests(unittest.TestCase):
             self.assertEqual(result["caller"], "swe")
             self.assertEqual(result["status"], "ok")
             self.assertEqual(runner_mock.call_args.kwargs["cwd"], root.resolve())
+            self.assertTrue(policy_audit_path.is_file())
+            self.assertFalse(untrusted_audit_path.exists())
 
     def test_handler_returns_typed_rejection_on_command_timeout(self):
         request = {
