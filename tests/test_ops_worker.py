@@ -44,6 +44,18 @@ class Lifecycle:
 
 
 class OperationsManagerWorkerTests(unittest.TestCase):
+    def test_source_worker_and_policy_share_exact_owner_identity_contract(self):
+        root = Path(__file__).parents[1] / "plugins"
+        source_identity = json.loads(
+            (root / "linear_source_route" / "operations_owner_identity.json").read_text()
+        )
+        worker_identity = json.loads(
+            (root / "ops_broker" / "operations_owner_identity.json").read_text()
+        )
+        policy = json.loads((root / "ops_broker" / "policy.json").read_text())
+        self.assertEqual(source_identity, worker_identity)
+        self.assertEqual(policy["ownerIdentities"], [worker_identity])
+
     def environ(self, db_path):
         return {
             "HERMES_PROFILE": "operations-manager",
@@ -77,7 +89,13 @@ class OperationsManagerWorkerTests(unittest.TestCase):
             policy = {
                 "workspace": str(root),
                 "workspaceRevisionFile": str(root / "revision"),
-                "ownerIdentities": [],
+                "ownerIdentities": [
+                    {
+                        "source": "telegram",
+                        "user_id": "442308262",
+                        "caller": "owner",
+                    }
+                ],
                 "peers": {
                     "swe": {"operations": ["github.repository_access"]}
                 },

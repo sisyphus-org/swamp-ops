@@ -7,13 +7,14 @@ import json
 import re
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 from .route import SourceContext, validate_source_context
 
 
 OWNER_PROFILE = "default"
-OWNER_USER_ID = "442308262"
+PLUGIN_ROOT = Path(__file__).resolve().parent
 UUID = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
 )
@@ -86,9 +87,28 @@ def _canonical_hash(value: Any) -> str:
     ).hexdigest()
 
 
+def _owner_identity() -> dict[str, str]:
+    try:
+        identity = json.loads(
+            (PLUGIN_ROOT / "operations_owner_identity.json").read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError) as exc:
+        raise OperationsRouteError("operations owner identity contract is unavailable") from exc
+    if (
+        not isinstance(identity, dict)
+        or set(identity) != {"source", "user_id", "caller"}
+        or identity.get("source") != "telegram"
+        or identity.get("caller") != "owner"
+        or not isinstance(identity.get("user_id"), str)
+        or not identity["user_id"].isdigit()
+    ):
+        raise OperationsRouteError("operations owner identity contract is invalid")
+    return identity
+
+
 def _caller(source: SourceContext) -> str:
     if source.profile == OWNER_PROFILE:
-        if source.user_id != OWNER_USER_ID:
+        if source.user_id != _owner_identity()["user_id"]:
             raise OperationsRouteError("default operations routing requires authenticated owner")
         return "owner"
     return source.profile
@@ -204,7 +224,17 @@ def _load_completed(
             "source_profile",
             "source_session_id",
             "caller",
-            "request",
+        )
+    ):
+        raise OperationsRouteError("completed operations replay does not match its command")
+    persisted_request = persisted.get("request")
+    incoming_request = command.get("request")
+    if (
+        not isinstance(persisted_request, dict)
+        or not isinstance(incoming_request, dict)
+        or any(
+            persisted_request.get(field) != incoming_request.get(field)
+            for field in ("integration", "operation", "arguments", "mode")
         )
     ):
         raise OperationsRouteError("completed operations replay does not match its command")

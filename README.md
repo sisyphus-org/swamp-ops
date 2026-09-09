@@ -4,7 +4,7 @@ Operational workflows and the reviewed Hermes operations-broker plugin. Runtime 
 
 ## `ops-broker`
 
-`plugins/ops_broker` is the no-argument Kanban worker for the canonical headless `operations-manager` profile. User-facing profiles expose the public `ops_broker` contract through `linear-source-route`; that source tool persists an exact-session task, the credential-free `broker` dispatches it, and Operations Manager alone executes the fixed `shell=False` GitHub/Swamp operation with profile-local credentials.
+`plugins/ops_broker` is the no-argument Kanban worker for the canonical headless `operations-manager` profile; like the other specialists, it needs no standalone Gateway. User-facing profiles expose the public `ops_broker` contract through `linear-source-route`; that source tool persists an exact-session task, the credential-free `broker` dispatches it, and Operations Manager alone executes the fixed `shell=False` GitHub/Swamp operation with profile-local credentials.
 
 The policy remains bounded: GitHub repository/PR/check reads, allowlisted Swamp identity/validation/run/result operations, and the existing checksum/approval-gated apply lanes. Arbitrary commands, URLs, credentials, caller identity, and unlisted targets fail closed. `default` and ordinary source profiles do not execute these operations; `broker` is transport only.
 
@@ -22,7 +22,7 @@ Writes are scoped to `/Users/hermes/.hermes/profiles/<name>/` only; existing pro
 Role baselines fail closed:
 
 - `general`: universal Linear plus Calendar source-routing plugin/skills enabled, Telegram allowlist-only shared fallback, and no Linear MCP, `LINEAR_TOKEN`, Google client, or Google OAuth injection.
-- `broker`: Telegram explicitly disabled, dispatcher left disabled for the separate cutover slice, and no Linear MCP, Google client, or shared secret helper.
+- `broker`: canonical headless, credential-free profile with the sole dispatcher enabled and no integration plugin, Telegram, Linear MCP, Google client, or shared secret helper.
 - `operations-manager`: canonical headless GitHub/Swamp worker with the `ops-broker` plugin, Telegram and dispatcher disabled, and separately scoped profile-local `GH_TOKEN`/`SWAMP_API_KEY` required before activation.
 - `personal-assistant`: headless Calendar worker plugin/skill enabled; existing profile-local Google OAuth is not copied by bootstrap, and Linear MCP/client/credentials are absent. This role is accepted only for the canonical profile name `personal-assistant`, matching task assignment and runtime attestation paths.
 - `project-manager`: Linear MCP enabled through the profile-local `LINEAR_TOKEN`; Telegram explicitly disabled.

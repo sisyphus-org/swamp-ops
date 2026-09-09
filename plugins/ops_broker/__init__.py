@@ -223,7 +223,30 @@ COMMAND_UUID = re.compile(
 )
 COMMAND_KEY = re.compile(r"^operations:v1:[0-9a-f]{32}$")
 SOURCE_PROFILE = re.compile(r"^[a-z][a-z0-9-]{1,30}$")
-OWNER_USER_ID = "442308262"
+
+
+def _owner_identity() -> dict[str, str]:
+    try:
+        identity = json.loads(
+            (PLUGIN_ROOT / "operations_owner_identity.json").read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError("operations owner identity contract is unavailable") from exc
+    if (
+        not isinstance(identity, dict)
+        or set(identity) != {"source", "user_id", "caller"}
+        or identity.get("source") != "telegram"
+        or identity.get("caller") != "owner"
+        or not isinstance(identity.get("user_id"), str)
+        or not identity["user_id"].isdigit()
+    ):
+        raise RuntimeError("operations owner identity contract is invalid")
+    return identity
+
+
+def _validate_policy_owner_identity(policy: dict[str, Any]) -> None:
+    if policy.get("ownerIdentities") != [_owner_identity()]:
+        raise RuntimeError("operations owner identity policy does not match the installed contract")
 
 
 def _task_value(task: Any, field: str) -> Any:
@@ -363,7 +386,10 @@ def _verify_source_route(
     ):
         return False
     if command["caller"] == "owner":
-        if source_profile != "default" or str(row["user_id"]) != OWNER_USER_ID:
+        if (
+            source_profile != "default"
+            or str(row["user_id"]) != _owner_identity()["user_id"]
+        ):
             return False
     elif command["caller"] != source_profile:
         return False
@@ -509,6 +535,7 @@ def handle_om_ops_execute(args: dict[str, Any], **kwargs: Any) -> str:
         policy = kwargs.get("policy")
         if policy is None:
             policy = json.loads((PLUGIN_ROOT / "policy.json").read_text(encoding="utf-8"))
+        _validate_policy_owner_identity(policy)
         workspace = Path(
             str(kwargs.get("workspace") or policy.get("workspace") or DEFAULT_WORKSPACE)
         ).expanduser().resolve()

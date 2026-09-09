@@ -84,9 +84,27 @@ class BootstrapContractTests(unittest.TestCase):
         )
         parsed = yaml.safe_load(rendered)
         self.assertFalse(parsed["gateway"]["platforms"]["telegram"]["enabled"])
-        self.assertFalse(parsed["kanban"]["dispatch_in_gateway"])
+        self.assertTrue(parsed["kanban"]["dispatch_in_gateway"])
         self.assertNotIn("mcp_servers", parsed)
         self.assertNotIn("secrets", parsed)
+
+    def test_broker_role_rejects_noncanonical_profile_name(self):
+        old_argv = sys.argv
+        old_root = bootstrap.HERMES_ROOT
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                bootstrap.HERMES_ROOT = Path(tmp) / "profiles"
+                sys.argv = [
+                    str(SCRIPT), "--profile", "broker-fixture",
+                    "--role", "broker", "--mode", "plan",
+                ]
+                with contextlib.redirect_stdout(io.StringIO()) as output:
+                    self.assertEqual(bootstrap.main(), 1)
+                payload = json.loads(output.getvalue())
+        finally:
+            bootstrap.HERMES_ROOT = old_root
+            sys.argv = old_argv
+        self.assertIn("canonical profile name", payload["issues"][0])
 
     def test_personal_assistant_role_is_calendar_only_and_has_no_linear_access(self):
         rendered = bootstrap.render_config(
@@ -316,6 +334,11 @@ class BootstrapContractTests(unittest.TestCase):
         self.assertFalse(payload["operationsRouting"]["ownerAuthority"])
         self.assertFalse(payload["operationsRouting"]["profileGitHubTokenPresent"])
         self.assertFalse(payload["operationsRouting"]["profileSwampTokenPresent"])
+        self.assertFalse(payload["operationsRouting"]["standaloneGatewayRequired"])
+        self.assertNotIn(
+            "operations-manager gateway",
+            " ".join(payload["ownerStepsBeforeActivation"]).lower(),
+        )
 
     def test_operations_manager_role_rejects_noncanonical_profile_name(self):
         old_argv = sys.argv
@@ -341,7 +364,7 @@ class BootstrapContractTests(unittest.TestCase):
                 sys.executable,
                 str(SCRIPT),
                 "--profile",
-                "broker-contract-test",
+                "broker",
                 "--role",
                 "broker",
                 "--mode",

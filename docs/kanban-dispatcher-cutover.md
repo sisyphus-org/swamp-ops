@@ -9,12 +9,14 @@ Exactly one profile may have `kanban.dispatch_in_gateway=true`:
 | Profile | Dispatch |
 |---|---:|
 | `broker` | `true` |
+| `operations-manager` | `false` |
 | `default` | `false` |
 | `ideas` | `false` |
 | `swe` | `false` |
 | `books` | `false` |
 | `crypto-analyst` | `false` |
 | `project-manager` | `false` |
+| `personal-assistant` | `false` |
 
 The lock is `/Users/hermes/.hermes/kanban/.dispatcher.lock`. Notification delivery remains profile-owned; disabling dispatch does not disable a profile's notifier.
 
@@ -39,7 +41,7 @@ The committed audit is fixed to the production profile roster and paths. It perf
 
 The board must be empty or intentionally drained before cutover.
 
-1. Back up all seven configs.
+1. Back up all nine configs.
 2. Set all profiles to explicit `false`, then set `broker=true` using `hermes config set`.
 3. Restart the previous lock owner first so it releases the lock.
 4. Restart the other non-broker Gateways.

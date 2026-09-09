@@ -7,7 +7,7 @@ SIS-62 moves shared GitHub and Swamp execution out of `default` without turning 
 | profile | transport | execution | credentials | prohibited |
 |---|---|---|---|---|
 | `broker` | sole Kanban dispatcher/task bus | dispatch only | no GitHub, Swamp, Linear, Google, or Telegram credentials | integration clients, owner approval, profile work |
-| `operations-manager` | receives broker-dispatched operations tasks | sole bounded GitHub/Swamp executor | separately scoped profile-local `GH_TOKEN` and `SWAMP_API_KEY` | Telegram, Kanban dispatch, Linear, Calendar |
+| `operations-manager` | receives broker-dispatched operations tasks as a spawned worker; no standalone Gateway | sole bounded GitHub/Swamp executor | separately scoped profile-local `GH_TOKEN` and `SWAMP_API_KEY` | Telegram, Gateway dispatch, Kanban dispatch, Linear, Calendar |
 | `default` | source task + exact-session wake | source validation and owner authority only | source/Telegram credentials only after cutover | shared GitHub/Swamp execution |
 | other source profiles | source task + exact-session wake | source validation only | profile-local source credentials | shared GitHub/Swamp execution |
 | `project-manager` | receives Linear tasks | Linear only | `LINEAR_TOKEN` | GitHub/Swamp/Calendar |
@@ -78,7 +78,7 @@ Do not deploy from a feature worktree. The rollout begins only after the PR is m
 5. Remove/disable the legacy direct `ops-broker` executor from `default` in the same availability-preserving cutover. Do not run both public `ops_broker` tools in one profile.
 6. Write the Operations Manager runtime revision marker only after byte-for-byte plugin checks and Plugin Doctor pass.
 7. Validate every changed profile config before restart.
-8. Owner restarts `operations-manager`, then each changed source Gateway, then `broker` last so its long-lived worker-toolset resolver sees `om_ops_execute`.
+8. No Operations Manager Gateway is installed or restarted. Owner restarts each changed source Gateway, then `broker` last so its long-lived worker-toolset resolver sees `om_ops_execute` in the worker profile.
 9. Revoke the legacy default GitHub/Swamp credentials only after routed live verification succeeds and no rollback is needed.
 
 Gateway/LaunchDaemon changes remain owner-controlled. The repository workflow does not write `.env`, install services, or restart processes.

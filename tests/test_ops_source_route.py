@@ -146,7 +146,13 @@ class OperationsSourceRouteTests(unittest.TestCase):
             "body": body,
             "result": json.dumps(result, sort_keys=True),
         }
-        replay = route_operations_request(REQUEST, source=source(), board=FakeBoard(task))
+        replay_request = {
+            **REQUEST,
+            "request_id": "41058213-709a-47c1-a541-fd15f9169527",
+        }
+        replay = route_operations_request(
+            replay_request, source=source(), board=FakeBoard(task)
+        )
         self.assertEqual(replay["status"], "completed")
         self.assertEqual(replay["operation"], "github.repository_access")
         self.assertEqual(replay["result"], result["result"])

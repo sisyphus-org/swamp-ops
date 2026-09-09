@@ -148,9 +148,9 @@ gateway:
     telegram:
       enabled: false
 
-# SIS-58 performs the production single-dispatcher cutover.
+# Broker is the sole dispatcher in the established production topology.
 kanban:
-  dispatch_in_gateway: false
+  dispatch_in_gateway: true
 """,
     "personal-assistant": """\
 gateway:
@@ -313,6 +313,11 @@ def main() -> int:
             [f"profile name '{name}' must match [a-z][a-z0-9-]{{1,30}}"],
             args.mode,
         )
+    if args.role == "broker" and name != "broker":
+        return fail(
+            ["broker role requires canonical profile name 'broker'"],
+            args.mode,
+        )
     if args.role == "personal-assistant" and name != "personal-assistant":
         return fail(
             ["personal-assistant role requires canonical profile name 'personal-assistant'"],
@@ -416,18 +421,15 @@ def main() -> int:
             ]
         )
     if operations_worker_enabled:
-        owner_steps[:0] = [
+        owner_steps = [
             f"create {profile_dir / '.env'} with separately scoped GH_TOKEN and SWAMP_API_KEY",
             "chmod 600 the profile .env",
+            "authenticate the profile's model provider without copying auth files",
+            "run config check, a real model response, and a real Russian STT transcription",
+            "verify the reviewed immutable runtime revision and installed worker plugin",
+            "restart broker after the worker toolset is installed",
+            "run real routed read-only GitHub and Swamp operations plus negative capability probes",
         ]
-        owner_steps.extend(
-            [
-                "verify the reviewed immutable runtime revision before activation",
-                "restart operations-manager only after plugin installation",
-                "restart broker after the worker toolset is installed",
-                "run real routed read-only GitHub and Swamp operations plus negative capability probes",
-            ]
-        )
     planned = {
         "profile": name,
         "role": args.role,
@@ -488,6 +490,7 @@ def main() -> int:
             "dispatcherEnabled": False,
             "ownerAuthority": False,
             "directExecutionAvailable": operations_worker_enabled,
+            "standaloneGatewayRequired": False if operations_worker_enabled else None,
             "profileGitHubTokenPresent": (
                 profile_github_present if operations_worker_enabled else None
             ),
