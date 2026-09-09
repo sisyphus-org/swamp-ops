@@ -1,9 +1,10 @@
 name: linear-source-route
-version: 1.8.2
+version: 2.0.0
 description: >-
-  Exact-session ingress for bounded Linear and Personal Assistant Calendar routes.
+  Exact-session ingress for bounded Linear, Calendar, and GitHub/Swamp routes.
 author: sisyphus-org
 kind: backend
 provides_tools:
   - linear_source_request
   - calendar_source_request
+  - ops_broker

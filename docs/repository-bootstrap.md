@@ -78,7 +78,7 @@ A successful repository includes:
 - No arbitrary shell, URLs, organization, reviewer, secret names, template path or workflow names.
 - The production Worker is `<repository-prefix>-<96-bit nonce>` and is capped at Cloudflare's 54-character limit for scripts with previews enabled. Its exact name and URL are generated in the read-only plan, rendered into `wrangler.jsonc`, and bound by the plan/rendered checksums. This avoids collision with a pre-existing Worker without Cloudflare API or secret access.
 - The bootstrap never reads or manages GitHub/Cloudflare secret values, metadata, visibility, or repository grants. Generated workflows reference fixed organization secret names; availability is proved only by deployment and runtime verification.
-- SWE receives only an A2A peer token and typed results, never GitHub/Swamp/Cloudflare credentials.
+- SWE receives only the credential-free `ops_broker` source tool and typed exact-session results; the request travels through Kanban and `broker` to `operations-manager`, and SWE never receives GitHub/Swamp/Cloudflare credentials.
 - Plan performs reads only.
 - Apply reloads the immutable artifact and rechecks plan, template and rendered checksums before its first write.
 - No automatic destructive rollback. Partial-state recovery is a separately reviewed owner operation.

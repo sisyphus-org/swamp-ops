@@ -21,7 +21,9 @@ PROFILES = [
     "books",
     "crypto-analyst",
     "broker",
+    "operations-manager",
     "project-manager",
+    "personal-assistant",
 ]
 EXPECTED_OWNER = "broker"
 

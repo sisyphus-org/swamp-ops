@@ -9,7 +9,7 @@ tags:
   domain: infrastructure
   integration: github-cloudflare
   safety: approval-gated-write
-  owner: default-broker
+  owner: operations-manager
 inputs:
   type: object
   properties:

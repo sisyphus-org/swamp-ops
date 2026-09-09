@@ -4,9 +4,9 @@ Operational workflows and the reviewed Hermes operations-broker plugin. Runtime 
 
 ## `ops-broker`
 
-`plugins/ops_broker` is the narrow A2A capability surface for the trusted `default` Hermes Manager. It derives caller identity from the authenticated A2A session, validates an exact request contract, applies per-peer/target allowlists, executes only fixed `shell=False` argv, and writes secret-free audit records.
+`plugins/ops_broker` is the no-argument Kanban worker for the canonical headless `operations-manager` profile; like the other specialists, it needs no standalone Gateway. User-facing profiles expose the public `ops_broker` contract through `linear-source-route`; that source tool persists an exact-session task, the credential-free `broker` dispatches it, and Operations Manager alone executes the fixed `shell=False` GitHub/Swamp operation with profile-local credentials.
 
-The initial surface is read-only: GitHub repository/PR/check reads and allowlisted Swamp identity/validation/run/result operations. `mode: apply`, arbitrary commands, URLs, credentials, and unlisted targets fail closed.
+The policy remains bounded: GitHub repository/PR/check reads, allowlisted Swamp identity/validation/run/result operations, and the existing checksum/approval-gated apply lanes. Arbitrary commands, URLs, credentials, caller identity, and unlisted targets fail closed. `default` and ordinary source profiles do not execute these operations; `broker` is transport only.
 
 The deterministic Swamp smoke workflow is `ops-broker-readonly-smoke`. Installation, peer-token setup, A2A configuration, verification, recovery, and remote-access constraints are documented in [`docs/ops-broker.md`](docs/ops-broker.md).
 
@@ -14,7 +14,7 @@ The deterministic Swamp smoke workflow is `ops-broker-readonly-smoke`. Installat
 
 Deterministic bootstrap of a new Hermes profile. Two-phase usage:
 
-1. `swamp workflow run hermes-profile-bootstrap --input profile=<name> --input role=<general|broker|personal-assistant|project-manager>` — read-only **plan** (default in the committed workflow).
+1. `swamp workflow run hermes-profile-bootstrap --input profile=<name> --input role=<general|broker|operations-manager|personal-assistant|project-manager>` — read-only **plan** (default in the committed workflow).
 2. After reviewing the plan, run the deterministic script with the same profile and role plus `--mode apply`; it creates only the new profile directory and refuses overwrite.
 
 Writes are scoped to `/Users/hermes/.hermes/profiles/<name>/` only; existing profiles are never overwritten. Every role receives config version 38, `openai-codex/gpt-5.6-sol-900k`, local Qwen3-ASR (`ru`), terminal cwd under `/Users/hermes/workspaces`, and the keyless free fallback chain (`laguna-s-2.1-free`, `nemotron-3.5-lightning-free` via `opencode-free`).
@@ -22,7 +22,8 @@ Writes are scoped to `/Users/hermes/.hermes/profiles/<name>/` only; existing pro
 Role baselines fail closed:
 
 - `general`: universal Linear plus Calendar source-routing plugin/skills enabled, Telegram allowlist-only shared fallback, and no Linear MCP, `LINEAR_TOKEN`, Google client, or Google OAuth injection.
-- `broker`: Telegram explicitly disabled, dispatcher left disabled for the separate cutover slice, and no Linear MCP, Google client, or shared secret helper.
+- `broker`: canonical headless, credential-free profile with the sole dispatcher enabled and no integration plugin, Telegram, Linear MCP, Google client, or shared secret helper.
+- `operations-manager`: canonical headless GitHub/Swamp worker with the `ops-broker` plugin, Telegram and dispatcher disabled, and separately scoped profile-local `GH_TOKEN`/`SWAMP_API_KEY` required before activation.
 - `personal-assistant`: headless Calendar worker plugin/skill enabled; existing profile-local Google OAuth is not copied by bootstrap, and Linear MCP/client/credentials are absent. This role is accepted only for the canonical profile name `personal-assistant`, matching task assignment and runtime attestation paths.
 - `project-manager`: Linear MCP enabled through the profile-local `LINEAR_TOKEN`; Telegram explicitly disabled.
 
@@ -47,7 +48,7 @@ Source: `scripts/chunked_qwen_stt.py`. Operations/audit entry point: `scripts/ch
 
 ## `kanban-dispatcher-audit`
 
-Deterministic read-only production audit for the SIS-58 single-dispatcher topology. It checks the fixed seven-profile roster, requires every `kanban.dispatch_in_gateway` value to be explicit, requires only `broker=true`, and resolves the sole holder of `/Users/hermes/.hermes/kanban/.dispatcher.lock` back to its gateway profile.
+Deterministic read-only production audit for the SIS-58 single-dispatcher topology. It checks the fixed nine-profile roster, requires every `kanban.dispatch_in_gateway` value to be explicit, requires only `broker=true`, and resolves the sole holder of `/Users/hermes/.hermes/kanban/.dispatcher.lock` back to its gateway profile.
 
 ```bash
 swamp model validate kanban-dispatcher-audit

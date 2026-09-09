@@ -6,7 +6,7 @@ description: >-
 tags:
   domain: linear
   safety: approval-gated-attestation-only
-  owner: default-broker
+  owner: operations-manager
 inputs:
   type: object
   properties:

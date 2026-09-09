@@ -18,7 +18,7 @@ COMMENT_REQUEST = re.compile(
 )
 SESSION_ID = re.compile(r"^[0-9]{8}_[0-9]{6}_[a-f0-9]{8}$")
 PROFILE_NAME = re.compile(r"^[a-z][a-z0-9-]{1,30}$")
-SPECIAL_PROFILES = {"broker", "project-manager"}
+SPECIAL_PROFILES = {"broker", "project-manager", "operations-manager", "personal-assistant"}
 NUMERIC_ID = re.compile(r"^[1-9][0-9]*$")
 LINEAR_DELETE_APPROVAL_REFERENCE = re.compile(
     r"^linear-delete-approval:v1:[0-9a-f]{64}$"

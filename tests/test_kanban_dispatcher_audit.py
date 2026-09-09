@@ -21,6 +21,11 @@ SPEC.loader.exec_module(audit)
 
 
 class DispatcherConfigTests(unittest.TestCase):
+    def test_fixed_roster_includes_all_specialists(self):
+        self.assertIn("operations-manager", audit.PROFILES)
+        self.assertIn("project-manager", audit.PROFILES)
+        self.assertIn("personal-assistant", audit.PROFILES)
+
     def test_parse_dispatch_flag_requires_explicit_boolean(self):
         self.assertIs(audit.parse_dispatch_flag("kanban:\n  dispatch_in_gateway: true\n"), True)
         self.assertIs(audit.parse_dispatch_flag("kanban:\n  dispatch_in_gateway: false\n"), False)

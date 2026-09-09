@@ -1,9 +1,8 @@
 name: ops-broker
-version: 0.8.0
+version: 1.0.0
 description: >-
-  Typed, policy-allowlisted operations broker for authenticated A2A peers.
-  Adds owner-only Swamp attestation and opaque preview confirmation for bounded destructive Linear operations without granting Linear mutation capability.
+  Operations Manager worker for typed, broker-dispatched GitHub and Swamp tasks.
 author: sisyphus-org
 kind: backend
 provides_tools:
-  - ops_broker
+  - om_ops_execute

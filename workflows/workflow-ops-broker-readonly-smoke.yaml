@@ -6,7 +6,7 @@ description: >-
 tags:
   domain: hermes-platform
   safety: read-only
-  owner: default
+  owner: operations-manager
 jobs:
   - name: main
     description: Verify the broker workflow runtime with a fixed command.
@@ -19,7 +19,7 @@ jobs:
           methodName: execute
           inputs:
             run: python3 scripts/ops_broker_readonly_smoke.py
-            workingDir: /Users/hermes/workspaces/swamp-ops
+            workingDir: .
             timeout: 60000
             ignoreExitCode: false
         dependsOn: []

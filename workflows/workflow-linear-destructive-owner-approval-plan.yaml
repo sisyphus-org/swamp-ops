@@ -6,7 +6,7 @@ description: >-
 tags:
   domain: linear
   safety: read-only-plan
-  owner: default-broker
+  owner: operations-manager
 inputs:
   type: object
   properties:
