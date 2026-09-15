@@ -1,7 +1,7 @@
 ---
 name: linear-source-request-routing
 description: Route Linear reads/writes through broker and Project Manager.
-version: 1.5.0
+version: 1.6.0
 author: Alexey Petrov, Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -56,6 +56,8 @@ A requested outcome may require several supported writes. Never claim that the l
 5. create the issue in the exact project/milestone scope.
 
 Submit only one source request at a time. After `queued`, stop as required. On completion, obtain the sanitized result, then continue the ordered plan automatically after each wake until the requested outcome is complete. Do not make the owner repeat the request, manually create an entity that the lane can create, or choose between an invented capability blocker and partial execution. A blocker stops only the dependent remainder of the plan; after semantic re-resolution, continue from already verified completed steps rather than recreating them.
+
+For new `create_standalone_issue` and `converge_issue_tree` requests, project and milestone are selectors for existing scope, not content to rewrite: send exactly `{"name":"<exact name>"}` for each and never invent, copy, or send their descriptions. Description-bearing scope objects remain accepted only for literal replay or when the owner explicitly asked to constrain that existing description. For any of `converge_hierarchy`, `create_standalone_issue`, or `converge_issue_tree`, if a blocked result contains `recovery.action=retry_without_scope_description`, apply it automatically only when the owner did not ask to create or verify that scope description: remove the exact field named by `recovery.remove_field` from the original semantic request, preserve every other field and operation, and submit once. Removing means omitting the key entirely—never replace it with `""` or `null`. If the owner explicitly requested that description, report the conflict instead of weakening the constraint.
 
 ### Ambiguous post-write outcomes
 
@@ -127,8 +129,7 @@ Use short factual responses:
 
 - queued: `Принято, выполняю.`
 - completed: `Готово: <результат>. <canonical Linear URL>`
-- blocked: repeat the sanitized factual tool message concisely and without an
-  invented explanation.
+- blocked: first apply an applicable structured `recovery` exactly as defined above; if none applies, repeat the sanitized factual message concisely and without an invented explanation.
 
 If the user asked only to create or change something, do not explain how the internal route works.
 
