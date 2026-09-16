@@ -412,6 +412,15 @@ class GithubPublishTests(unittest.TestCase):
 
         self.assertEqual(gh_env.get("GH_TOKEN"), "github-fixture")
         self.assertNotIn("SWAMP_API_KEY", gh_env)
+        subprocess_home = (
+            "/Users/hermes/.hermes/profiles/operations-manager/"
+            "plugin-data/ops-broker/subprocess-home"
+        )
+        self.assertEqual(gh_env["HOME"], subprocess_home)
+        self.assertEqual(gh_env["XDG_CONFIG_HOME"], subprocess_home + "/config")
+        self.assertEqual(gh_env["XDG_STATE_HOME"], subprocess_home + "/state")
+        self.assertEqual(gh_env["XDG_CACHE_HOME"], subprocess_home + "/cache")
+        self.assertEqual(gh_env["GH_CONFIG_DIR"], subprocess_home + "/gh-config")
         self.assertNotIn("GH_TOKEN", git_env)
         self.assertNotIn("SWAMP_API_KEY", git_env)
         self.assertEqual(swamp_env.get("SWAMP_API_KEY"), "swamp-fixture")

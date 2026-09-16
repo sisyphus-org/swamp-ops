@@ -86,6 +86,19 @@ def default_runner(argv: list[str], *, cwd: Path, timeout: int) -> dict[str, Any
     }
     if argv and argv[0] == "gh":
         token = str(os.environ.get("GH_TOKEN") or "")
+        subprocess_home = (
+            "/Users/hermes/.hermes/profiles/operations-manager/"
+            "plugin-data/ops-broker/subprocess-home"
+        )
+        env.update(
+            {
+                "HOME": subprocess_home,
+                "XDG_CONFIG_HOME": f"{subprocess_home}/config",
+                "XDG_STATE_HOME": f"{subprocess_home}/state",
+                "XDG_CACHE_HOME": f"{subprocess_home}/cache",
+                "GH_CONFIG_DIR": f"{subprocess_home}/gh-config",
+            }
+        )
         if token:
             env["GH_TOKEN"] = token
     elif argv and argv[0] == "swamp":
