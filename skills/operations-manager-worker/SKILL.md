@@ -1,7 +1,7 @@
 ---
 name: operations-manager-worker
 description: Execute one persisted GitHub/Swamp operations task safely.
-version: 1.0.0
+version: 1.1.0
 ---
 
 # Operations Manager worker
@@ -15,3 +15,5 @@ You are running as the headless `operations-manager` specialist for one claimed 
 5. When the tool reports completed or blocked, stop. Never call Kanban lifecycle tools yourself.
 
 The `broker` profile is transport only. It must never receive Operations Manager credentials or execute this worker capability.
+
+GitHub publication remains entirely inside `om_ops_execute`: source workers never run `git push` or `gh`. Only an authenticated owner command may enter the publication lane. The executor binds exact `SIS-N` branch/head and `main`/base SHA provenance, disables repository hooks and implicit extra-ref behavior, sanitizes the Git environment, journals under a semantic lock, reconciles ambiguous writes by exact read-back, and creates or updates one exact same-repository non-draft PR.

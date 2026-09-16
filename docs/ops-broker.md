@@ -52,7 +52,9 @@ The semantic mutation key excludes the caller-provided request UUID and source d
 - `operations-manager` is the only profile with `om_ops_execute`; the worker accepts `{}` only and reads the command from the claimed Kanban task.
 - The worker requires canonical profile name `operations-manager`, exact task/run/claim binding, exact source wake route, and profile-local credential presence before provider execution.
 - GitHub repositories, Swamp models/workflows/data, modes, and owner-only operations remain policy allowlisted.
-- Commands use fixed `shell=False` argv. Arbitrary shell, URLs, environment access, caller fields, and credentials are rejected.
+- Only the authenticated owner/default session may call `github.publish_branch` and `github.upsert_pull_request`; SWE prepares and verifies code but cannot authorize publication. Publication binds an exact local `SIS-N` branch and full expected head SHA to an exact current `origin/main` base SHA, allowlisted repository, non-force single-ref push, delimiter-prefixed PR title, standalone canonical Linear URL, same-repository PR identities, and exact remote branch/PR read-back.
+- Network writes execute under a global semantic lock and hash-only journal. Ambiguous push/POST/PATCH outcomes are reconciled by exact read-back, and one blocked delivery receives one bounded reconciliation rerun.
+- Git push and head-to-base ancestry verification both run from fresh trusted temporary bare repositories which see only the already-verified commit objects through `GIT_ALTERNATE_OBJECT_DIRECTORIES`; caller-controlled repository-local config and replacement refs are never loaded. Ancestry also uses `--no-replace-objects`. Push receives a sanitized minimal environment, URL-parsed GitHub-host-and-repository-bound askpass, no system/global config, disabled credential helpers/hooks/follow-tags/submodule push, an explicit GitHub URL, and one exact refspec. Commands use fixed `shell=False` argv; arbitrary shell, URLs, environment access, caller fields, and credentials are rejected.
 - Runtime code comes only from the clean detached `/Users/hermes/workspaces/swamp-ops-runtime` checkout matching the Operations Manager revision marker.
 - Audit state lives under `/Users/hermes/.hermes/profiles/operations-manager/plugin-data/ops-broker/` and contains no command output or credentials.
 - Project Manager and Personal Assistant boundaries do not change.
@@ -95,6 +97,8 @@ Record evidence for each source profile:
 6. Literal source replay returns the same result with unchanged task/run/external-mutation counts.
 7. Default and ordinary source profiles cannot execute the provider operation locally or connect directly to Operations Manager.
 8. Audit contains the authenticated caller and operation but no credential-shaped content.
+
+For code publication, acceptance additionally requires: authenticated owner ingress; exact local branch/head and fetch/push origin preflight; exact current base SHA plus ancestry; hooks/follow-tags/submodule push disabled under a sanitized environment; non-force single-ref remote update; remote ref equality; one non-draft same-repository open PR with exact base/head/title/body; hash-only journal and semantic lock; reconciliation of ambiguous writes; one bounded blocked-task retry; literal replay without a second push or PR mutation; rejection of free-form branches, mismatched or delimiterless ticket titles, incomplete/embedded Linear links, credentials, arbitrary repositories/bases, force-push, merge, close, and branch deletion.
 
 ## Rollback
 

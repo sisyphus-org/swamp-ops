@@ -35,6 +35,7 @@ def source(profile="swe", user_id="442308262"):
 @dataclass
 class FakeBoard:
     existing: dict | None = None
+    blocked_events: int = 0
 
     def __post_init__(self):
         self.created_kwargs = None
@@ -63,8 +64,56 @@ class FakeBoard:
     def release(self, task_id, reason):
         self.released = (task_id, reason)
 
+    def block_count(self, task_id):
+        return self.blocked_events
+
 
 class OperationsSourceRouteTests(unittest.TestCase):
+    def test_blocked_publication_requeues_once_for_journal_reconciliation(self):
+        request = {
+            "request_id": "56040553-7de4-4849-a16d-a2a0ea8b749a",
+            "integration": "github",
+            "operation": "publish_branch",
+            "arguments": {
+                "repository": "sisyphus-org/swamp-ops",
+                "branch": "SIS-82",
+                "head_sha": "1" * 40,
+                "base": "main",
+                "base_sha": "2" * 40,
+            },
+            "mode": "apply",
+        }
+        first = FakeBoard()
+        route_operations_request(
+            request, source=source(profile="default"), board=first
+        )
+        existing = {
+            "id": "t_12345678",
+            "status": "blocked",
+            "session_id": source(profile="default").session_id,
+            "idempotency_key": first.created_kwargs["idempotency_key"],
+            "body": first.created_kwargs["body"],
+            "result": None,
+        }
+        retry = FakeBoard(existing=existing, blocked_events=1)
+        self.assertEqual(
+            route_operations_request(
+                request, source=source(profile="default"), board=retry
+            ),
+            {"status": "queued"},
+        )
+        self.assertEqual(retry.released[0], existing["id"])
+
+        exhausted = FakeBoard(existing=existing, blocked_events=2)
+        self.assertEqual(
+            route_operations_request(
+                request, source=source(profile="default"), board=exhausted
+            ),
+            {
+                "status": "blocked",
+                "message": "GitHub or Swamp operation failed safely.",
+            },
+        )
     def test_public_handler_uses_runtime_profile_and_exact_session(self):
         board = FakeBoard()
         values = {

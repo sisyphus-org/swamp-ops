@@ -15,6 +15,8 @@
         "github.repository_access",
         "github.list_pull_requests",
         "github.pull_request_checks",
+        "github.publish_branch",
+        "github.upsert_pull_request",
         "swamp.auth_whoami",
         "swamp.validate_model",
         "swamp.validate_workflow",
@@ -86,7 +88,12 @@
   "github": {
     "repositories": [
       "sisyphus-org/swamp-ops"
-    ]
+    ],
+    "pullRequestBases": {
+      "sisyphus-org/swamp-ops": [
+        "main"
+      ]
+    }
   },
   "swamp": {
     "repositoryBootstrapWorkflow": "github-cloudflare-repo-bootstrap",
