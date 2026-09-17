@@ -1589,11 +1589,30 @@ class PluginTests(unittest.TestCase):
                                 "minLength": 1,
                                 "maxLength": 200,
                             },
-                            "description": {"type": "string", "maxLength": 10000},
+                            "description": {
+                                "type": "string",
+                                "maxLength": 10000,
+                                "description": (
+                                    "Legacy literal replay or owner-requested scope constraint only; "
+                                    "omit from new existing-scope calls."
+                                ),
+                            },
                         },
                         "required": ["name"],
                     },
                 )
+        scoped_with_description = {
+            "operation": "create_standalone_issue",
+            "project": {"name": "Живопись", "description": "legacy exact detail"},
+            "milestone": {"name": "Романтизм"},
+            "issue": {
+                "title": "Франсиско Гойя",
+                "description": "",
+                "state": "Todo",
+                "priority": "Medium",
+            },
+        }
+        jsonschema.validate(scoped_with_description, parameters)
         entity_schema = parameters["properties"]["issue"]
         self.assertNotIn("id", entity_schema["properties"])
         self.assertNotIn("id", entity_schema["required"])
@@ -3067,6 +3086,34 @@ class PluginTests(unittest.TestCase):
             ),
             {"status": "blocked", "message": f"Не удалось выполнить: {reason}."},
         )
+
+    def test_scope_description_conflict_returns_machine_actionable_recovery(self):
+        for operation in (
+            "converge_hierarchy",
+            "create_standalone_issue",
+            "converge_issue_tree",
+        ):
+            for scope in ("project", "milestone"):
+                reason = f"{scope} supplied description conflicts with live state"
+                with self.subTest(operation=operation, scope=scope):
+                    self.assertEqual(
+                        _public_result(
+                            {
+                                "status": "blocked",
+                                "operation": operation,
+                                "reason": f"Linear command failed: {reason}",
+                            }
+                        ),
+                        {
+                            "status": "blocked",
+                            "message": f"Не удалось выполнить: {reason}.",
+                            "recovery": {
+                                "action": "retry_without_scope_description",
+                                "remove_field": f"{scope}.description",
+                                "only_if_description_was_not_requested_by_user": True,
+                            },
+                        },
+                    )
 
     def test_public_block_reason_preserves_exact_owner_approval_capability_blocker(self):
         reason = "owner approval required: clearing or replacing an issue parent"

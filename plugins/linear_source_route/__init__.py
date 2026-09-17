@@ -770,7 +770,14 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                         "additionalProperties": False,
                         "properties": {
                             "name": {"type": "string", "minLength": 1, "maxLength": 200},
-                            "description": {"type": "string", "maxLength": 10000},
+                            "description": {
+                                "type": "string",
+                                "maxLength": 10000,
+                                "description": (
+                                    "Legacy literal replay or owner-requested scope constraint only; "
+                                    "omit from new existing-scope calls."
+                                ),
+                            },
                         },
                         "required": ["name"],
                     },
@@ -779,7 +786,14 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                         "additionalProperties": False,
                         "properties": {
                             "name": {"type": "string", "minLength": 1, "maxLength": 200},
-                            "description": {"type": "string", "maxLength": 10000},
+                            "description": {
+                                "type": "string",
+                                "maxLength": 10000,
+                                "description": (
+                                    "Legacy literal replay or owner-requested scope constraint only; "
+                                    "omit from new existing-scope calls."
+                                ),
+                            },
                         },
                         "required": ["name"],
                     },
@@ -803,7 +817,14 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                         "additionalProperties": False,
                         "properties": {
                             "name": {"type": "string", "minLength": 1, "maxLength": 200},
-                            "description": {"type": "string", "maxLength": 10000},
+                            "description": {
+                                "type": "string",
+                                "maxLength": 10000,
+                                "description": (
+                                    "Legacy literal replay or owner-requested scope constraint only; "
+                                    "omit from new existing-scope calls."
+                                ),
+                            },
                         },
                         "required": ["name"],
                     },
@@ -812,7 +833,14 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
                         "additionalProperties": False,
                         "properties": {
                             "name": {"type": "string", "minLength": 1, "maxLength": 200},
-                            "description": {"type": "string", "maxLength": 10000},
+                            "description": {
+                                "type": "string",
+                                "maxLength": 10000,
+                                "description": (
+                                    "Legacy literal replay or owner-requested scope constraint only; "
+                                    "omit from new existing-scope calls."
+                                ),
+                            },
                         },
                         "required": ["name"],
                     },
@@ -2514,10 +2542,27 @@ def _public_result(result: dict[str, Any]) -> dict[str, Any]:
             message = "Не удалось выполнить запрос: безопасная причина недоступна."
         else:
             message = f"Не удалось выполнить: {reason.rstrip('.')}."
-        return {
+        public = {
             "status": "blocked",
             "message": message,
         }
+        scope_conflict = (
+            re.fullmatch(
+                r"(project|milestone) supplied description conflicts with live state",
+                reason,
+            )
+            if isinstance(reason, str)
+            and operation
+            in {"converge_hierarchy", "create_standalone_issue", "converge_issue_tree"}
+            else None
+        )
+        if scope_conflict is not None:
+            public["recovery"] = {
+                "action": "retry_without_scope_description",
+                "remove_field": f"{scope_conflict.group(1)}.description",
+                "only_if_description_was_not_requested_by_user": True,
+            }
+        return public
     if status == "verified_no_op":
         verified = result.get("linear_result")
         if not isinstance(verified, dict) or verified.get("verified") is not True:
