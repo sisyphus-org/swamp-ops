@@ -6,6 +6,7 @@ import os
 import re
 import sqlite3
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any, Callable
 
@@ -44,6 +45,8 @@ OPS_BROKER_SCHEMA = {
                     "repository_access",
                     "list_pull_requests",
                     "pull_request_checks",
+                    "publish_branch",
+                    "upsert_pull_request",
                     "auth_whoami",
                     "validate_model",
                     "validate_workflow",
@@ -59,7 +62,7 @@ OPS_BROKER_SCHEMA = {
                     "get_result",
                 ],
             },
-            "arguments": {"type": "object", "maxProperties": 6},
+            "arguments": {"type": "object", "maxProperties": 7},
             "mode": {"type": "string", "enum": ["plan", "apply"]},
         },
         "required": [
@@ -74,6 +77,204 @@ OPS_BROKER_SCHEMA = {
 
 
 def default_runner(argv: list[str], *, cwd: Path, timeout: int) -> dict[str, Any]:
+    env = {
+        "LC_ALL": "C",
+        "PATH": (
+            "/Users/hermes/.local/bin:/Users/hermes/.hermes/bin:"
+            "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        ),
+    }
+    if argv and argv[0] == "gh":
+        token = str(os.environ.get("GH_TOKEN") or "")
+        subprocess_home = (
+            "/Users/hermes/.hermes/profiles/operations-manager/"
+            "plugin-data/ops-broker/subprocess-home"
+        )
+        env.update(
+            {
+                "HOME": subprocess_home,
+                "XDG_CONFIG_HOME": f"{subprocess_home}/config",
+                "XDG_STATE_HOME": f"{subprocess_home}/state",
+                "XDG_CACHE_HOME": f"{subprocess_home}/cache",
+                "GH_CONFIG_DIR": f"{subprocess_home}/gh-config",
+            }
+        )
+        if token:
+            env["GH_TOKEN"] = token
+    elif argv and argv[0] == "swamp":
+        token = str(os.environ.get("SWAMP_API_KEY") or "")
+        if token:
+            env["SWAMP_API_KEY"] = token
+    if argv[:2] == ["git", "push"]:
+        askpass = PLUGIN_ROOT / "github_git_askpass.py"
+        token = str(os.environ.get("GH_TOKEN") or "")
+        if not askpass.is_file():
+            raise BrokerError("fixed GitHub Git askpass helper is unavailable")
+        if not token:
+            raise BrokerError("Operations Manager GitHub credential is unavailable")
+        if (
+            len(argv) != 4
+            or re.fullmatch(
+                r"https://github\.com/[a-z0-9-]+/[a-z0-9-]+\.git", argv[2]
+            )
+            is None
+            or re.fullmatch(
+                r"[0-9a-f]{40}:refs/heads/SIS-[1-9][0-9]*", argv[3]
+            )
+            is None
+        ):
+            raise BrokerError("Git push argv is outside the fixed publication shape")
+        push_argv = [
+            "git",
+            "-c",
+            "credential.helper=",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "push.followTags=false",
+            "-c",
+            "push.recurseSubmodules=no",
+            "push",
+            "--no-verify",
+            "--no-follow-tags",
+            "--recurse-submodules=no",
+            "--porcelain",
+            "--",
+            argv[2],
+            argv[3],
+        ]
+        clean_git_env = {
+            "LC_ALL": "C",
+            "PATH": env["PATH"],
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+        }
+        object_probe = subprocess.run(
+            ["git", "rev-parse", "--git-path", "objects"],
+            cwd=cwd,
+            timeout=timeout,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=clean_git_env,
+        )
+        object_directory = Path(object_probe.stdout.strip())
+        if not object_directory.is_absolute():
+            object_directory = cwd / object_directory
+        object_directory = object_directory.resolve()
+        workspace_root = Path("/Users/hermes/workspaces").resolve()
+        if (
+            object_probe.returncode != 0
+            or not object_directory.is_dir()
+            or not object_directory.is_relative_to(workspace_root)
+        ):
+            raise BrokerError("reviewed Git object directory is unavailable")
+        with tempfile.TemporaryDirectory(prefix=".ops-git-push-", dir=cwd.parent) as tmp:
+            bare = Path(tmp) / "repository.git"
+            initialized = subprocess.run(
+                ["git", "init", "--bare", str(bare)],
+                cwd=cwd.parent,
+                timeout=timeout,
+                capture_output=True,
+                text=True,
+                check=False,
+                env=clean_git_env,
+            )
+            if initialized.returncode != 0:
+                raise BrokerError("trusted temporary Git repository initialization failed")
+            push_env = {
+                **env,
+                "GH_TOKEN": token,
+                "GIT_ASKPASS": str(askpass),
+                "GIT_ASKPASS_ALLOWED_URL": argv[2],
+                "GIT_TERMINAL_PROMPT": "0",
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(object_directory.resolve()),
+            }
+            completed = subprocess.run(
+                push_argv,
+                cwd=bare,
+                timeout=timeout,
+                capture_output=True,
+                text=True,
+                check=False,
+                env=push_env,
+            )
+        return {
+            "returncode": completed.returncode,
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+        }
+    if (
+        len(argv) == 5
+        and argv[:3] == ["git", "merge-base", "--is-ancestor"]
+        and re.fullmatch(r"[0-9a-f]{40}", argv[3]) is not None
+        and re.fullmatch(r"[0-9a-f]{40}", argv[4]) is not None
+    ):
+        clean_git_env = {
+            "LC_ALL": "C",
+            "PATH": env["PATH"],
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+        }
+        object_probe = subprocess.run(
+            ["git", "rev-parse", "--git-path", "objects"],
+            cwd=cwd,
+            timeout=timeout,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=clean_git_env,
+        )
+        object_directory = Path(object_probe.stdout.strip())
+        if not object_directory.is_absolute():
+            object_directory = cwd / object_directory
+        object_directory = object_directory.resolve()
+        workspace_root = Path("/Users/hermes/workspaces").resolve()
+        if (
+            object_probe.returncode != 0
+            or not object_directory.is_dir()
+            or not object_directory.is_relative_to(workspace_root)
+        ):
+            raise BrokerError("reviewed Git object directory is unavailable")
+        with tempfile.TemporaryDirectory(prefix=".ops-git-ancestry-", dir=cwd.parent) as tmp:
+            bare = Path(tmp) / "repository.git"
+            initialized = subprocess.run(
+                ["git", "init", "--bare", str(bare)],
+                cwd=cwd.parent,
+                timeout=timeout,
+                capture_output=True,
+                text=True,
+                check=False,
+                env=clean_git_env,
+            )
+            if initialized.returncode != 0:
+                raise BrokerError("trusted temporary Git repository initialization failed")
+            completed = subprocess.run(
+                [
+                    "git",
+                    "--no-replace-objects",
+                    "merge-base",
+                    "--is-ancestor",
+                    argv[3],
+                    argv[4],
+                ],
+                cwd=bare,
+                timeout=timeout,
+                capture_output=True,
+                text=True,
+                check=False,
+                env={
+                    **clean_git_env,
+                    "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(object_directory),
+                },
+            )
+        return {
+            "returncode": completed.returncode,
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+        }
     completed = subprocess.run(
         argv,
         cwd=cwd,
@@ -81,6 +282,7 @@ def default_runner(argv: list[str], *, cwd: Path, timeout: int) -> dict[str, Any
         capture_output=True,
         text=True,
         check=False,
+        env=env,
     )
     return {
         "returncode": completed.returncode,

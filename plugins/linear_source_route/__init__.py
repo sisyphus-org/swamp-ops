@@ -1466,6 +1466,18 @@ class HermesKanbanBoard:
             source_session_id=source.session_id,
         )
 
+    def block_count(self, task_id: str) -> int:
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) AS count FROM task_events "
+                "WHERE task_id = ? AND kind = 'blocked'",
+                (task_id,),
+            ).fetchone()
+            return int(row["count"]) if row is not None else 0
+        finally:
+            conn.close()
+
     def block_reason(self, task_id: str) -> str | None:
         """Return the latest persisted blocker reason for one exact task."""
         conn = self._connect()
@@ -2892,6 +2904,7 @@ OPS_BROKER_SOURCE_SCHEMA = {
                 "type": "string",
                 "enum": [
                     "repository_access", "list_pull_requests", "pull_request_checks",
+                    "publish_branch", "upsert_pull_request",
                     "auth_whoami", "validate_model", "validate_workflow",
                     "run_readonly_workflow", "plan_github_cloudflare_repository",
                     "start_github_cloudflare_repository_apply",
@@ -2903,7 +2916,7 @@ OPS_BROKER_SOURCE_SCHEMA = {
                     "get_result",
                 ],
             },
-            "arguments": {"type": "object", "maxProperties": 6},
+            "arguments": {"type": "object", "maxProperties": 7},
             "mode": {"type": "string", "enum": ["plan", "apply"]},
         },
         "required": ["request_id", "integration", "operation", "arguments", "mode"],

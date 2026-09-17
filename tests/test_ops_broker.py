@@ -483,7 +483,7 @@ class RequestValidationTests(unittest.TestCase):
 
     def test_public_schema_allows_full_owner_attestation_start_shape(self):
         arguments = OPS_BROKER_SCHEMA["parameters"]["properties"]["arguments"]
-        self.assertEqual(arguments["maxProperties"], 6)
+        self.assertEqual(arguments["maxProperties"], 7)
 
     def test_validate_request_accepts_minimal_readonly_request(self):
         request = validate_request(
@@ -591,13 +591,23 @@ class CommandConstructionTests(unittest.TestCase):
                 {"repository": "sisyphus-org/swamp-ops", "pull_request": 1},
                 [
                     "gh",
-                    "pr",
-                    "checks",
-                    "1",
-                    "--repo",
-                    "sisyphus-org/swamp-ops",
-                    "--json",
-                    "name,state,link,bucket,event,workflow",
+                    "api",
+                    "graphql",
+                    "-f",
+                    (
+                        "query=query($owner:String!,$name:String!,$number:Int!){"
+                        "repository(owner:$owner,name:$name){pullRequest(number:$number){"
+                        "commits(last:1){nodes{commit{statusCheckRollup{contexts(first:100){"
+                        "nodes{__typename ... on CheckRun{name status conclusion detailsUrl "
+                        "checkSuite{workflowRun{event workflow{name}}}} ... on StatusContext{"
+                        "context state targetUrl}}}}}}}}}}"
+                    ),
+                    "-f",
+                    "owner=sisyphus-org",
+                    "-f",
+                    "name=swamp-ops",
+                    "-F",
+                    "number=1",
                 ],
             ),
             ("swamp.auth_whoami", {}, ["swamp", "auth", "whoami", "--json"]),
@@ -1121,6 +1131,52 @@ class ExecutionTests(unittest.TestCase):
             )
 
     def test_pending_github_checks_exit_code_is_a_typed_result(self):
+        calls = []
+
+        def runner(argv, **_kwargs):
+            calls.append(argv)
+            return {
+                "returncode": 0,
+                "stdout": json.dumps(
+                    {
+                        "data": {
+                            "repository": {
+                                "pullRequest": {
+                                    "commits": {
+                                        "nodes": [
+                                            {
+                                                "commit": {
+                                                    "statusCheckRollup": {
+                                                        "contexts": {
+                                                            "nodes": [
+                                                                {
+                                                                    "__typename": "CheckRun",
+                                                                    "name": "tests",
+                                                                    "status": "IN_PROGRESS",
+                                                                    "conclusion": None,
+                                                                    "detailsUrl": "https://example.invalid/check/1",
+                                                                    "checkSuite": {
+                                                                        "workflowRun": {
+                                                                            "event": "PUSH",
+                                                                            "workflow": {"name": "CI"},
+                                                                        }
+                                                                    },
+                                                                }
+                                                            ]
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        ]
+                                    }
+                                }
+                            }
+                        }
+                    }
+                ),
+                "stderr": "",
+            }
+
         response = execute_request(
             validate_request(
                 {
@@ -1141,16 +1197,91 @@ class ExecutionTests(unittest.TestCase):
                 },
                 "github": {"repositories": ["sisyphus-org/swamp-ops"]},
             },
-            runner=lambda *_args, **_kwargs: {
-                "returncode": 8,
-                "stdout": '[{"name":"tests","state":"PENDING"}]',
-                "stderr": "",
-            },
+            runner=runner,
             workspace=Path("/Users/hermes/workspaces/swamp-ops"),
         )
 
         self.assertEqual(response["status"], "ok")
-        self.assertEqual(response["result"][0]["state"], "PENDING")
+        self.assertEqual(
+            response["result"],
+            [
+                {
+                    "name": "tests",
+                    "state": "IN_PROGRESS",
+                    "link": "https://example.invalid/check/1",
+                    "bucket": "pending",
+                    "event": "PUSH",
+                    "workflow": "CI",
+                }
+            ],
+        )
+        self.assertEqual(calls[0][:3], ["gh", "api", "graphql"])
+
+    def test_github_checks_rejects_untyped_event_and_workflow(self):
+        payload = {
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "commits": {
+                            "nodes": [
+                                {
+                                    "commit": {
+                                        "statusCheckRollup": {
+                                            "contexts": {
+                                                "nodes": [
+                                                    {
+                                                        "__typename": "CheckRun",
+                                                        "name": "tests",
+                                                        "status": "COMPLETED",
+                                                        "conclusion": "SUCCESS",
+                                                        "detailsUrl": None,
+                                                        "checkSuite": {
+                                                            "workflowRun": {
+                                                                "event": {"unsafe": True},
+                                                                "workflow": {"name": ["unsafe"]},
+                                                            }
+                                                        },
+                                                    }
+                                                ]
+                                            }
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        }
+        request = validate_request(
+            {
+                "request_id": "324765ed-593d-4624-81e8-1ba1af22b335",
+                "integration": "github",
+                "operation": "pull_request_checks",
+                "arguments": {
+                    "repository": "sisyphus-org/swamp-ops",
+                    "pull_request": 1,
+                },
+                "mode": "plan",
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "checks result is invalid"):
+            execute_request(
+                request,
+                caller="swe",
+                policy={
+                    "peers": {
+                        "swe": {"operations": ["github.pull_request_checks"]}
+                    },
+                    "github": {"repositories": ["sisyphus-org/swamp-ops"]},
+                },
+                runner=lambda *_args, **_kwargs: {
+                    "returncode": 0,
+                    "stdout": json.dumps(payload),
+                    "stderr": "",
+                },
+                workspace=Path("/Users/hermes/workspaces/swamp-ops"),
+            )
 
     def test_execution_appends_secret_free_audit_record(self):
         with tempfile.TemporaryDirectory() as tmp:

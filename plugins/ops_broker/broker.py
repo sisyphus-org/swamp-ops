@@ -24,6 +24,8 @@ ALLOWED_OPERATIONS = {
     ("github", "repository_access"),
     ("github", "list_pull_requests"),
     ("github", "pull_request_checks"),
+    ("github", "publish_branch"),
+    ("github", "upsert_pull_request"),
     ("swamp", "auth_whoami"),
     ("swamp", "validate_model"),
     ("swamp", "validate_workflow"),
@@ -44,12 +46,77 @@ PLAN_WORKFLOW = "github-cloudflare-repo-bootstrap"
 APPLY_WORKFLOW = "github-cloudflare-repo-bootstrap-apply"
 REPOSITORY_PATTERN = re.compile(r"^[a-z][a-z0-9-]{1,54}$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+GIT_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+TICKET_BRANCH_PATTERN = re.compile(r"^SIS-[1-9][0-9]*$")
+CREDENTIAL_SHAPES = (
+    re.compile(r"\b(?:ghp_|github_pat_)[A-Za-z0-9_]{16,}\b"),
+    re.compile(r"\b(?:SWAMP_API_KEY|GH_TOKEN|GITHUB_TOKEN)\s*[=:]", re.IGNORECASE),
+)
 _LINEAR_DELETE_APPROVAL_FIELDS = {
     "workflow", "model", "run_id", "artifact_version", "checksum",
     "intent_hash", "before_state_hash", "expires_at",
 }
 _LINEAR_DELETE_THREAD_LOCKS: dict[str, threading.Lock] = {}
 _LINEAR_DELETE_THREAD_LOCKS_GUARD = threading.Lock()
+_PUBLICATION_THREAD_LOCKS: dict[str, threading.Lock] = {}
+_PUBLICATION_THREAD_LOCKS_GUARD = threading.Lock()
+
+
+def _publication_semantic_hash(request: dict[str, Any]) -> str:
+    semantic = {
+        "integration": request["integration"],
+        "operation": request["operation"],
+        "arguments": request["arguments"],
+        "mode": request["mode"],
+    }
+    encoded = json.dumps(
+        semantic, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(b"ops-github-publication-v1\0" + encoded).hexdigest()
+
+
+def _write_publication_journal(root: Path | None, mutation_hash: str, phase: str) -> None:
+    if root is None:
+        return
+    root.mkdir(parents=True, exist_ok=True)
+    os.chmod(root, 0o700)
+    path = root / f"{mutation_hash}.json"
+    temporary = root / f".{mutation_hash}.{os.getpid()}.{threading.get_ident()}.tmp"
+    payload = {
+        "schema_version": "github-publication-journal.v1",
+        "mutation_hash": mutation_hash,
+        "phase": phase,
+    }
+    with temporary.open("w", encoding="utf-8") as handle:
+        os.chmod(temporary, 0o600)
+        json.dump(payload, handle, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+
+
+@contextmanager
+def _publication_mutation_lock(request: dict[str, Any], root: Path | None):
+    mutation_hash = _publication_semantic_hash(request)
+    with _PUBLICATION_THREAD_LOCKS_GUARD:
+        thread_lock = _PUBLICATION_THREAD_LOCKS.setdefault(
+            mutation_hash, threading.Lock()
+        )
+    with thread_lock:
+        if root is None:
+            yield mutation_hash
+            return
+        root.mkdir(parents=True, exist_ok=True)
+        os.chmod(root, 0o700)
+        lock_path = root / f"{mutation_hash}.lock"
+        with lock_path.open("a", encoding="utf-8") as handle:
+            os.chmod(lock_path, 0o600)
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield mutation_hash
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def _validate_linear_delete_granted_policy(
@@ -178,6 +245,505 @@ def _allowed_repository(arguments: dict[str, Any], policy: dict[str, Any]) -> st
     return str(repository)
 
 
+def _publish_branch_arguments(
+    arguments: dict[str, Any], policy: dict[str, Any]
+) -> tuple[str, str, str, str, str]:
+    if set(arguments) != {"repository", "branch", "head_sha", "base", "base_sha"}:
+        raise BrokerError("unexpected arguments for operation")
+    repository = _allowed_repository(arguments, policy)
+    branch = arguments.get("branch")
+    head_sha = arguments.get("head_sha")
+    base = arguments.get("base")
+    base_sha = arguments.get("base_sha")
+    allowed_bases = policy.get("github", {}).get("pullRequestBases", {}).get(
+        repository, []
+    )
+    if not isinstance(branch, str) or TICKET_BRANCH_PATTERN.fullmatch(branch) is None:
+        raise BrokerError("branch must be an exact SIS-N identifier")
+    if not isinstance(head_sha, str) or GIT_SHA_PATTERN.fullmatch(head_sha) is None:
+        raise BrokerError("head_sha must be a full lowercase Git commit SHA")
+    if not isinstance(base, str) or base not in allowed_bases:
+        raise BrokerError("base branch is not allowed")
+    if not isinstance(base_sha, str) or GIT_SHA_PATTERN.fullmatch(base_sha) is None:
+        raise BrokerError("base_sha must be a full lowercase Git commit SHA")
+    return repository, branch, head_sha, base, base_sha
+
+
+def _run_json(
+    runner: Callable[..., dict[str, Any]],
+    argv: list[str],
+    *,
+    workspace: Path,
+) -> Any:
+    completed = runner(argv, cwd=workspace, timeout=60)
+    if completed["returncode"] != 0:
+        raise BrokerError("operation execution failed")
+    try:
+        return json.loads(completed["stdout"])
+    except json.JSONDecodeError as exc:
+        raise BrokerError("operation returned invalid JSON") from exc
+
+
+def _remote_branch_head(
+    runner: Callable[..., dict[str, Any]],
+    *,
+    repository: str,
+    branch: str,
+    workspace: Path,
+) -> str | None:
+    result = _run_json(
+        runner,
+        [
+            "gh",
+            "api",
+            f"repos/{repository}/git/matching-refs/heads/{branch}",
+        ],
+        workspace=workspace,
+    )
+    if not isinstance(result, list):
+        raise BrokerError("GitHub branch read-back is invalid")
+    exact = [
+        item
+        for item in result
+        if isinstance(item, dict) and item.get("ref") == f"refs/heads/{branch}"
+    ]
+    if len(exact) > 1:
+        raise BrokerError("GitHub branch read-back is ambiguous")
+    if not exact:
+        return None
+    obj = exact[0].get("object")
+    sha = obj.get("sha") if isinstance(obj, dict) else None
+    if not isinstance(sha, str) or GIT_SHA_PATTERN.fullmatch(sha) is None:
+        raise BrokerError("GitHub branch read-back is invalid")
+    return sha
+
+
+def _publish_branch(
+    request: dict[str, Any],
+    *,
+    policy: dict[str, Any],
+    runner: Callable[..., dict[str, Any]],
+    workspace: Path,
+) -> dict[str, Any]:
+    repository, branch, head_sha, base, base_sha = _publish_branch_arguments(
+        request["arguments"], policy
+    )
+    expected_remote = f"https://github.com/{repository}.git"
+    for argv in (
+        ["git", "remote", "get-url", "origin"],
+        ["git", "remote", "get-url", "--push", "origin"],
+    ):
+        remote = runner(argv, cwd=workspace, timeout=60)
+        if remote["returncode"] != 0 or remote["stdout"].strip() != expected_remote:
+            raise BrokerError("runtime Git origin does not match the allowed repository")
+    local = runner(
+        ["git", "rev-parse", f"refs/heads/{branch}^{{commit}}"],
+        cwd=workspace,
+        timeout=60,
+    )
+    if local["returncode"] != 0 or local["stdout"].strip() != head_sha:
+        raise BrokerError("local branch does not match head_sha")
+    local_base = runner(
+        ["git", "rev-parse", f"refs/remotes/origin/{base}^{{commit}}"],
+        cwd=workspace,
+        timeout=60,
+    )
+    if local_base["returncode"] != 0 or local_base["stdout"].strip() != base_sha:
+        raise BrokerError("local base branch does not match base_sha")
+    ancestry = runner(
+        ["git", "merge-base", "--is-ancestor", base_sha, head_sha],
+        cwd=workspace,
+        timeout=60,
+    )
+    if ancestry["returncode"] != 0:
+        raise BrokerError("branch head is not based on the allowed base")
+    remote_base = _remote_branch_head(
+        runner,
+        repository=repository,
+        branch=base,
+        workspace=workspace,
+    )
+    if remote_base != base_sha:
+        raise BrokerError("remote base branch does not match base_sha")
+    before = _remote_branch_head(
+        runner,
+        repository=repository,
+        branch=branch,
+        workspace=workspace,
+    )
+    changed = before != head_sha
+    push_failed = False
+    if changed:
+        try:
+            pushed = runner(
+                ["git", "push", expected_remote, f"{head_sha}:refs/heads/{branch}"],
+                cwd=workspace,
+                timeout=60,
+            )
+            push_failed = pushed["returncode"] != 0
+        except Exception:
+            push_failed = True
+    after = _remote_branch_head(
+        runner,
+        repository=repository,
+        branch=branch,
+        workspace=workspace,
+    )
+    if after != head_sha:
+        if push_failed:
+            raise BrokerError("non-force Git branch publication failed")
+        raise BrokerError("GitHub branch exact read-back verification failed")
+    return {
+        "repository": repository,
+        "branch": branch,
+        "head_sha": head_sha,
+        "base": base,
+        "base_sha": base_sha,
+        "changed": changed,
+    }
+
+
+def _pull_request_arguments(
+    arguments: dict[str, Any], policy: dict[str, Any]
+) -> tuple[str, str, str, str, str, str, str]:
+    expected = {
+        "repository", "branch", "head_sha", "base", "base_sha", "title", "body"
+    }
+    if set(arguments) != expected:
+        raise BrokerError("unexpected arguments for operation")
+    repository, branch, head_sha, base, base_sha = _publish_branch_arguments(
+        {
+            key: arguments[key]
+            for key in ("repository", "branch", "head_sha", "base", "base_sha")
+        },
+        policy,
+    )
+    title = arguments.get("title")
+    body = arguments.get("body")
+    serialized = f"{title}\n{body}"
+    title_pattern = re.compile(
+        rf"^{re.escape(branch)}(?::[ \t]*|[ \t]+)\S"
+    )
+    if (
+        not isinstance(title, str)
+        or title_pattern.match(title) is None
+        or len(title) > 256
+        or any(ord(char) < 32 for char in title)
+    ):
+        raise BrokerError("pull request title must start with its exact SIS-N branch")
+    if (
+        not isinstance(body, str)
+        or len(body) > 10_000
+        or re.search(
+            rf"(?m)^[ \t]*https://linear\.app/sisyphusx/issue/"
+            rf"{re.escape(branch)}/[A-Za-z0-9][A-Za-z0-9_-]*[ \t]*$",
+            body,
+        ) is None
+        or any(ord(char) < 32 and char not in "\n\t" for char in body)
+    ):
+        raise BrokerError("pull request body must contain the canonical Linear ticket URL")
+    if any(pattern.search(serialized) for pattern in CREDENTIAL_SHAPES):
+        raise BrokerError("pull request contains credential-shaped data")
+    return repository, branch, head_sha, base, base_sha, title, body
+
+
+def _verify_pull_request(
+    value: Any,
+    *,
+    repository: str,
+    branch: str,
+    head_sha: str,
+    base: str,
+    base_sha: str,
+    title: str,
+    body: str,
+) -> tuple[int, str]:
+    number = value.get("number") if isinstance(value, dict) else None
+    url = value.get("html_url") if isinstance(value, dict) else None
+    head = value.get("head") if isinstance(value, dict) else None
+    base_value = value.get("base") if isinstance(value, dict) else None
+    head_repo = head.get("repo") if isinstance(head, dict) else None
+    base_repo = base_value.get("repo") if isinstance(base_value, dict) else None
+    if (
+        not isinstance(number, int)
+        or isinstance(number, bool)
+        or number < 1
+        or url != f"https://github.com/{repository}/pull/{number}"
+        or value.get("state") != "open"
+        or value.get("draft") is not False
+        or value.get("title") != title
+        or value.get("body") != body
+        or not isinstance(head, dict)
+        or head.get("ref") != branch
+        or head.get("sha") != head_sha
+        or not isinstance(head_repo, dict)
+        or head_repo.get("full_name") != repository
+        or not isinstance(base_value, dict)
+        or base_value.get("ref") != base
+        or base_value.get("sha") != base_sha
+        or not isinstance(base_repo, dict)
+        or base_repo.get("full_name") != repository
+    ):
+        raise BrokerError("GitHub pull request exact read-back verification failed")
+    return number, f"https://github.com/{repository}/pull/{number}"
+
+
+def _existing_pull_request_number(
+    value: Any,
+    *,
+    repository: str,
+    branch: str,
+    head_sha: str,
+) -> int:
+    number = value.get("number") if isinstance(value, dict) else None
+    head = value.get("head") if isinstance(value, dict) else None
+    base = value.get("base") if isinstance(value, dict) else None
+    head_repo = head.get("repo") if isinstance(head, dict) else None
+    base_repo = base.get("repo") if isinstance(base, dict) else None
+    if (
+        not isinstance(number, int)
+        or isinstance(number, bool)
+        or number < 1
+        or value.get("html_url") != f"https://github.com/{repository}/pull/{number}"
+        or value.get("state") != "open"
+        or value.get("draft") is not False
+        or not isinstance(head, dict)
+        or head.get("ref") != branch
+        or head.get("sha") != head_sha
+        or not isinstance(head_repo, dict)
+        or head_repo.get("full_name") != repository
+        or not isinstance(base, dict)
+        or not isinstance(base.get("ref"), str)
+        or not isinstance(base_repo, dict)
+        or base_repo.get("full_name") != repository
+    ):
+        raise BrokerError("GitHub pull request lookup is invalid or ambiguous")
+    return number
+
+
+def _open_pull_requests(
+    runner: Callable[..., dict[str, Any]],
+    *,
+    repository: str,
+    branch: str,
+    workspace: Path,
+) -> list[dict[str, Any]]:
+    owner = repository.split("/", 1)[0]
+    existing = _run_json(
+        runner,
+        [
+            "gh",
+            "api",
+            f"repos/{repository}/pulls?state=open&head={owner}:{branch}",
+        ],
+        workspace=workspace,
+    )
+    if (
+        not isinstance(existing, list)
+        or len(existing) > 1
+        or any(not isinstance(item, dict) for item in existing)
+    ):
+        raise BrokerError("GitHub pull request lookup is invalid or ambiguous")
+    return existing
+
+
+def _upsert_pull_request(
+    request: dict[str, Any],
+    *,
+    policy: dict[str, Any],
+    runner: Callable[..., dict[str, Any]],
+    workspace: Path,
+) -> dict[str, Any]:
+    repository, branch, head_sha, base, base_sha, title, body = (
+        _pull_request_arguments(request["arguments"], policy)
+    )
+    if _remote_branch_head(
+        runner,
+        repository=repository,
+        branch=base,
+        workspace=workspace,
+    ) != base_sha:
+        raise BrokerError("pull request base does not match base_sha")
+    if _remote_branch_head(
+        runner,
+        repository=repository,
+        branch=branch,
+        workspace=workspace,
+    ) != head_sha:
+        raise BrokerError("pull request branch does not match head_sha")
+    existing = _open_pull_requests(
+        runner,
+        repository=repository,
+        branch=branch,
+        workspace=workspace,
+    )
+    changed = False
+    if not existing:
+        changed = True
+        try:
+            pull = _run_json(
+                runner,
+                [
+                    "gh",
+                    "api",
+                    "-X",
+                    "POST",
+                    f"repos/{repository}/pulls",
+                    "-f",
+                    f"head={branch}",
+                    "-f",
+                    f"base={base}",
+                    "-f",
+                    f"title={title}",
+                    "-f",
+                    f"body={body}",
+                    "-F",
+                    "draft=false",
+                ],
+                workspace=workspace,
+            )
+        except Exception as exc:
+            recovered = _open_pull_requests(
+                runner,
+                repository=repository,
+                branch=branch,
+                workspace=workspace,
+            )
+            if not recovered:
+                raise BrokerError("GitHub pull request creation failed") from exc
+            pull = recovered[0]
+    else:
+        pull = existing[0]
+        number = _existing_pull_request_number(
+            pull,
+            repository=repository,
+            branch=branch,
+            head_sha=head_sha,
+        )
+        live_base = pull.get("base")
+        if (
+            pull.get("title") != title
+            or pull.get("body") != body
+            or live_base.get("ref") != base
+        ):
+            changed = True
+            try:
+                pull = _run_json(
+                    runner,
+                    [
+                        "gh",
+                        "api",
+                        "-X",
+                        "PATCH",
+                        f"repos/{repository}/pulls/{number}",
+                        "-f",
+                        f"base={base}",
+                        "-f",
+                        f"title={title}",
+                        "-f",
+                        f"body={body}",
+                    ],
+                    workspace=workspace,
+                )
+            except Exception:
+                pull = {"number": number}
+    number = pull.get("number") if isinstance(pull, dict) else None
+    if not isinstance(number, int) or isinstance(number, bool) or number < 1:
+        raise BrokerError("GitHub pull request result is invalid")
+    verified = _run_json(
+        runner,
+        ["gh", "api", f"repos/{repository}/pulls/{number}"],
+        workspace=workspace,
+    )
+    number, url = _verify_pull_request(
+        verified,
+        repository=repository,
+        branch=branch,
+        head_sha=head_sha,
+        base=base,
+        base_sha=base_sha,
+        title=title,
+        body=body,
+    )
+    return {
+        "repository": repository,
+        "number": number,
+        "url": url,
+        "branch": branch,
+        "head_sha": head_sha,
+        "base": base,
+        "base_sha": base_sha,
+        "title": title,
+        "changed": changed,
+    }
+
+
+def _pull_request_checks_result(value: Any) -> list[dict[str, Any]]:
+    try:
+        pull_request = value["data"]["repository"]["pullRequest"]
+        commits = pull_request["commits"]["nodes"]
+    except (KeyError, TypeError):
+        raise BrokerError("pull request checks result is invalid") from None
+    if not isinstance(commits, list) or len(commits) != 1:
+        raise BrokerError("pull request checks result is invalid")
+    rollup = commits[0].get("commit", {}).get("statusCheckRollup")
+    if rollup is None:
+        return []
+    contexts = rollup.get("contexts", {}).get("nodes")
+    if not isinstance(contexts, list) or len(contexts) > 100:
+        raise BrokerError("pull request checks result is invalid")
+    normalized = []
+    for context in contexts:
+        if not isinstance(context, dict):
+            raise BrokerError("pull request checks result is invalid")
+        kind = context.get("__typename")
+        if kind == "CheckRun":
+            name = context.get("name")
+            state = context.get("conclusion") or context.get("status")
+            link = context.get("detailsUrl")
+            workflow_run = context.get("checkSuite", {}).get("workflowRun") or {}
+            event = workflow_run.get("event")
+            workflow = (workflow_run.get("workflow") or {}).get("name")
+        elif kind == "StatusContext":
+            name = context.get("context")
+            state = context.get("state")
+            link = context.get("targetUrl")
+            event = None
+            workflow = None
+        else:
+            raise BrokerError("pull request checks result is invalid")
+        if not isinstance(name, str) or not isinstance(state, str):
+            raise BrokerError("pull request checks result is invalid")
+        if link is not None and not isinstance(link, str):
+            raise BrokerError("pull request checks result is invalid")
+        if event is not None and not isinstance(event, str):
+            raise BrokerError("pull request checks result is invalid")
+        if workflow is not None and not isinstance(workflow, str):
+            raise BrokerError("pull request checks result is invalid")
+        state_upper = state.upper()
+        if state_upper in {"SUCCESS", "NEUTRAL"}:
+            bucket = "pass"
+        elif state_upper in {"PENDING", "QUEUED", "IN_PROGRESS", "EXPECTED"}:
+            bucket = "pending"
+        elif state_upper in {"SKIPPED", "STALE"}:
+            bucket = "skipping"
+        elif state_upper in {"CANCELLED", "TIMED_OUT", "ACTION_REQUIRED"}:
+            bucket = "cancel"
+        else:
+            bucket = "fail"
+        normalized.append(
+            {
+                "name": name,
+                "state": state,
+                "link": link,
+                "bucket": bucket,
+                "event": event,
+                "workflow": workflow,
+            }
+        )
+    return normalized
+
+
 def build_command(
     operation_key: str, arguments: dict[str, Any], policy: dict[str, Any]
 ) -> list[str]:
@@ -223,15 +789,27 @@ def build_command(
         pull_request = arguments.get("pull_request")
         if not isinstance(pull_request, int) or isinstance(pull_request, bool) or pull_request < 1:
             raise BrokerError("pull_request must be a positive integer")
+        owner, name = repository.split("/", 1)
+        query = (
+            "query($owner:String!,$name:String!,$number:Int!){"
+            "repository(owner:$owner,name:$name){pullRequest(number:$number){"
+            "commits(last:1){nodes{commit{statusCheckRollup{contexts(first:100){"
+            "nodes{__typename ... on CheckRun{name status conclusion detailsUrl "
+            "checkSuite{workflowRun{event workflow{name}}}} ... on StatusContext{"
+            "context state targetUrl}}}}}}}}}}"
+        )
         return [
             "gh",
-            "pr",
-            "checks",
-            str(pull_request),
-            "--repo",
-            repository,
-            "--json",
-            "name,state,link,bucket,event,workflow",
+            "api",
+            "graphql",
+            "-f",
+            f"query={query}",
+            "-f",
+            f"owner={owner}",
+            "-f",
+            f"name={name}",
+            "-F",
+            f"number={pull_request}",
         ]
     if operation_key == "swamp.auth_whoami":
         return ["swamp", "auth", "whoami", "--json"]
@@ -1479,6 +2057,68 @@ def execute_request(
                     "ready": True,
                 },
             }
+        if operation_key == "github.publish_branch":
+            publication_root = (
+                audit_path.parent / "github-publication" if audit_path is not None else None
+            )
+            with _publication_mutation_lock(request, publication_root) as mutation_hash:
+                _write_publication_journal(publication_root, mutation_hash, "preflight")
+                _append_jsonl(
+                    audit_path,
+                    {
+                        **_audit_base(request, caller, operation_key, "preflight"),
+                        "event": "github_publication_preflight",
+                    },
+                )
+                result = _publish_branch(
+                    request,
+                    policy=policy,
+                    runner=runner,
+                    workspace=workspace,
+                )
+                _write_publication_journal(publication_root, mutation_hash, "verified")
+                _append_jsonl(
+                    audit_path, _audit_base(request, caller, operation_key, "ok")
+                )
+            return {
+                "request_id": request["request_id"],
+                "caller": caller,
+                "operation": operation_key,
+                "mode": request["mode"],
+                "status": "ok",
+                "result": result,
+            }
+        if operation_key == "github.upsert_pull_request":
+            publication_root = (
+                audit_path.parent / "github-publication" if audit_path is not None else None
+            )
+            with _publication_mutation_lock(request, publication_root) as mutation_hash:
+                _write_publication_journal(publication_root, mutation_hash, "preflight")
+                _append_jsonl(
+                    audit_path,
+                    {
+                        **_audit_base(request, caller, operation_key, "preflight"),
+                        "event": "github_publication_preflight",
+                    },
+                )
+                result = _upsert_pull_request(
+                    request,
+                    policy=policy,
+                    runner=runner,
+                    workspace=workspace,
+                )
+                _write_publication_journal(publication_root, mutation_hash, "verified")
+                _append_jsonl(
+                    audit_path, _audit_base(request, caller, operation_key, "ok")
+                )
+            return {
+                "request_id": request["request_id"],
+                "caller": caller,
+                "operation": operation_key,
+                "mode": request["mode"],
+                "status": "ok",
+                "result": result,
+            }
         command = build_command(operation_key, request["arguments"], policy)
 
         if operation_key == "swamp.start_github_cloudflare_repository_apply":
@@ -1574,15 +2214,16 @@ def execute_request(
             }
 
         completed = runner(command, cwd=workspace, timeout=60)
-        accepted_returncodes = {0, 8} if operation_key == "github.pull_request_checks" else {0}
-        if completed["returncode"] not in accepted_returncodes:
+        if completed["returncode"] != 0:
             raise BrokerError("operation execution failed")
         try:
             result = json.loads(completed["stdout"])
         except json.JSONDecodeError as exc:
             raise BrokerError("operation returned invalid JSON") from exc
 
-        if operation_key == "swamp.plan_github_cloudflare_repository":
+        if operation_key == "github.pull_request_checks":
+            result = _pull_request_checks_result(result)
+        elif operation_key == "swamp.plan_github_cloudflare_repository":
             result = _repository_plan_result(
                 result,
                 expected_repository=f"sisyphus-org/{request['arguments']['repository']}",
@@ -1664,6 +2305,8 @@ def validate_request(payload: dict[str, Any]) -> dict[str, Any]:
         "approve_linear_destructive_owner_approval_attest",
         "approve_linear_delete_preview",
         "approve_linear_bulk_preview",
+        "publish_branch",
+        "upsert_pull_request",
     }
     expected_mode = "apply" if operation in apply_operations else "plan"
     if mode != expected_mode:
