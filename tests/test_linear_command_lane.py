@@ -1545,6 +1545,66 @@ class ClientTests(unittest.TestCase):
             with self.assertRaisesRegex(lane.ContractError, "valid JSON"):
                 client.execute(lane.ISSUE_QUERY, {"id": "SIS-59"})
 
+    def test_client_preserves_graphql_retry_metadata(self):
+        client = lane.LinearClient("fixture")
+        cases = (
+            (
+                io.BytesIO(
+                    json.dumps(
+                        {
+                            "errors": [
+                                {
+                                    "message": "Rate limited",
+                                    "extensions": {"code": "RATELIMITED"},
+                                }
+                            ]
+                        }
+                    ).encode()
+                ),
+                None,
+            ),
+            (
+                lane.urllib.error.HTTPError(
+                    "https://api.linear.app/graphql",
+                    400,
+                    "Bad Request",
+                    {},
+                    io.BytesIO(
+                        json.dumps(
+                            {
+                                "errors": [
+                                    {
+                                        "message": "Rate limited",
+                                        "extensions": {"code": "RATELIMITED"},
+                                    }
+                                ]
+                            }
+                        ).encode()
+                    ),
+                ),
+                400,
+            ),
+        )
+        for response, status in cases:
+            with self.subTest(status=status), mock.patch.object(
+                lane.urllib.request,
+                "urlopen",
+                return_value=response if status is None else mock.DEFAULT,
+                side_effect=response if status is not None else None,
+            ):
+                with self.assertRaises(lane.LinearProviderError) as caught:
+                    client.execute(lane.ISSUE_QUERY, {"id": "SIS-59"})
+            self.assertEqual(caught.exception.http_status, status)
+            self.assertEqual(caught.exception.graphql_codes, ("RATELIMITED",))
+
+    def test_retry_classifier_rejects_permanent_code_with_transient_words(self):
+        issue_tree = lane._load_issue_tree()
+        error = lane.LinearProviderError(
+            "Linear GraphQL error: permanent timeout and rate limit policy",
+            graphql_codes=("BAD_USER_INPUT",),
+        )
+        self.assertFalse(issue_tree._retryable_provider_failure(error))
+
 
 class ExecutionTests(unittest.TestCase):
     class WorkspaceReadClient:
@@ -2302,7 +2362,9 @@ class ExecutionTests(unittest.TestCase):
             def create_project_issue(self, **kwargs):
                 self.create_attempts += 1
                 super().create_project_issue(**kwargs)
-                raise lane.ContractError("Linear API request failed: timed out")
+                raise lane.LinearProviderError(
+                    "Linear API request failed: timed out", transport_failure=True
+                )
 
         with tempfile.TemporaryDirectory() as tmp:
             client = LostResponseClient()
@@ -2327,7 +2389,9 @@ class ExecutionTests(unittest.TestCase):
             def create_project_issue(self, **kwargs):
                 self.create_attempts += 1
                 if self.create_attempts == 1:
-                    raise lane.ContractError("Linear API HTTP 429: rate limited")
+                    raise lane.LinearProviderError(
+                        "Linear API HTTP 429: rate limited", http_status=429
+                    )
                 super().create_project_issue(**kwargs)
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -2346,10 +2410,16 @@ class ExecutionTests(unittest.TestCase):
 
     def test_standalone_retries_linear_ratelimited_error_shapes(self):
         failures = (
-            'Linear API HTTP 400: {"errors":[{"extensions":{"code":"RATELIMITED"}}]}',
-            "Linear GraphQL error: RATELIMITED",
+            (
+                'Linear API HTTP 400: {"errors":[{"extensions":{"code":"RATELIMITED"}}]}',
+                {"http_status": 400, "graphql_codes": ("RATELIMITED",)},
+            ),
+            (
+                "Linear GraphQL error: RATELIMITED",
+                {"graphql_codes": ("RATELIMITED",)},
+            ),
         )
-        for index, failure in enumerate(failures):
+        for index, (failure, metadata) in enumerate(failures):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
                 class RateLimitedClient(FakeIssueTreeClient):
                     def __init__(self):
@@ -2359,7 +2429,7 @@ class ExecutionTests(unittest.TestCase):
                     def create_project_issue(self, **kwargs):
                         self.create_attempts += 1
                         if self.create_attempts == 1:
-                            raise lane.ContractError(failure)
+                            raise lane.LinearProviderError(failure, **metadata)
                         super().create_project_issue(**kwargs)
 
                 client = RateLimitedClient()
@@ -2376,14 +2446,14 @@ class ExecutionTests(unittest.TestCase):
 
     def test_standalone_does_not_retry_permanent_http_failures(self):
         failures = (
-            "Linear API HTTP 400: bad request",
-            "Linear API HTTP 401: unauthorized",
-            "Linear API HTTP 403: forbidden",
-            "Linear API HTTP 404: not found",
-            "Linear API HTTP 501: not implemented",
-            "Linear API HTTP 505: version not supported",
+            (400, "Linear API HTTP 400: bad request"),
+            (401, "Linear API HTTP 401: unauthorized"),
+            (403, "Linear API HTTP 403: forbidden"),
+            (404, "Linear API HTTP 404: not found"),
+            (501, "Linear API HTTP 501: not implemented"),
+            (505, "Linear API HTTP 505: version not supported"),
         )
-        for index, failure in enumerate(failures):
+        for index, (status, failure) in enumerate(failures):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
                 class PermanentFailureClient(FakeIssueTreeClient):
                     def __init__(self):
@@ -2393,7 +2463,9 @@ class ExecutionTests(unittest.TestCase):
                     def create_project_issue(self, **kwargs):
                         self.create_attempts += 1
                         if self.create_attempts == 1:
-                            raise lane.ContractError(failure)
+                            raise lane.LinearProviderError(
+                                failure, http_status=status
+                            )
                         super().create_project_issue(**kwargs)
 
                 client = PermanentFailureClient()
@@ -2419,7 +2491,9 @@ class ExecutionTests(unittest.TestCase):
                 concurrent = dict(kwargs)
                 concurrent["issue_id"] = "concurrent-different-id"
                 super().create_project_issue(**concurrent)
-                raise lane.ContractError("Linear API HTTP 429: rate limited")
+                raise lane.LinearProviderError(
+                    "Linear API HTTP 429: rate limited", http_status=429
+                )
 
         with tempfile.TemporaryDirectory() as tmp:
             client = ConcurrentTitleClient()
@@ -2449,7 +2523,9 @@ class ExecutionTests(unittest.TestCase):
 
             def create_project_issue(self, **_kwargs):
                 self.create_attempts += 1
-                raise lane.ContractError("Linear API HTTP 503: unavailable")
+                raise lane.LinearProviderError(
+                    "Linear API HTTP 503: unavailable", http_status=503
+                )
 
         with tempfile.TemporaryDirectory() as tmp:
             client = PersistentlyUnavailableClient()
@@ -2598,7 +2674,9 @@ class ExecutionTests(unittest.TestCase):
             def create_project_issue(self, **kwargs):
                 self.parent_attempts += 1
                 super().create_project_issue(**kwargs)
-                raise lane.ContractError("Linear API request failed: timed out")
+                raise lane.LinearProviderError(
+                    "Linear API request failed: timed out", transport_failure=True
+                )
 
         with tempfile.TemporaryDirectory() as tmp:
             client = LostParentResponseClient()
@@ -2629,7 +2707,10 @@ class ExecutionTests(unittest.TestCase):
                 super().create_issue(**kwargs)
                 if kwargs["title"] == "Король Лир" and not self.failed:
                     self.failed = True
-                    raise lane.ContractError("Linear API request failed: timed out")
+                    raise lane.LinearProviderError(
+                        "Linear API request failed: timed out",
+                        transport_failure=True,
+                    )
 
         with tempfile.TemporaryDirectory() as tmp:
             client = LostChildResponseClient()
@@ -2662,7 +2743,9 @@ class ExecutionTests(unittest.TestCase):
                     self.child_attempt_ids.append(kwargs["issue_id"])
                     if not self.failed:
                         self.failed = True
-                        raise lane.ContractError("Linear API HTTP 429: rate limited")
+                        raise lane.LinearProviderError(
+                            "Linear API HTTP 429: rate limited", http_status=429
+                        )
                 super().create_issue(**kwargs)
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -2691,7 +2774,9 @@ class ExecutionTests(unittest.TestCase):
             def create_issue(self, **kwargs):
                 if kwargs["title"] == "Король Лир":
                     self.child_attempt_ids.append(kwargs["issue_id"])
-                    raise lane.ContractError("Linear API HTTP 503: unavailable")
+                    raise lane.LinearProviderError(
+                        "Linear API HTTP 503: unavailable", http_status=503
+                    )
                 super().create_issue(**kwargs)
 
         with tempfile.TemporaryDirectory() as tmp:

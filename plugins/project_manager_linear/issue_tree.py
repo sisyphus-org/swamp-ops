@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
-import re
 import sys
 import uuid
 from dataclasses import dataclass
@@ -415,24 +414,15 @@ def _plan_action(action: str, title: str, fields: list[str] | None = None) -> di
 
 def _retryable_provider_failure(exc: BaseException) -> bool:
     """Recognize only bounded transport/provider failures safe for deterministic replay."""
-    message = str(exc)
-    if message.startswith("Linear API request failed:"):
+    if getattr(exc, "transport_failure", False) is True:
         return True
-    if message == "Linear API response was not valid JSON":
+    if getattr(exc, "malformed_response", False) is True:
         return True
-    folded = message.casefold()
-    if "ratelimited" in folded and message.startswith(
-        ("Linear API HTTP 400:", "Linear GraphQL error:")
-    ):
+    status = getattr(exc, "http_status", None)
+    if status in {408, 425, 429, 500, 502, 503, 504}:
         return True
-    match = re.match(r"^Linear API HTTP ([0-9]{3}):", message)
-    if match is not None:
-        status = int(match.group(1))
-        return status in {408, 425, 429, 500, 502, 503, 504}
-    return message.startswith("Linear GraphQL error:") and any(
-        marker in folded
-        for marker in ("rate limit", "temporarily unavailable", "timeout")
-    )
+    codes = getattr(exc, "graphql_codes", ())
+    return isinstance(codes, tuple) and "RATELIMITED" in codes
 
 
 def _reconcile(
