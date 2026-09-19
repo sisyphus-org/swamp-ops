@@ -3074,6 +3074,21 @@ class PluginTests(unittest.TestCase):
                     },
                 )
 
+    def test_public_block_reason_preserves_verified_absent_provider_failure(self):
+        for operation in ("create_standalone_issue", "converge_issue_tree"):
+            reason = f"{operation} provider unavailable after verified absent read-back"
+            with self.subTest(operation=operation):
+                self.assertEqual(
+                    _public_result(
+                        {
+                            "status": "blocked",
+                            "operation": operation,
+                            "reason": f"Linear command failed: {reason}",
+                        }
+                    ),
+                    {"status": "blocked", "message": f"Не удалось выполнить: {reason}."},
+                )
+
     def test_public_block_reason_preserves_factual_name_fallback_scope_failure(self):
         reason = "project exact-name match conflicts with live scope or name"
         self.assertEqual(

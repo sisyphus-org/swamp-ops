@@ -1,7 +1,8 @@
 name: linear-source-route
-version: 2.0.0
+version: 2.0.1
 description: >-
-  Exact-session ingress for bounded Linear, Calendar, and GitHub/Swamp routes.
+  Exact-session ingress for bounded Linear, Calendar, and GitHub/Swamp routes,
+  including one audited retry for verified-absent deterministic issue creates.
 author: sisyphus-org
 kind: backend
 provides_tools:

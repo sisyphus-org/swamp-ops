@@ -27,6 +27,7 @@ LINEAR_BULK_APPROVAL_REFERENCE = re.compile(
     r"^linear-bulk-approval:v1:[0-9a-f]{64}$"
 )
 TERMINAL_IN_FLIGHT = {"todo", "ready", "running", "review"}
+RECOVERABLE_CREATE_OPERATIONS = {"create_standalone_issue", "converge_issue_tree"}
 CREDENTIAL_SHAPES = (
     re.compile(r"Authorization:\s*(?:Bearer|Basic)\s+\S+", re.IGNORECASE),
     re.compile(r"\b(?:ghp_|github_pat_)[A-Za-z0-9_]{20,}\b"),
@@ -1797,6 +1798,33 @@ def route_request(
                 )
             return completed
         if status == "blocked":
+            reason = board.block_reason(task["id"])
+            expected_reason = (
+                f"Linear command failed: {command['operation']} provider unavailable "
+                "after verified absent read-back"
+            )
+            if (
+                command["operation"] in RECOVERABLE_CREATE_OPERATIONS
+                and reason == expected_reason
+                and board.block_count(task["id"]) == 1
+            ):
+                task_id = task["id"]
+                board.set_wake_route(task_id, source)
+                audit = board.audit_route(task_id, source)
+                if audit.get("result") != "pass":
+                    raise RouteError("route audit failed; blocked create task was not requeued")
+                board.release(
+                    task_id,
+                    "deterministic create retry after verified absent provider failure",
+                )
+                return {
+                    "status": "queued",
+                    "task_id": task_id,
+                    "idempotency_key": idempotency_key,
+                    "delivery_key": delivery_key,
+                    "replayed": True,
+                    "route_audit": audit,
+                }
             return {
                 "status": "blocked",
                 "task_id": task["id"],
@@ -1804,7 +1832,7 @@ def route_request(
                 "delivery_key": delivery_key,
                 "replayed": True,
                 "operation": command["operation"],
-                "reason": board.block_reason(task["id"]),
+                "reason": reason,
             }
         if status in TERMINAL_IN_FLIGHT:
             return {
