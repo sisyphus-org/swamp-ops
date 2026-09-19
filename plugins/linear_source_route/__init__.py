@@ -140,6 +140,9 @@ PUBLIC_BLOCK_REASON_PATTERNS = {
         re.compile(
             rf"^create_standalone_issue read-back mismatched fields: {PUBLIC_MISMATCH_LIST}$"
         ),
+        re.compile(
+            r"^create_standalone_issue provider unavailable after verified absent read-back$"
+        ),
     ),
     "converge_issue_tree": (
         re.compile(r"^exact SIS team was not found$"),
@@ -149,6 +152,9 @@ PUBLIC_BLOCK_REASON_PATTERNS = {
         re.compile(r"^(?:project|milestone) exact-name match conflicts with live scope or name$"),
         re.compile(
             rf"^converge_issue_tree read-back mismatched fields: {PUBLIC_MISMATCH_LIST}$"
+        ),
+        re.compile(
+            r"^converge_issue_tree provider unavailable after verified absent read-back$"
         ),
     ),
 }

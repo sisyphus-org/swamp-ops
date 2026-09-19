@@ -653,6 +653,44 @@ class ContractError(RuntimeError):
     """The command or live state violates the bounded lane contract."""
 
 
+class LinearProviderError(ContractError):
+    """A normalized Linear transport or provider failure with typed retry metadata."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        http_status: int | None = None,
+        graphql_codes: tuple[str, ...] = (),
+        transport_failure: bool = False,
+        malformed_response: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.http_status = http_status
+        self.graphql_codes = graphql_codes
+        self.transport_failure = transport_failure
+        self.malformed_response = malformed_response
+
+
+def _graphql_errors(value: Any) -> tuple[list[str], tuple[str, ...]]:
+    """Project GraphQL errors into safe messages and exact extension codes."""
+    if not isinstance(value, list):
+        return ["unknown GraphQL error"], ()
+    messages: list[str] = []
+    codes: list[str] = []
+    for item in value:
+        if not isinstance(item, dict):
+            messages.append("unknown GraphQL error")
+            continue
+        message = item.get("message")
+        messages.append(message if isinstance(message, str) else "unknown GraphQL error")
+        extensions = item.get("extensions")
+        code = extensions.get("code") if isinstance(extensions, dict) else None
+        if isinstance(code, str) and code and len(code) <= 100:
+            codes.append(code)
+    return messages, tuple(sorted(set(codes)))
+
+
 def _load_bundled_module(filename: str, name: str) -> Any:
     """Load one bundled module consistently in package and standalone contexts."""
     import sys
@@ -753,16 +791,36 @@ class LinearClient:
                 payload = json.load(response)
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode(errors="replace")[:1000]
-            raise ContractError(f"Linear API HTTP {exc.code}: {detail}") from exc
+            try:
+                error_payload = json.loads(detail)
+            except json.JSONDecodeError:
+                error_payload = None
+            _, codes = _graphql_errors(
+                error_payload.get("errors") if isinstance(error_payload, dict) else None
+            )
+            raise LinearProviderError(
+                f"Linear API HTTP {exc.code}: {detail}",
+                http_status=exc.code,
+                graphql_codes=codes,
+            ) from exc
         except (urllib.error.URLError, TimeoutError) as exc:
-            raise ContractError(f"Linear API request failed: {exc}") from exc
+            raise LinearProviderError(
+                f"Linear API request failed: {exc}", transport_failure=True
+            ) from exc
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            raise ContractError("Linear API response was not valid JSON") from exc
+            raise LinearProviderError(
+                "Linear API response was not valid JSON", malformed_response=True
+            ) from exc
         if not isinstance(payload, dict):
-            raise ContractError("Linear API response root was not an object")
+            raise LinearProviderError(
+                "Linear API response root was not an object", malformed_response=True
+            )
         if payload.get("errors"):
-            messages = [item.get("message", "unknown GraphQL error") for item in payload["errors"]]
-            raise ContractError("Linear GraphQL error: " + "; ".join(messages))
+            messages, codes = _graphql_errors(payload["errors"])
+            raise LinearProviderError(
+                "Linear GraphQL error: " + "; ".join(messages),
+                graphql_codes=codes,
+            )
         data = payload.get("data")
         if not isinstance(data, dict):
             raise ContractError("Linear API response did not contain data")

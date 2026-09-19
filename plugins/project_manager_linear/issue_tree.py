@@ -412,6 +412,19 @@ def _plan_action(action: str, title: str, fields: list[str] | None = None) -> di
     return result
 
 
+def _retryable_provider_failure(exc: BaseException) -> bool:
+    """Recognize only bounded transport/provider failures safe for deterministic replay."""
+    if getattr(exc, "transport_failure", False) is True:
+        return True
+    if getattr(exc, "malformed_response", False) is True:
+        return True
+    status = getattr(exc, "http_status", None)
+    if status in {408, 425, 429, 500, 502, 503, 504}:
+        return True
+    codes = getattr(exc, "graphql_codes", ())
+    return isinstance(codes, tuple) and "RATELIMITED" in codes
+
+
 def _reconcile(
     client: Any,
     live: dict[str, Any],
@@ -533,16 +546,43 @@ def execute(
         )
 
     if issue is None:
-        client.create_project_issue(
-            issue_id=issue_id,
-            team_id=scope.team["id"],
-            project_id=scope.project["id"],
-            milestone_id=scope.milestone["id"],
-            title=change["issue"]["title"],
-            description=change["issue"]["description"],
-            state_id=scope.states[change["issue"]["state"]]["id"],
-            priority=PRIORITIES[change["issue"]["priority"]],
-        )
+        create_attempts = 0
+        while issue is None and create_attempts < 2:
+            create_attempts += 1
+            try:
+                client.create_project_issue(
+                    issue_id=issue_id,
+                    team_id=scope.team["id"],
+                    project_id=scope.project["id"],
+                    milestone_id=scope.milestone["id"],
+                    title=change["issue"]["title"],
+                    description=change["issue"]["description"],
+                    state_id=scope.states[change["issue"]["state"]]["id"],
+                    priority=PRIORITIES[change["issue"]["priority"]],
+                )
+            except error_cls as exc:
+                if not _retryable_provider_failure(exc):
+                    raise
+                scope = _exact_scope(client, change, error_cls)
+                issue, legacy = _select_issue(
+                    scope.issues,
+                    issue_id,
+                    change["issue"]["title"],
+                    error_cls,
+                    allow_legacy=False,
+                )
+                if issue is not None and issue.get("id") != issue_id:
+                    _fail(
+                        error_cls,
+                        _COMPARISON.mismatch_message(operation, ["id/title"]),
+                    )
+                if issue is None and create_attempts == 2:
+                    _fail(
+                        error_cls,
+                        f"{operation} provider unavailable after verified absent read-back",
+                    )
+            else:
+                break
     else:
         fields = _issue_mismatches(
             issue,
@@ -600,15 +640,41 @@ def execute(
         )
         _require_issue_identity(child, operation, error_cls)
         if child is None:
-            client.create_issue(
-                issue_id=child_id,
-                team_id=scope.team["id"],
-                state_id=scope.states[spec["state"]]["id"],
-                parent_id=issue["id"],
-                title=spec["title"],
-                description=spec["description"],
-                priority=PRIORITIES[spec["priority"]],
-            )
+            create_attempts = 0
+            while child is None and create_attempts < 2:
+                create_attempts += 1
+                try:
+                    client.create_issue(
+                        issue_id=child_id,
+                        team_id=scope.team["id"],
+                        state_id=scope.states[spec["state"]]["id"],
+                        parent_id=issue["id"],
+                        title=spec["title"],
+                        description=spec["description"],
+                        priority=PRIORITIES[spec["priority"]],
+                    )
+                except error_cls as exc:
+                    if not _retryable_provider_failure(exc):
+                        raise
+                    current_children = _bounded(
+                        client.list_child_issues(issue["identifier"]),
+                        "issue children",
+                        error_cls,
+                    )
+                    child, child_legacy = _select_issue(
+                        current_children,
+                        child_id,
+                        spec["title"],
+                        error_cls,
+                        allow_legacy=False,
+                    )
+                    if child is None and create_attempts == 2:
+                        _fail(
+                            error_cls,
+                            f"{operation} provider unavailable after verified absent read-back",
+                        )
+                else:
+                    break
         else:
             child_fields = _issue_mismatches(
                 child,

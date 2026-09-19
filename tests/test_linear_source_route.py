@@ -64,6 +64,8 @@ class FakeBoard:
     def __init__(self, *, existing=None, audit_result="pass"):
         self.existing = existing
         self.audit_result = audit_result
+        self.blocked_reason = ""
+        self.blocked_count = 0
         self.calls = []
         self.created = None
 
@@ -103,6 +105,14 @@ class FakeBoard:
 
     def release(self, task_id, reason):
         self.calls.append(("release", task_id, reason))
+
+    def block_reason(self, task_id):
+        self.calls.append(("block_reason", task_id))
+        return self.blocked_reason
+
+    def block_count(self, task_id):
+        self.calls.append(("block_count", task_id))
+        return self.blocked_count
 
 
 class ParseTests(unittest.TestCase):
@@ -1204,6 +1214,208 @@ class SourceContextTests(unittest.TestCase):
 
 
 class DispatchTests(unittest.TestCase):
+    def test_requeues_verified_absent_create_block_once(self):
+        request = {
+            "operation": "create_standalone_issue",
+            "project": {"name": "Великие книги: история идей"},
+            "milestone": {"name": "Литература — образ человека"},
+            "issue": {
+                "title": "Виктор Гюго",
+                "description": "Прочитать основные произведения.",
+                "state": "Todo",
+                "priority": "Medium",
+            },
+        }
+        parsed = route.parse_linear_request(
+            request,
+            source_profile="swe",
+            uuid_factory=uuid_factory(),
+        )
+        delivery_key = route._delivery_key(
+            parsed.command["idempotency_key"], source_context()
+        )
+        board = FakeBoard(
+            existing={
+                "id": "t_deadbeef",
+                "status": "blocked",
+                "session_id": source_context().session_id,
+                "idempotency_key": delivery_key,
+            }
+        )
+        board.blocked_reason = (
+            "Linear command failed: create_standalone_issue provider unavailable "
+            "after verified absent read-back"
+        )
+        board.blocked_count = 1
+
+        result = route.route_request(
+            request,
+            source=source_context(),
+            board=board,
+            uuid_factory=uuid_factory(),
+        )
+
+        self.assertEqual(result["status"], "queued")
+        self.assertTrue(result["replayed"])
+        self.assertEqual(
+            [call[0] for call in board.calls[-3:]], ["route", "audit", "release"]
+        )
+
+    def test_requeues_verified_absent_issue_tree_block_once(self):
+        request = {
+            "operation": "converge_issue_tree",
+            "project": {"name": "Книги"},
+            "milestone": {"name": "Английская литература"},
+            "issue": {
+                "title": "Виктор Гюго",
+                "description": "Прочитать основные произведения.",
+                "state": "Todo",
+                "priority": "Medium",
+            },
+            "sub_issues": [
+                {
+                    "title": "Собор Парижской Богоматери",
+                    "description": "Прочитать роман.",
+                    "state": "Todo",
+                    "priority": "Medium",
+                }
+            ],
+        }
+        parsed = route.parse_linear_request(
+            request,
+            source_profile="swe",
+            uuid_factory=uuid_factory(),
+        )
+        delivery_key = route._delivery_key(
+            parsed.command["idempotency_key"], source_context()
+        )
+        board = FakeBoard(
+            existing={
+                "id": "t_cafebabe",
+                "status": "blocked",
+                "session_id": source_context().session_id,
+                "idempotency_key": delivery_key,
+            }
+        )
+        board.blocked_reason = (
+            "Linear command failed: converge_issue_tree provider unavailable "
+            "after verified absent read-back"
+        )
+        board.blocked_count = 1
+
+        result = route.route_request(
+            request,
+            source=source_context(),
+            board=board,
+            uuid_factory=uuid_factory(),
+        )
+
+        self.assertEqual(result["status"], "queued")
+        self.assertTrue(result["replayed"])
+        self.assertEqual(
+            [call[0] for call in board.calls[-3:]], ["route", "audit", "release"]
+        )
+
+    def test_reports_verified_absent_create_block_after_one_requeue(self):
+        request = {
+            "operation": "create_standalone_issue",
+            "project": {"name": "Великие книги: история идей"},
+            "milestone": {"name": "Литература — образ человека"},
+            "issue": {
+                "title": "Виктор Гюго",
+                "description": "Прочитать основные произведения.",
+                "state": "Todo",
+                "priority": "Medium",
+            },
+        }
+        parsed = route.parse_linear_request(
+            request,
+            source_profile="swe",
+            uuid_factory=uuid_factory(),
+        )
+        delivery_key = route._delivery_key(
+            parsed.command["idempotency_key"], source_context()
+        )
+        reason = (
+            "Linear command failed: create_standalone_issue provider unavailable "
+            "after verified absent read-back"
+        )
+        board = FakeBoard(
+            existing={
+                "id": "t_deadbeef",
+                "status": "blocked",
+                "session_id": source_context().session_id,
+                "idempotency_key": delivery_key,
+            }
+        )
+        board.blocked_reason = reason
+        board.blocked_count = 2
+
+        result = route.route_request(
+            request,
+            source=source_context(),
+            board=board,
+            uuid_factory=uuid_factory(),
+        )
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["reason"], reason)
+        self.assertFalse(any(call[0] == "release" for call in board.calls))
+
+    def test_reports_verified_absent_issue_tree_block_after_one_requeue(self):
+        request = {
+            "operation": "converge_issue_tree",
+            "project": {"name": "Книги"},
+            "milestone": {"name": "Английская литература"},
+            "issue": {
+                "title": "Виктор Гюго",
+                "description": "Прочитать основные произведения.",
+                "state": "Todo",
+                "priority": "Medium",
+            },
+            "sub_issues": [
+                {
+                    "title": "Собор Парижской Богоматери",
+                    "description": "Прочитать роман.",
+                    "state": "Todo",
+                    "priority": "Medium",
+                }
+            ],
+        }
+        parsed = route.parse_linear_request(
+            request,
+            source_profile="swe",
+            uuid_factory=uuid_factory(),
+        )
+        delivery_key = route._delivery_key(
+            parsed.command["idempotency_key"], source_context()
+        )
+        reason = (
+            "Linear command failed: converge_issue_tree provider unavailable "
+            "after verified absent read-back"
+        )
+        board = FakeBoard(
+            existing={
+                "id": "t_cafebabe",
+                "status": "blocked",
+                "session_id": source_context().session_id,
+                "idempotency_key": delivery_key,
+            }
+        )
+        board.blocked_reason = reason
+        board.blocked_count = 2
+
+        result = route.route_request(
+            request,
+            source=source_context(),
+            board=board,
+            uuid_factory=uuid_factory(),
+        )
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["reason"], reason)
+        self.assertFalse(any(call[0] == "release" for call in board.calls))
+
     def test_fresh_legacy_comment_fails_before_task_creation(self):
         board = FakeBoard()
 

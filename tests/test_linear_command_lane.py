@@ -4,6 +4,7 @@ import copy
 import importlib.util
 import io
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -1544,6 +1545,80 @@ class ClientTests(unittest.TestCase):
             with self.assertRaisesRegex(lane.ContractError, "valid JSON"):
                 client.execute(lane.ISSUE_QUERY, {"id": "SIS-59"})
 
+    def test_non_object_json_linear_response_preserves_malformed_metadata(self):
+        client = lane.LinearClient("fixture")
+        for raw in (b"[]", b'"text"', b"null"):
+            with self.subTest(raw=raw), mock.patch.object(
+                lane.urllib.request,
+                "urlopen",
+                return_value=io.BytesIO(raw),
+            ):
+                with self.assertRaises(lane.LinearProviderError) as caught:
+                    client.execute(lane.ISSUE_QUERY, {"id": "SIS-59"})
+            self.assertTrue(caught.exception.malformed_response)
+            self.assertIsNone(caught.exception.http_status)
+            self.assertEqual(caught.exception.graphql_codes, ())
+
+    def test_client_preserves_graphql_retry_metadata(self):
+        client = lane.LinearClient("fixture")
+        cases = (
+            (
+                io.BytesIO(
+                    json.dumps(
+                        {
+                            "errors": [
+                                {
+                                    "message": "Rate limited",
+                                    "extensions": {"code": "RATELIMITED"},
+                                }
+                            ]
+                        }
+                    ).encode()
+                ),
+                None,
+            ),
+            (
+                lane.urllib.error.HTTPError(
+                    "https://api.linear.app/graphql",
+                    400,
+                    "Bad Request",
+                    {},
+                    io.BytesIO(
+                        json.dumps(
+                            {
+                                "errors": [
+                                    {
+                                        "message": "Rate limited",
+                                        "extensions": {"code": "RATELIMITED"},
+                                    }
+                                ]
+                            }
+                        ).encode()
+                    ),
+                ),
+                400,
+            ),
+        )
+        for response, status in cases:
+            with self.subTest(status=status), mock.patch.object(
+                lane.urllib.request,
+                "urlopen",
+                return_value=response if status is None else mock.DEFAULT,
+                side_effect=response if status is not None else None,
+            ):
+                with self.assertRaises(lane.LinearProviderError) as caught:
+                    client.execute(lane.ISSUE_QUERY, {"id": "SIS-59"})
+            self.assertEqual(caught.exception.http_status, status)
+            self.assertEqual(caught.exception.graphql_codes, ("RATELIMITED",))
+
+    def test_retry_classifier_rejects_permanent_code_with_transient_words(self):
+        issue_tree = lane._load_issue_tree()
+        error = lane.LinearProviderError(
+            "Linear GraphQL error: permanent timeout and rate limit policy",
+            graphql_codes=("BAD_USER_INPUT",),
+        )
+        self.assertFalse(issue_tree._retryable_provider_failure(error))
+
 
 class ExecutionTests(unittest.TestCase):
     class WorkspaceReadClient:
@@ -2292,6 +2367,196 @@ class ExecutionTests(unittest.TestCase):
             )
             self.assertEqual(len(client.issues), 1)
 
+    def test_standalone_reconciles_retryable_transport_error_after_write(self):
+        class LostResponseClient(FakeIssueTreeClient):
+            def __init__(self):
+                super().__init__()
+                self.create_attempts = 0
+
+            def create_project_issue(self, **kwargs):
+                self.create_attempts += 1
+                super().create_project_issue(**kwargs)
+                raise lane.LinearProviderError(
+                    "Linear API request failed: timed out", transport_failure=True
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = LostResponseClient()
+            result = lane.execute_command(
+                client,
+                standalone_command("linear:SIS:standalone:lost-response"),
+                mode="apply",
+                journal_path=Path(tmp) / "journal.json",
+            )
+
+        self.assertEqual(result["result"], "applied")
+        self.assertTrue(result["verified"])
+        self.assertEqual(client.create_attempts, 1)
+        self.assertEqual(len(client.issues), 1)
+
+    def test_standalone_retries_once_after_verified_absent_transient_failure(self):
+        class RetryOnceClient(FakeIssueTreeClient):
+            def __init__(self):
+                super().__init__()
+                self.create_attempts = 0
+
+            def create_project_issue(self, **kwargs):
+                self.create_attempts += 1
+                if self.create_attempts == 1:
+                    raise lane.LinearProviderError(
+                        "Linear API HTTP 429: rate limited", http_status=429
+                    )
+                super().create_project_issue(**kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = RetryOnceClient()
+            result = lane.execute_command(
+                client,
+                standalone_command("linear:SIS:standalone:retry-once"),
+                mode="apply",
+                journal_path=Path(tmp) / "journal.json",
+            )
+
+        self.assertEqual(result["result"], "applied")
+        self.assertTrue(result["verified"])
+        self.assertEqual(client.create_attempts, 2)
+        self.assertEqual(len(client.issues), 1)
+
+    def test_standalone_retries_linear_ratelimited_error_shapes(self):
+        failures = (
+            (
+                'Linear API HTTP 400: {"errors":[{"extensions":{"code":"RATELIMITED"}}]}',
+                {"http_status": 400, "graphql_codes": ("RATELIMITED",)},
+            ),
+            (
+                "Linear GraphQL error: RATELIMITED",
+                {"graphql_codes": ("RATELIMITED",)},
+            ),
+        )
+        for index, (failure, metadata) in enumerate(failures):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
+                class RateLimitedClient(FakeIssueTreeClient):
+                    def __init__(self):
+                        super().__init__()
+                        self.create_attempts = 0
+
+                    def create_project_issue(self, **kwargs):
+                        self.create_attempts += 1
+                        if self.create_attempts == 1:
+                            raise lane.LinearProviderError(failure, **metadata)
+                        super().create_project_issue(**kwargs)
+
+                client = RateLimitedClient()
+                result = lane.execute_command(
+                    client,
+                    standalone_command(f"linear:SIS:standalone:ratelimited-{index}"),
+                    mode="apply",
+                    journal_path=Path(tmp) / "journal.json",
+                )
+
+                self.assertEqual(result["result"], "applied")
+                self.assertEqual(client.create_attempts, 2)
+                self.assertEqual(len(client.issues), 1)
+
+    def test_standalone_does_not_retry_permanent_http_failures(self):
+        failures = (
+            (400, "Linear API HTTP 400: bad request"),
+            (401, "Linear API HTTP 401: unauthorized"),
+            (403, "Linear API HTTP 403: forbidden"),
+            (404, "Linear API HTTP 404: not found"),
+            (501, "Linear API HTTP 501: not implemented"),
+            (505, "Linear API HTTP 505: version not supported"),
+        )
+        for index, (status, failure) in enumerate(failures):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
+                class PermanentFailureClient(FakeIssueTreeClient):
+                    def __init__(self):
+                        super().__init__()
+                        self.create_attempts = 0
+
+                    def create_project_issue(self, **kwargs):
+                        self.create_attempts += 1
+                        if self.create_attempts == 1:
+                            raise lane.LinearProviderError(
+                                failure, http_status=status
+                            )
+                        super().create_project_issue(**kwargs)
+
+                client = PermanentFailureClient()
+                with self.assertRaisesRegex(lane.ContractError, re.escape(failure)):
+                    lane.execute_command(
+                        client,
+                        standalone_command(f"linear:SIS:standalone:permanent-{index}"),
+                        mode="apply",
+                        journal_path=Path(tmp) / "journal.json",
+                    )
+
+                self.assertEqual(client.create_attempts, 1)
+                self.assertEqual(client.issues, [])
+
+    def test_standalone_transient_reconciliation_rejects_different_id_title_match(self):
+        class ConcurrentTitleClient(FakeIssueTreeClient):
+            def __init__(self):
+                super().__init__()
+                self.create_attempts = 0
+
+            def create_project_issue(self, **kwargs):
+                self.create_attempts += 1
+                concurrent = dict(kwargs)
+                concurrent["issue_id"] = "concurrent-different-id"
+                super().create_project_issue(**concurrent)
+                raise lane.LinearProviderError(
+                    "Linear API HTTP 429: rate limited", http_status=429
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = ConcurrentTitleClient()
+            with self.assertRaisesRegex(
+                lane.ContractError,
+                "create_standalone_issue read-back mismatched fields: id/title",
+            ):
+                lane.execute_command(
+                    client,
+                    standalone_command("linear:SIS:standalone:concurrent-title"),
+                    mode="apply",
+                    journal_path=Path(tmp) / "journal.json",
+                )
+
+        self.assertEqual(client.create_attempts, 1)
+        self.assertEqual(len(client.issues), 1)
+        self.assertEqual(client.issues[0]["id"], "concurrent-different-id")
+        self.assertFalse(
+            any(call[0] == "update_scoped_issue" for call in client.calls)
+        )
+
+    def test_standalone_reports_verified_absence_after_bounded_retry_exhaustion(self):
+        class PersistentlyUnavailableClient(FakeIssueTreeClient):
+            def __init__(self):
+                super().__init__()
+                self.create_attempts = 0
+
+            def create_project_issue(self, **_kwargs):
+                self.create_attempts += 1
+                raise lane.LinearProviderError(
+                    "Linear API HTTP 503: unavailable", http_status=503
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = PersistentlyUnavailableClient()
+            with self.assertRaisesRegex(
+                lane.ContractError,
+                "create_standalone_issue provider unavailable after verified absent read-back",
+            ):
+                lane.execute_command(
+                    client,
+                    standalone_command("linear:SIS:standalone:retry-exhausted"),
+                    mode="apply",
+                    journal_path=Path(tmp) / "journal.json",
+                )
+
+        self.assertEqual(client.create_attempts, 2)
+        self.assertEqual(client.issues, [])
+
     def test_standalone_accepts_consistent_partial_exact_title_projection(self):
         class PartialTitleProjectionClient(FakeIssueTreeClient):
             conflict = False
@@ -2411,6 +2676,139 @@ class ExecutionTests(unittest.TestCase):
                     mode="apply",
                     journal_path=Path(tmp) / "journal.json",
                 )
+
+    def test_issue_tree_parent_create_reconciles_lost_response_without_duplicate(self):
+        class LostParentResponseClient(FakeIssueTreeClient):
+            def __init__(self):
+                super().__init__(
+                    project_name="Книги", milestone_name="Английская литература"
+                )
+                self.parent_attempts = 0
+
+            def create_project_issue(self, **kwargs):
+                self.parent_attempts += 1
+                super().create_project_issue(**kwargs)
+                raise lane.LinearProviderError(
+                    "Linear API request failed: timed out", transport_failure=True
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = LostParentResponseClient()
+            result = lane.execute_command(
+                client,
+                issue_tree_command("linear:SIS:tree:lost-parent-response"),
+                mode="apply",
+                journal_path=Path(tmp) / "journal.json",
+            )
+
+        self.assertEqual(result["result"], "applied")
+        self.assertTrue(result["verified"])
+        self.assertEqual(client.parent_attempts, 1)
+        self.assertEqual(len(client.issues), 5)
+
+    def test_issue_tree_child_reconciles_lost_response_without_duplicate(self):
+        class LostChildResponseClient(FakeIssueTreeClient):
+            def __init__(self):
+                super().__init__(
+                    project_name="Книги", milestone_name="Английская литература"
+                )
+                self.failed = False
+                self.child_attempt_ids = []
+
+            def create_issue(self, **kwargs):
+                if kwargs["title"] == "Король Лир":
+                    self.child_attempt_ids.append(kwargs["issue_id"])
+                super().create_issue(**kwargs)
+                if kwargs["title"] == "Король Лир" and not self.failed:
+                    self.failed = True
+                    raise lane.LinearProviderError(
+                        "Linear API request failed: timed out",
+                        transport_failure=True,
+                    )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = LostChildResponseClient()
+            result = lane.execute_command(
+                client,
+                issue_tree_command("linear:SIS:tree:lost-child-response"),
+                mode="apply",
+                journal_path=Path(tmp) / "journal.json",
+            )
+
+        self.assertEqual(result["result"], "applied")
+        self.assertTrue(result["verified"])
+        self.assertEqual(len(client.child_attempt_ids), 1)
+        self.assertEqual(len(client.issues), 5)
+        self.assertEqual(
+            [item["title"] for item in client.issues].count("Король Лир"), 1
+        )
+
+    def test_issue_tree_child_retries_verified_absent_with_same_id(self):
+        class RetryChildOnceClient(FakeIssueTreeClient):
+            def __init__(self):
+                super().__init__(
+                    project_name="Книги", milestone_name="Английская литература"
+                )
+                self.failed = False
+                self.child_attempt_ids = []
+
+            def create_issue(self, **kwargs):
+                if kwargs["title"] == "Король Лир":
+                    self.child_attempt_ids.append(kwargs["issue_id"])
+                    if not self.failed:
+                        self.failed = True
+                        raise lane.LinearProviderError(
+                            "Linear API HTTP 429: rate limited", http_status=429
+                        )
+                super().create_issue(**kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = RetryChildOnceClient()
+            result = lane.execute_command(
+                client,
+                issue_tree_command("linear:SIS:tree:retry-child"),
+                mode="apply",
+                journal_path=Path(tmp) / "journal.json",
+            )
+
+        self.assertEqual(result["result"], "applied")
+        self.assertTrue(result["verified"])
+        self.assertEqual(len(client.child_attempt_ids), 2)
+        self.assertEqual(len(set(client.child_attempt_ids)), 1)
+        self.assertEqual(len(client.issues), 5)
+
+    def test_issue_tree_child_retry_exhaustion_is_bounded_and_verified_absent(self):
+        class UnavailableChildClient(FakeIssueTreeClient):
+            def __init__(self):
+                super().__init__(
+                    project_name="Книги", milestone_name="Английская литература"
+                )
+                self.child_attempt_ids = []
+
+            def create_issue(self, **kwargs):
+                if kwargs["title"] == "Король Лир":
+                    self.child_attempt_ids.append(kwargs["issue_id"])
+                    raise lane.LinearProviderError(
+                        "Linear API HTTP 503: unavailable", http_status=503
+                    )
+                super().create_issue(**kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = UnavailableChildClient()
+            with self.assertRaisesRegex(
+                lane.ContractError,
+                "converge_issue_tree provider unavailable after verified absent read-back",
+            ):
+                lane.execute_command(
+                    client,
+                    issue_tree_command("linear:SIS:tree:unavailable-child"),
+                    mode="apply",
+                    journal_path=Path(tmp) / "journal.json",
+                )
+
+        self.assertEqual(len(client.child_attempt_ids), 2)
+        self.assertEqual(len(set(client.child_attempt_ids)), 1)
+        self.assertEqual(len(client.issues), 1)
 
     def test_issue_tree_recovers_after_partial_child_write_and_literal_replay(self):
         class CrashAfterSecondChild(FakeIssueTreeClient):
