@@ -812,7 +812,9 @@ class LinearClient:
                 "Linear API response was not valid JSON", malformed_response=True
             ) from exc
         if not isinstance(payload, dict):
-            raise ContractError("Linear API response root was not an object")
+            raise LinearProviderError(
+                "Linear API response root was not an object", malformed_response=True
+            )
         if payload.get("errors"):
             messages, codes = _graphql_errors(payload["errors"])
             raise LinearProviderError(

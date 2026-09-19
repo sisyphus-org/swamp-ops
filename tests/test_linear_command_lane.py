@@ -1545,6 +1545,20 @@ class ClientTests(unittest.TestCase):
             with self.assertRaisesRegex(lane.ContractError, "valid JSON"):
                 client.execute(lane.ISSUE_QUERY, {"id": "SIS-59"})
 
+    def test_non_object_json_linear_response_preserves_malformed_metadata(self):
+        client = lane.LinearClient("fixture")
+        for raw in (b"[]", b'"text"', b"null"):
+            with self.subTest(raw=raw), mock.patch.object(
+                lane.urllib.request,
+                "urlopen",
+                return_value=io.BytesIO(raw),
+            ):
+                with self.assertRaises(lane.LinearProviderError) as caught:
+                    client.execute(lane.ISSUE_QUERY, {"id": "SIS-59"})
+            self.assertTrue(caught.exception.malformed_response)
+            self.assertIsNone(caught.exception.http_status)
+            self.assertEqual(caught.exception.graphql_codes, ())
+
     def test_client_preserves_graphql_retry_metadata(self):
         client = lane.LinearClient("fixture")
         cases = (
