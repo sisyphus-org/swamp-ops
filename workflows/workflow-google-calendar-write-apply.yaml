@@ -1,6 +1,6 @@
 id: 87f743cb-71dc-40e4-a0df-93a204588314
 name: google-calendar-write-apply
-description: Verify exact plan and approval provenance, then create, update, or delete one primary-calendar event with exact read-back.
+description: Verify exact plan and approval provenance, then mutate one event on the protected profile-local Calendar target with exact read-back.
 tags:
   domain: hermes-platform
   integration: google-calendar

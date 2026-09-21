@@ -5,13 +5,21 @@
 The Personal Assistant Google Calendar integration is split into two deterministic lanes:
 
 - a bounded **read-only** lane;
-- a primary-calendar **create/update/delete** lane with protected planning, target snapshot, internal attestation, provider preconditions, and exact read-back.
+- a single configured-target **create/update/delete** lane with protected planning, target snapshot, internal attestation, provider preconditions, and exact read-back.
 
 Calendar and Linear are independent operations. The Calendar lane never receives Linear credentials and never calls Linear. Standalone events omit `linearUrl`; when the owner explicitly asks to link an SIS issue, the orchestrator resolves it through broker → Project Manager and passes the returned canonical `https://linear.app/.../issue/SIS-N/...` URL into the Calendar plan. Linked create/update operations preserve it in the event description as `Linear: <canonical URL>`.
 
+### Authentication and protected target
+
+- The owner places `google_service_account.json` and `google_calendar_target.json` in the `personal-assistant` profile root and sets both files to mode `0600`. Bootstrap declares these filenames and owner steps but never writes or prints their values.
+- Service-account credentials are preferred whenever `google_service_account.json` exists and are created with exactly the three existing Calendar scopes. An invalid, malformed, symlinked, or non-`0600` service-account file fails closed; the loader never falls back to OAuth in that state.
+- `google_calendar_target.json` is a closed JSON object containing only the nonempty `calendar_id` field. The identifier is bounded to 1024 characters and every character must be Unicode-printable; controls, newlines, separators such as U+0085/U+2028, and format controls such as U+200B are rejected. Service-account mode requires this file and rejects literal `primary`.
+- `google_token.json` remains an owner-only `0600` authorized-user OAuth fallback only while `google_service_account.json` is absent. In that fallback mode, an absent target file resolves to `primary` for rollout availability; a present target file is still validated and used.
+- The configured Calendar identifier is protected data. It is used inside credential, read, write, and worker validation paths but is never included in sanitized stdout, Kanban results, or logs.
+
 ### Read allowlist
 
-- **Calendar ID**: `primary` only.
+- **Calendar target**: exactly the profile-local configured target (or the temporary OAuth fallback target described above); callers cannot provide a Calendar ID.
 - **Scopes**: `calendar.calendarlist.readonly`, `calendar.events`, `calendar.freebusy`.
   - `calendar.events` supports the bounded managed-write lane; possession of the scope does not authorize a write. Authorization comes only from an exact authenticated owner command routed through the bounded source contract.
   - Zero non-Calendar scopes (Gmail, Drive, Docs, Sheets, Contacts, etc.).
@@ -19,13 +27,13 @@ Calendar and Linear are independent operations. The Calendar lane never receives
 
 ### Write allowlist
 
-- **Calendar ID**: `primary` only.
+- **Calendar target**: the same protected profile-local target is bound into every new plan as `calendarTargetHash`, the domain-separated SHA-256 of the identifier. The identifier itself never enters plan stdout or workflow logs, and callers cannot override it. Apply and the worker reload the protected target and verify the binding. Legacy artifacts containing exactly `calendarId: "primary"` are accepted only while the current protected target is the OAuth fallback `primary`; service-account mode rejects them.
 - **Operation**: create, update, or delete one timed event block only.
 - **Optional linkage**: a canonical `SIS-N` Linear issue URL may be preserved in the event description, but is never required for a normal Calendar operation.
 - **Stable identity**: linked event IDs retain the existing domain-separated SHA-256 of Linear identifier plus safe `blockKey`. Standalone event IDs use a separate domain and safe `blockKey`; source callers include a date or other unique discriminator in that key. Both identities are independent of the plan checksum, so changed fields still address the same block without colliding across linked and standalone namespaces.
-- **Authorization and attestation**: a clear authenticated owner create/update/delete command authorizes that exact bounded write without a second conversational confirmation. The plan workflow stores the exact event body and SHA-256 checksum in its protected artifact. The snapshot workflow binds the target's current state; an internal approval workflow emits a checksum-bound attestation. Apply accepts only fixed-format plan/attestation references, and Personal Assistant re-reads the target-state hash immediately before apply and rejects intervening edits.
+- **Authorization and attestation**: a clear authenticated owner create/update/delete command authorizes that exact bounded write without a second conversational confirmation. The plan workflow stores the exact event body, a non-PII hash binding for the configured calendar, and a SHA-256 checksum in its protected artifact. Apply loads the configured calendar exactly once, validates the plan against that immutable in-process binding, and uses the same value for every provider call. The snapshot workflow binds the target's current state; an internal approval workflow emits a checksum-bound attestation. Apply accepts only fixed-format plan/attestation references, and Personal Assistant re-reads the target-state hash immediately before apply and rejects intervening edits.
 - **Read-back/replay**: create inserts only when absent; update requires the exact deterministic target and uses `events.update`; delete requires that same target and accepts either HTTP 404 or Google's `status: cancelled` tombstone as verified absence. Linked targets retain exact-link validation; standalone targets use their separate event-ID namespace. Exact create/update replay and already-absent delete are verified no-ops. A later approved create for the same block restores a cancelled tombstone with `status: confirmed` instead of attempting a duplicate insert. Google’s observed `Europe/Kiev` alias/offset serialization is accepted only when it represents the exact planned UTC instants. Ambiguous write responses are reconciled by deterministic GET.
-- Recurrence, attendees, notifications, and non-primary calendars remain blocked.
+- Recurrence, notifications, and writes outside the one configured target remain blocked. Existing deterministic targets with any attendee entry are rejected before no-op, update, restore, or delete handling; this lane never manages attendee-bearing events.
 
 ### Protected data
 
@@ -69,8 +77,9 @@ Expected stdout: counts of calendars and writable calendars.
   --profile personal-assistant --live
 ```
 
-Reads the primary calendar API, normalizes all-day / timed / recurring events to Kyiv-safe forms,
+Reads the protected target directly, normalizes all-day / timed / recurring events to Kyiv-safe forms,
 and prints a redacted payload. No event titles, locations, or descriptions appear in stdout.
+Inventory calls only `calendarList.get(calendarId=<protected target>)`; it never enumerates CalendarList. An `owner` or `writer` access role reports one writable target, while `reader` or `freeBusyReader` reports zero. If the exact target has no CalendarList entry (HTTP 404), inventory performs one bounded `events.list(maxResults=1)` readability probe and omits `writable_calendar_count` because write permission is unknown. Other provider failures fail closed with target-free errors. Each live read resolves the target once and reuses that immutable value for every provider call and result lookup; events and free/busy do not claim write permission.
 
 ## Protected Calendar create/update/delete
 
@@ -120,7 +129,7 @@ swamp workflow run google-calendar-write-apply \
   --input beforeStateHash=<approved-before-state-sha256>
 ```
 
-Apply reloads the exact plan (including `operation`, `blockKey`, and deterministic `eventId`), rebuilds it from exact workflow inputs, verifies the approval workflow and manual step succeeded, verifies attestation provenance and checksum binding, and obtains an opaque in-process authorization token. The source-routed worker additionally compares the approved before-state hash with a fresh snapshot immediately before mutation; update/delete/restore carry the observed Google event ETag as `If-Match`, so a concurrent provider-side edit fails atomically. Normal output contains only `operation`, `status`, `reused`, Linear identifier, and `blockKey`; it excludes title and description.
+Apply reloads the exact plan (including `calendarTargetHash`, `operation`, `blockKey`, and deterministic `eventId`), rebuilds it from exact workflow inputs, reloads the protected target to verify the target hash, verifies the approval workflow and manual step succeeded, verifies attestation provenance and checksum binding, and obtains an opaque in-process authorization token. The only legacy exception is an already-issued closed plan with `calendarId: "primary"`, accepted only when the current protected target is OAuth `primary`. The source-routed worker additionally compares the approved before-state hash with a fresh snapshot immediately before mutation; update/delete/restore carry the observed Google event ETag as `If-Match`, so a concurrent provider-side edit fails atomically. Normal output contains only `operation`, `status`, `reused`, Linear identifier, and `blockKey`; it excludes title and description.
 
 ## Universal source-profile route (SIS-123)
 
@@ -130,7 +139,7 @@ Runtime/rollout evidence and the still-pending production tracer are in [`univer
 
 ## Remaining future work
 
-- Multi-calendar read/write (beyond primary).
+- Multi-calendar read/write (beyond the one protected configured target).
 - Sync/recurrence engine.
 
 ## Verification

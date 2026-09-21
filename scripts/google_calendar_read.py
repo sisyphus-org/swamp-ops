@@ -5,7 +5,7 @@ Public seams:
   - WindowSpec: bounded read windows (today, next-7-days, next-30-days).
   - normalize_event: all-day / timed / recurring normalization.
   - build_query_bounds: Europe/Kyiv-aware datetime bounds.
-  - list_calendars_paginated, list_events_paginated, query_freebusy: pagination + Kyiv.
+  - list_events_paginated, query_freebusy: internally resolved target-only reads + Kyiv.
   - run_read: atomic payload write + sanitized stdout (no sensitive data).
 
 NO live network calls are made unless --live is given and the profile-local
@@ -26,11 +26,6 @@ from pathlib import Path
 from typing import Any, Iterator
 from zoneinfo import ZoneInfo
 
-try:
-    from google.oauth2 import service_account  # noqa: F401
-except Exception:  # pragma: no cover
-    service_account = None  # type: ignore
-
 # Reuse the OAuth helper (loaded by spec to avoid path issues)
 import importlib.util
 _spec = importlib.util.spec_from_file_location("calendar_creds", Path(__file__).parent / "calendar_creds.py")
@@ -43,15 +38,10 @@ ALLOWED_SCOPES = creds_mod.ALLOWED_SCOPES
 validate_scopes = creds_mod.validate_scopes
 profile_root = creds_mod.profile_root
 token_path = creds_mod.token_path
+load_calendar_target = creds_mod.load_calendar_target
 
 KYIV = ZoneInfo("Europe/Kyiv")
 VALID_WINDOWS = ("today", "next-7-days", "next-30-days")
-
-# Read allowlist: only the primary calendar is read in this slice.
-READ_CALENDAR_IDS: tuple[str, ...] = ("primary",)
-# Write allowlist: empty in this slice.
-WRITE_CALENDAR_IDS: tuple[str, ...] = ()
-
 
 class Window(Enum):
     TODAY = "today"
@@ -107,49 +97,114 @@ def normalize_event(raw: dict, *, include_summary: bool = False) -> dict:
     return out
 
 
-def list_calendars_paginated(service) -> Iterator[dict]:
-    """Yield each calendar in the account, exhausting pagination."""
-    req = service.calendarList().list(pageToken=None, maxResults=250, showHidden=True)
-    while req is not None:
-        resp = req.execute()
-        for item in resp.get("items", []):
-            yield item
-        req = service.calendarList().list_next(req, resp)
+def _probe_calendar_access(
+    service, calendar_id: str, time_min: datetime, time_max: datetime
+) -> None:
+    """Verify that the protected target is readable without Calendar metadata scopes."""
+    try:
+        response = service.events().list(
+            calendarId=calendar_id,
+            timeMin=time_min.isoformat(),
+            timeMax=time_max.isoformat(),
+            singleEvents=True,
+            orderBy="startTime",
+            maxResults=1,
+            timeZone=str(KYIV),
+        ).execute()
+    except Exception:
+        raise RuntimeError("target calendar readability probe failed") from None
+    if not isinstance(response, dict):
+        raise RuntimeError("target calendar probe returned malformed data")
 
 
-def list_events_paginated(service, calendar_id: str, time_min: datetime, time_max: datetime) -> Iterator[dict]:
-    """Yield events for calendar_id in [time_min, time_max), exhausting pagination."""
-    if calendar_id not in READ_CALENDAR_IDS:
-        raise PermissionError(f"calendar_id {calendar_id!r} is not in the read allowlist")
-    req = service.events().list(
-        calendarId=calendar_id,
-        timeMin=time_min.isoformat(),
-        timeMax=time_max.isoformat(),
-        singleEvents=True,
-        orderBy="startTime",
-        maxResults=250,
-        timeZone=str(KYIV),
-    )
-    while req is not None:
-        resp = req.execute()
-        for item in resp.get("items", []):
-            yield item
-        req = service.events().list_next(req, resp)
+def _http_status(exc: BaseException) -> int | None:
+    return getattr(getattr(exc, "resp", None), "status", None)
 
 
-def query_freebusy(service, time_min: datetime, time_max: datetime, calendar_ids: list[str] | None = None) -> dict:
-    """Return free/busy info for calendar_ids (defaults to READ_CALENDAR_IDS)."""
-    selected = calendar_ids or list(READ_CALENDAR_IDS)
-    if any(cid not in READ_CALENDAR_IDS for cid in selected):
-        raise PermissionError("free/busy calendar is not in the read allowlist")
-    items = [{"id": cid} for cid in selected]
+def _inventory_access(
+    service, calendar_id: str, time_min: datetime, time_max: datetime
+) -> tuple[str, bool | None]:
+    """Read only the target's CalendarList entry, with a bounded 404 fallback."""
+    try:
+        entry = service.calendarList().get(calendarId=calendar_id).execute()
+    except Exception as exc:
+        if _http_status(exc) != 404:
+            raise RuntimeError("target calendar metadata lookup failed") from None
+        _probe_calendar_access(service, calendar_id, time_min, time_max)
+        return "readable", None
+    if not isinstance(entry, dict) or entry.get("accessRole") not in {
+        "freeBusyReader", "reader", "writer", "owner",
+    }:
+        raise RuntimeError("target calendar metadata returned malformed data")
+    role = entry["accessRole"]
+    return role, role in {"writer", "owner"}
+
+
+def _list_events_for_target(
+    service, calendar_id: str, time_min: datetime, time_max: datetime
+) -> Iterator[dict]:
+    try:
+        events_api = service.events()
+        req = events_api.list(
+            calendarId=calendar_id,
+            timeMin=time_min.isoformat(),
+            timeMax=time_max.isoformat(),
+            singleEvents=True,
+            orderBy="startTime",
+            maxResults=250,
+            timeZone=str(KYIV),
+        )
+        while req is not None:
+            resp = req.execute()
+            if not isinstance(resp, dict):
+                raise RuntimeError("malformed response")
+            for item in resp.get("items", []):
+                yield item
+            req = events_api.list_next(req, resp)
+    except Exception:
+        raise RuntimeError("target calendar events read failed") from None
+
+
+def list_events_paginated(
+    service,
+    time_min: datetime,
+    time_max: datetime,
+    *,
+    profile: str = "personal-assistant",
+) -> Iterator[dict]:
+    """Yield events for one protected target resolved at the public seam."""
+    calendar_id = load_calendar_target(profile)
+    yield from _list_events_for_target(service, calendar_id, time_min, time_max)
+
+
+def _query_freebusy_for_target(
+    service, calendar_id: str, time_min: datetime, time_max: datetime
+) -> dict:
     body = {
         "timeMin": time_min.isoformat(),
         "timeMax": time_max.isoformat(),
         "timeZone": str(KYIV),
-        "items": items,
+        "items": [{"id": calendar_id}],
     }
-    return service.freebusy().query(body=body).execute()
+    try:
+        response = service.freebusy().query(body=body).execute()
+    except Exception:
+        raise RuntimeError("target calendar freebusy read failed") from None
+    if not isinstance(response, dict):
+        raise RuntimeError("target calendar freebusy returned malformed data")
+    return response
+
+
+def query_freebusy(
+    service,
+    time_min: datetime,
+    time_max: datetime,
+    *,
+    profile: str = "personal-assistant",
+) -> dict:
+    """Return free/busy for one protected target resolved at the public seam."""
+    calendar_id = load_calendar_target(profile)
+    return _query_freebusy_for_target(service, calendar_id, time_min, time_max)
 
 
 def run_read(operation: str, window: str, *, service=None, profile: str = "personal-assistant",
@@ -187,14 +242,13 @@ def run_read(operation: str, window: str, *, service=None, profile: str = "perso
             "timezone": str(KYIV),
             "window": window,
             "bounds": {"start": start.isoformat(), "end": end.isoformat()},
-            "calendars_considered": list(READ_CALENDAR_IDS),
+            "calendar_count": 1,
         }
 
-    if service is None:
-        import importlib
-        from google.auth.transport.requests import Request
+    calendar_id = load_calendar_target(profile)
 
-        from google.oauth2 import credentials as creds_mod_g
+    if service is None:
+        from google.auth.transport.requests import Request
 
         # Load via our helper
         google_creds = creds_mod.load_credentials(profile)
@@ -205,15 +259,14 @@ def run_read(operation: str, window: str, *, service=None, profile: str = "perso
         service = build("calendar", "v3", credentials=google_creds, cache_discovery=False)
 
     if operation == "inventory":
-        items = [
-            {
-                "id": c.get("id", ""),
-                "summary": "",
-                "access_role": c.get("accessRole", ""),
-                "primary": bool(c.get("primary", False)),
-            }
-            for c in list_calendars_paginated(service)
-        ]
+        access_role, writable = _inventory_access(
+            service, calendar_id, start, end
+        )
+        items = [{
+            "summary": "",
+            "access_role": access_role,
+            "primary": calendar_id == "primary",
+        }]
         result = {
             "operation": "inventory",
             "status": "ok",
@@ -221,17 +274,14 @@ def run_read(operation: str, window: str, *, service=None, profile: str = "perso
             "window": window,
             "bounds": {"start": start.isoformat(), "end": end.isoformat()},
             "calendar_count": len(items),
-            "writable_calendar_count": sum(1 for c in items if c["access_role"] in ("writer", "owner")),
             "calendars": items,
         }
+        if writable is not None:
+            result["writable_calendar_count"] = int(writable)
     elif operation == "events":
-        primary = next(
-            (c for c in list_calendars_paginated(service) if c.get("primary")),
-            None,
+        raw_events = list(
+            _list_events_for_target(service, calendar_id, start, end)
         )
-        if primary is None:
-            raise RuntimeError("primary calendar not found")
-        raw_events = list(list_events_paginated(service, "primary", start, end))
         events = [normalize_event(e, include_summary=include_summary) for e in raw_events]
         result = {
             "operation": "events",
@@ -240,15 +290,14 @@ def run_read(operation: str, window: str, *, service=None, profile: str = "perso
             "window": window,
             "bounds": {"start": start.isoformat(), "end": end.isoformat()},
             "calendar_count": 1,
-            "writable_calendar_count": 1,
             "event_count": len(events),
             "all_day_events": sum(1 for e in events if e["all_day"]),
             "recurring_events": sum(1 for e in events if e["recurring"]),
             "events": events,
         }
     elif operation == "freebusy":
-        fb = query_freebusy(service, start, end)
-        busy = fb.get("calendars", {}).get("primary", {}).get("busy", [])
+        fb = _query_freebusy_for_target(service, calendar_id, start, end)
+        busy = fb.get("calendars", {}).get(calendar_id, {}).get("busy", [])
         result = {
             "operation": "freebusy",
             "status": "ok",
@@ -256,7 +305,6 @@ def run_read(operation: str, window: str, *, service=None, profile: str = "perso
             "window": window,
             "bounds": {"start": start.isoformat(), "end": end.isoformat()},
             "calendar_count": 1,
-            "writable_calendar_count": 1,
             "busy_intervals": len(busy),
         }
     else:

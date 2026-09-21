@@ -3,8 +3,8 @@ name: google-calendar-read
 description: >-
   Deterministic, audit-gated read lane for the Personal Assistant Google Calendar
   integration. Requests only calendar.calendarlist.readonly, calendar.events, and
-  calendar.freebusy scopes. All output is normalized to Europe/Kyiv. Read
-  allowlist is primary calendar only; write allowlist is empty in this slice.
+  calendar.freebusy scopes. All output is normalized to Europe/Kyiv and reads
+  only the protected profile-local target; no Calendar ID is accepted as input.
 tags:
   domain: hermes-platform
   integration: google-calendar

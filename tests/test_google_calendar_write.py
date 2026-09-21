@@ -1,10 +1,17 @@
 import importlib.util
+import hashlib
+import io
 import json
+import os
 import re
 import sys
+import tempfile
 import unittest
 import uuid
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
+
 
 import yaml
 
@@ -30,7 +37,48 @@ PLAN_INPUTS = {
 }
 
 
+def as_legacy_primary_plan(plan):
+    legacy = dict(plan)
+    legacy.pop("calendarTargetHash")
+    legacy["calendarId"] = "primary"
+    legacy["checksum"] = gcw._plan_checksum(legacy)
+    return legacy
+
+
 class PlanTests(unittest.TestCase):
+    def test_plan_binds_profile_local_service_account_target(self):
+        target_id = "configured-calendar@example.invalid"
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            root = home / "profiles" / "personal-assistant"
+            root.mkdir(parents=True)
+            (root / "google_service_account.json").write_text("{}")
+            os.chmod(root / "google_service_account.json", 0o600)
+            (root / "google_calendar_target.json").write_text(
+                json.dumps({"calendar_id": target_id})
+            )
+            os.chmod(root / "google_calendar_target.json", 0o600)
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                plan = gcw.build_plan(
+                    summary="Protected target",
+                    start="2026-09-07T10:00",
+                    end="2026-09-07T10:30",
+                    linear_url="",
+                    hermes_home=home,
+                )
+                print(json.dumps(plan, sort_keys=True))
+
+        expected_hash = hashlib.sha256(
+            b"google-calendar-target:v1\0" + target_id.encode("utf-8")
+        ).hexdigest()
+        self.assertEqual(plan["calendarTargetHash"], expected_hash)
+        self.assertNotIn("calendarId", plan)
+        self.assertNotIn(target_id, json.dumps(plan))
+        self.assertNotIn(target_id, stdout.getvalue())
+        self.assertTrue(gcw.verify_plan_checksum(plan))
+
     def test_plan_places_canonical_linear_link_in_event_description(self):
         plan = gcw.build_plan(
             summary="Подготовить календарную интеграцию",
@@ -480,6 +528,45 @@ class ApprovalTests(unittest.TestCase):
         self.assertEqual(plan, self.plan)
         self.assertIsInstance(authorization, gcw.VerifiedApproval)
 
+    def test_oauth_primary_accepts_bounded_legacy_primary_plan_artifact(self):
+        legacy = as_legacy_primary_plan(self.plan)
+        runner, approval_checksum = approval_fixture(legacy)
+        plan, authorization = gcw.verify_calendar_approval(
+            plan_run_id=PLAN_RUN_ID,
+            plan_artifact_version=1,
+            plan_checksum=legacy["checksum"],
+            approval_run_id=APPROVAL_RUN_ID,
+            approval_artifact_version=1,
+            approval_checksum=approval_checksum,
+            runner=runner,
+        )
+        self.assertEqual(plan, legacy)
+        self.assertIsInstance(authorization, gcw.VerifiedApproval)
+
+    def test_service_account_rejects_legacy_primary_plan_artifact(self):
+        legacy = as_legacy_primary_plan(self.plan)
+        runner, approval_checksum = approval_fixture(legacy)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "profiles" / "personal-assistant"
+            root.mkdir(parents=True)
+            (root / "google_service_account.json").write_text("{}")
+            os.chmod(root / "google_service_account.json", 0o600)
+            (root / "google_calendar_target.json").write_text(
+                json.dumps({"calendar_id": "configured-calendar@example.invalid"})
+            )
+            os.chmod(root / "google_calendar_target.json", 0o600)
+            with mock.patch.dict(os.environ, {"HERMES_HOME": tmp}):
+                with self.assertRaisesRegex(gcw.CalendarWriteError, "provenance"):
+                    gcw.verify_calendar_approval(
+                        plan_run_id=PLAN_RUN_ID,
+                        plan_artifact_version=1,
+                        plan_checksum=legacy["checksum"],
+                        approval_run_id=APPROVAL_RUN_ID,
+                        approval_artifact_version=1,
+                        approval_checksum=approval_checksum,
+                        runner=runner,
+                    )
+
     def test_attestation_is_bound_to_exact_loaded_plan_artifact(self):
         runner, _ = approval_fixture(self.plan)
         attestation = gcw.build_approval_attestation(
@@ -596,6 +683,139 @@ class ApplyTests(unittest.TestCase):
             runner=runner,
         )
         return authorization
+
+    def test_snapshot_apply_and_read_back_use_only_protected_target(self):
+        target_id = "configured-calendar@example.invalid"
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            root = home / "profiles" / "personal-assistant"
+            root.mkdir(parents=True)
+            (root / "google_service_account.json").write_text("{}")
+            os.chmod(root / "google_service_account.json", 0o600)
+            (root / "google_calendar_target.json").write_text(
+                json.dumps({"calendar_id": target_id})
+            )
+            os.chmod(root / "google_calendar_target.json", 0o600)
+            plan = gcw.build_plan(
+                summary="Protected target",
+                start="2026-09-07T10:00",
+                end="2026-09-07T10:30",
+                linear_url="",
+                hermes_home=home,
+            )
+            authorization = gcw.VerifiedApproval(
+                plan["checksum"], _marker=gcw._VERIFIED_APPROVAL_MARKER
+            )
+            service = FakeService()
+
+            snapshot = gcw.snapshot_target(
+                linear_url="",
+                block_key="primary",
+                service=service,
+                hermes_home=home,
+            )
+            result = gcw.apply_plan(
+                plan,
+                approved_checksum=plan["checksum"],
+                service=service,
+                authorization=authorization,
+                hermes_home=home,
+            )
+
+        self.assertNotIn(target_id, json.dumps(snapshot))
+        self.assertNotIn(target_id, json.dumps(result))
+        self.assertTrue(service.events_api.get_calls)
+        self.assertTrue(service.events_api.insert_calls)
+        for call in service.events_api.get_calls + service.events_api.insert_calls:
+            self.assertEqual(call["calendarId"], target_id)
+
+    def test_apply_uses_one_immutable_target_binding(self):
+        target_a = "calendar-a@example.invalid"
+        target_b = "calendar-b@example.invalid"
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            root = home / "profiles" / "personal-assistant"
+            root.mkdir(parents=True)
+            (root / "google_service_account.json").write_text("{}")
+            os.chmod(root / "google_service_account.json", 0o600)
+            (root / "google_calendar_target.json").write_text(
+                json.dumps({"calendar_id": target_a})
+            )
+            os.chmod(root / "google_calendar_target.json", 0o600)
+            plan = gcw.build_plan(
+                summary="Immutable target",
+                start="2026-09-07T10:00",
+                end="2026-09-07T10:30",
+                linear_url="",
+                hermes_home=home,
+            )
+            authorization = gcw.VerifiedApproval(
+                plan["checksum"], _marker=gcw._VERIFIED_APPROVAL_MARKER
+            )
+            service = FakeService()
+            with mock.patch.object(
+                gcw.creds_mod,
+                "load_calendar_target",
+                side_effect=[target_b, target_a],
+            ) as loader:
+                with self.assertRaisesRegex(gcw.CalendarWriteError, "checksum-bound"):
+                    gcw.apply_plan(
+                        plan,
+                        approved_checksum=plan["checksum"],
+                        service=service,
+                        authorization=authorization,
+                        hermes_home=home,
+                    )
+
+        self.assertEqual(loader.call_count, 1)
+        self.assertEqual(service.events_api.insert_calls, [])
+        self.assertEqual(service.events_api.update_calls, [])
+        self.assertEqual(service.events_api.delete_calls, [])
+
+    def test_attendee_bearing_targets_are_never_managed(self):
+        update_plan = gcw.build_plan(
+            operation="update",
+            block_key="primary",
+            summary=PLAN_INPUTS["summary"],
+            start=PLAN_INPUTS["start"],
+            end=PLAN_INPUTS["end"],
+            linear_url=LINEAR_URL,
+            details=PLAN_INPUTS["details"],
+        )
+        delete_plan = gcw.build_plan(
+            operation="delete",
+            block_key="primary",
+            summary="",
+            start="",
+            end="",
+            linear_url=LINEAR_URL,
+            details="",
+        )
+        for plan in (self.plan, update_plan, delete_plan):
+            with self.subTest(operation=plan["operation"]):
+                events = FakeEvents()
+                source_event = self.plan["event"] if plan["operation"] == "delete" else plan["event"]
+                events.created = {
+                    **source_event,
+                    "id": plan["eventId"],
+                    "status": "confirmed",
+                    "etag": '"provider-revision"',
+                    "attendees": [{"email": "private@example.invalid"}],
+                }
+                service = FakeService(events)
+                authorization = gcw.VerifiedApproval(
+                    plan["checksum"], _marker=gcw._VERIFIED_APPROVAL_MARKER
+                )
+                with self.assertRaisesRegex(gcw.CalendarWriteError, "attendees"):
+                    gcw.apply_plan(
+                        plan,
+                        approved_checksum=plan["checksum"],
+                        service=service,
+                        authorization=authorization,
+                    )
+                self.assertEqual(events.insert_calls, [])
+                self.assertEqual(events.update_calls, [])
+                self.assertEqual(events.delete_calls, [])
 
     def test_apply_creates_primary_event_then_verifies_exact_description(self):
         service = FakeService()
@@ -881,7 +1101,7 @@ class ApplyTests(unittest.TestCase):
         tombstone = {**self.plan["event"], "id": self.plan["eventId"], "status": "cancelled"}
         events = ScriptedEvents(get_script=[tombstone])
         self.assertEqual(
-            gcw._get_event(FakeService(events), self.plan["eventId"]),
+            gcw._get_event(FakeService(events), self.plan["eventId"], "primary"),
             tombstone,
         )
 

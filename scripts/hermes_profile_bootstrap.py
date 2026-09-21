@@ -415,6 +415,9 @@ def main() -> int:
     if calendar_worker_enabled:
         owner_steps.extend(
             [
+                f"place owner-provided google_service_account.json and google_calendar_target.json in {profile_dir}",
+                "chmod 600 google_service_account.json and google_calendar_target.json",
+                "retain google_token.json mode 0600 only as the temporary OAuth fallback",
                 "verify the reviewed Calendar workflow revision before activation",
                 "restart only the Personal Assistant Gateway after plugin installation",
                 "run owner-gated preview, same-session approval, replay, and cleanup proof",
@@ -477,6 +480,18 @@ def main() -> int:
             "dispatcherProfile": "broker",
             "directGoogleAccessAvailable": calendar_worker_enabled,
             "directLinearAccessAvailable": False,
+            "authentication": (
+                "service-account-preferred-with-oauth-fallback"
+                if calendar_worker_enabled else None
+            ),
+            "credentialFiles": (
+                [
+                    "google_service_account.json",
+                    "google_calendar_target.json",
+                    "google_token.json",
+                ]
+                if calendar_worker_enabled else []
+            ),
         },
         "operationsRouting": {
             "enabled": operations_source_enabled or operations_worker_enabled,
@@ -509,7 +524,7 @@ def main() -> int:
             if source_routing_enabled
             else [
                 "run Plugin Doctor and read back personal-assistant-calendar enabled",
-                "verify Calendar workflow revision and profile-local OAuth without copying credentials",
+                "verify Calendar workflow revision and profile-local service-account selection without copying credentials",
                 "verify preview, same-session approval, apply read-back, replay, and cleanup",
             ]
             if calendar_worker_enabled

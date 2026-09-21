@@ -35,6 +35,12 @@ CREDENTIAL_PATTERNS = (
     re.compile(r'"(?:client_secret|refresh_token|access_token)"\s*:\s*"[^"]*"', re.IGNORECASE),
 )
 _UNSET = object()
+MAX_CALENDAR_ID_LENGTH = 1024
+CALENDAR_TARGET_DOMAIN = b"google-calendar-target:v1\0"
+PLAN_PREVIEW_BASE_FIELDS = {
+    "schemaVersion", "mode", "readOnly", "ready", "operation", "blockKey",
+    "eventId", "linearIssue", "event", "requiredApproval", "blockers", "checksum",
+}
 EXPECTED_WORKER_CONTRACT = {
     "profile": "personal-assistant",
     "tool": "pa_calendar_execute",
@@ -62,6 +68,79 @@ class CalendarWorkerError(RuntimeError):
 
 class CalendarRunSuperseded(CalendarWorkerError):
     """The exact claimed run no longer owns the task and must not write lifecycle state."""
+
+
+def _protected_calendar_target() -> str:
+    """Load the profile-local target without returning it in public results."""
+    base = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+    root = (
+        base
+        if base.name == "personal-assistant" and base.parent.name == "profiles"
+        else base / "profiles" / "personal-assistant"
+    )
+    service_path = root / "google_service_account.json"
+    target_path = root / "google_calendar_target.json"
+    service_selected = service_path.exists() or service_path.is_symlink()
+    target_present = target_path.exists() or target_path.is_symlink()
+    if not target_present:
+        if service_selected:
+            raise CalendarWorkerError("protected Calendar target is unavailable")
+        return "primary"
+    if (
+        target_path.is_symlink()
+        or not target_path.is_file()
+        or target_path.stat().st_mode & 0o777 != 0o600
+    ):
+        raise CalendarWorkerError("protected Calendar target is invalid")
+
+    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError("duplicate key")
+            value[key] = item
+        return value
+
+    try:
+        document = json.loads(
+            target_path.read_text(encoding="utf-8"),
+            object_pairs_hook=reject_duplicates,
+        )
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise CalendarWorkerError("protected Calendar target is invalid") from exc
+    if not isinstance(document, dict) or set(document) != {"calendar_id"}:
+        raise CalendarWorkerError("protected Calendar target is invalid")
+    calendar_id = document["calendar_id"]
+    if (
+        not isinstance(calendar_id, str)
+        or not calendar_id.strip()
+        or calendar_id != calendar_id.strip()
+        or len(calendar_id) > MAX_CALENDAR_ID_LENGTH
+        or any(not char.isprintable() for char in calendar_id)
+        or (service_selected and calendar_id == "primary")
+    ):
+        raise CalendarWorkerError("protected Calendar target is invalid")
+    return calendar_id
+
+
+def _plan_matches_protected_target(plan: dict[str, Any]) -> bool:
+    protected_target = _protected_calendar_target()
+    target_fields = {"calendarTargetHash", "calendarId"} & set(plan)
+    if target_fields == {"calendarTargetHash"}:
+        target_hash = plan["calendarTargetHash"]
+        expected = hashlib.sha256(
+            CALENDAR_TARGET_DOMAIN + protected_target.encode("utf-8")
+        ).hexdigest()
+        return (
+            isinstance(target_hash, str)
+            and SHA256.fullmatch(target_hash) is not None
+            and target_hash == expected
+        )
+    return (
+        target_fields == {"calendarId"}
+        and plan.get("calendarId") == "primary"
+        and protected_target == "primary"
+    )
 
 
 def _verify_runtime_workspace(
@@ -356,11 +435,15 @@ def _base_result(command: dict[str, Any]) -> dict[str, Any]:
 def _public_plan_preview(request: dict[str, Any], plan: Any) -> dict[str, Any]:
     if (
         not isinstance(plan, dict)
+        or set(plan) not in (
+            PLAN_PREVIEW_BASE_FIELDS | {"calendarTargetHash"},
+            PLAN_PREVIEW_BASE_FIELDS | {"calendarId"},
+        )
         or plan.get("schemaVersion") != 1
         or plan.get("mode") != "plan"
         or plan.get("readOnly") is not True
         or plan.get("ready") is not True
-        or plan.get("calendarId") != "primary"
+        or not _plan_matches_protected_target(plan)
         or plan.get("operation") != request["operation"]
         or plan.get("blockKey") != request["block_key"]
         or plan.get("blockers") != []

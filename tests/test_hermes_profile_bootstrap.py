@@ -163,6 +163,24 @@ class BootstrapContractTests(unittest.TestCase):
         self.assertTrue(payload["calendarRouting"]["enabled"])
         self.assertEqual(payload["calendarRouting"]["workerProfile"], "personal-assistant")
         self.assertFalse(payload["calendarRouting"]["directLinearAccessAvailable"])
+        self.assertEqual(
+            payload["calendarRouting"]["credentialFiles"],
+            [
+                "google_service_account.json",
+                "google_calendar_target.json",
+                "google_token.json",
+            ],
+        )
+        self.assertEqual(
+            payload["calendarRouting"]["authentication"],
+            "service-account-preferred-with-oauth-fallback",
+        )
+        owner_steps = " ".join(payload["ownerStepsBeforeActivation"])
+        self.assertIn("google_service_account.json", owner_steps)
+        self.assertIn("google_calendar_target.json", owner_steps)
+        self.assertIn("chmod 600", owner_steps)
+        self.assertNotIn("private_key", json.dumps(payload))
+        self.assertNotIn("calendar_id\":", json.dumps(payload))
 
     def test_personal_assistant_role_rejects_noncanonical_profile_name(self):
         old_argv = sys.argv
