@@ -1,6 +1,6 @@
 id: 87bb8fb0-a665-4496-8228-d889aac1d473
 name: google-calendar-write-plan
-description: Build a read-only checksum-bound plan for one standalone or optionally Linear-linked primary-calendar block.
+description: Build a read-only checksum-bound plan for one block on the protected profile-local Calendar target.
 tags:
   domain: hermes-platform
   integration: google-calendar

@@ -1,3 +1,4 @@
+import hashlib
 import json
 import sys
 import tempfile
@@ -19,6 +20,8 @@ from plugins.personal_assistant_calendar import (  # noqa: E402
     _approval_token,
     _completed_result_path,
     _load_completed_result,
+    _protected_calendar_target,
+    _public_plan_preview,
     _validate_completed_result,
     _write_completed_result,
     _verify_runtime_workspace,
@@ -31,6 +34,12 @@ from plugins.linear_source_route.calendar_route import build_calendar_task_body,
 UUID = "11111111-1111-4111-8111-111111111111"
 PLAN_RUN = "22222222-2222-4222-8222-222222222222"
 APPROVAL_RUN = "33333333-3333-4333-8333-333333333333"
+
+
+def target_hash(calendar_id):
+    return hashlib.sha256(
+        b"google-calendar-target:v1\0" + calendar_id.encode("utf-8")
+    ).hexdigest()
 
 
 def handle_pa_calendar_execute(args, **kwargs):
@@ -108,9 +117,10 @@ class Workflows:
                 "mode": "plan",
                 "readOnly": True,
                 "ready": True,
-                "calendarId": "primary",
+                "calendarTargetHash": target_hash("primary"),
                 "operation": request["operation"],
                 "blockKey": request["block_key"],
+                "eventId": "evt" + "e" * 64,
                 "linearIssue": {"identifier": "SIS-123", "url": request["linear_url"]},
                 "event": {
                     "summary": request["summary"].strip(),
@@ -118,6 +128,7 @@ class Workflows:
                     "start": {"dateTime": request["start"], "timeZone": "Europe/Kyiv"},
                     "end": {"dateTime": request["end"], "timeZone": "Europe/Kyiv"},
                 },
+                "requiredApproval": "Create this exact checksum-bound configured-calendar event",
                 "blockers": [],
                 "checksum": "a" * 64,
             },
@@ -191,6 +202,96 @@ def approval_plan(approval_ref, *, session_id="20260904_120000_abcdef12"):
 
 
 class PersonalAssistantCalendarWorkerTests(unittest.TestCase):
+    def test_protected_target_rejects_every_non_printable_unicode_character(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "profiles" / "personal-assistant"
+            root.mkdir(parents=True)
+            target = root / "google_calendar_target.json"
+            for character in ("\u0085", "\u200b", "\u2028", "\n", "\t"):
+                with self.subTest(codepoint=f"U+{ord(character):04X}"):
+                    target.write_text(
+                        json.dumps({"calendar_id": f"before{character}after"}),
+                        encoding="utf-8",
+                    )
+                    target.chmod(0o600)
+                    with mock.patch.dict("os.environ", {"HERMES_HOME": tmp}):
+                        with self.assertRaisesRegex(
+                            RuntimeError, "protected Calendar target is invalid"
+                        ):
+                            _protected_calendar_target()
+
+    def test_plan_preview_validates_protected_target_without_exposing_it(self):
+        target_id = "configured-calendar@example.invalid"
+        request = {
+            "operation": "create", "block_key": "primary", "summary": "Review SIS-123",
+            "start": "2026-09-07T10:00", "end": "2026-09-07T10:30",
+            "linear_url": "https://linear.app/sisyphusx/issue/SIS-123/calendar-routing",
+            "details": "",
+        }
+        plan = Workflows().plan(request)["preview"]
+        plan["calendarTargetHash"] = target_hash(target_id)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "profiles" / "personal-assistant"
+            root.mkdir(parents=True)
+            (root / "google_service_account.json").write_text("{}")
+            (root / "google_service_account.json").chmod(0o600)
+            (root / "google_calendar_target.json").write_text(
+                json.dumps({"calendar_id": target_id})
+            )
+            (root / "google_calendar_target.json").chmod(0o600)
+            with mock.patch.dict("os.environ", {"HERMES_HOME": tmp}):
+                preview = _public_plan_preview(request, plan)
+
+        self.assertNotIn(target_id, json.dumps(preview))
+        self.assertNotIn("calendarTargetHash", preview)
+
+    def test_legacy_primary_preview_is_oauth_only_and_rejected_for_service_account(self):
+        request = {
+            "operation": "create", "block_key": "primary", "summary": "Review SIS-123",
+            "start": "2026-09-07T10:00", "end": "2026-09-07T10:30",
+            "linear_url": "https://linear.app/sisyphusx/issue/SIS-123/calendar-routing",
+            "details": "",
+        }
+        plan = Workflows().plan(request)["preview"]
+        plan.pop("calendarTargetHash")
+        plan["calendarId"] = "primary"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "profiles" / "personal-assistant"
+            root.mkdir(parents=True)
+            with mock.patch.dict("os.environ", {"HERMES_HOME": tmp}):
+                preview = _public_plan_preview(request, plan)
+            self.assertNotIn("calendarId", preview)
+
+            (root / "google_service_account.json").write_text("{}")
+            (root / "google_service_account.json").chmod(0o600)
+            (root / "google_calendar_target.json").write_text(
+                json.dumps({"calendar_id": "configured-calendar@example.invalid"})
+            )
+            (root / "google_calendar_target.json").chmod(0o600)
+            with mock.patch.dict("os.environ", {"HERMES_HOME": tmp}):
+                with self.assertRaisesRegex(RuntimeError, "plan preview is invalid"):
+                    _public_plan_preview(request, plan)
+
+    def test_plan_preview_schema_rejects_additional_or_dual_target_fields(self):
+        request = {
+            "operation": "create", "block_key": "primary", "summary": "Review SIS-123",
+            "start": "2026-09-07T10:00", "end": "2026-09-07T10:30",
+            "linear_url": "https://linear.app/sisyphusx/issue/SIS-123/calendar-routing",
+            "details": "",
+        }
+        for mutation in (
+            {"unexpected": True},
+            {"calendarId": "primary"},
+        ):
+            plan = Workflows().plan(request)["preview"]
+            plan.update(mutation)
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp) / "profiles" / "personal-assistant"
+                root.mkdir(parents=True)
+                with mock.patch.dict("os.environ", {"HERMES_HOME": tmp}):
+                    with self.assertRaisesRegex(RuntimeError, "plan preview is invalid"):
+                        _public_plan_preview(request, plan)
+
     def test_schema_accepts_no_model_supplied_command(self):
         self.assertEqual(PA_CALENDAR_EXECUTE_SCHEMA["parameters"], {
             "type": "object", "properties": {}, "required": [], "additionalProperties": False
@@ -431,9 +532,10 @@ class PersonalAssistantCalendarWorkerTests(unittest.TestCase):
                         "mode": "plan",
                         "readOnly": True,
                         "ready": True,
-                        "calendarId": "primary",
+                        "calendarTargetHash": target_hash("primary"),
                         "operation": request["operation"],
                         "blockKey": request["block_key"],
+                        "eventId": "evt" + "e" * 64,
                         "linearIssue": None,
                         "event": {
                             "summary": request["summary"],
@@ -441,6 +543,7 @@ class PersonalAssistantCalendarWorkerTests(unittest.TestCase):
                             "start": {"dateTime": request["start"], "timeZone": "Europe/Kyiv"},
                             "end": {"dateTime": request["end"], "timeZone": "Europe/Kyiv"},
                         },
+                        "requiredApproval": "Create this exact checksum-bound configured-calendar event",
                         "blockers": [],
                         "checksum": "a" * 64,
                     },

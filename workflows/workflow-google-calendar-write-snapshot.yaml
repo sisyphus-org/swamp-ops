@@ -1,6 +1,6 @@
 id: 5361b2fd-f61d-4ec2-86db-cb2d6d20bf2c
 name: google-calendar-write-snapshot
-description: Read a PII-free hash of one deterministic standalone or optionally Linear-linked primary-calendar target before owner approval.
+description: Read a PII-free hash of one deterministic event on the protected profile-local Calendar target before owner approval.
 tags:
   domain: hermes-platform
   integration: google-calendar

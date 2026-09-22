@@ -4,8 +4,8 @@
 The caller may supply a canonical Linear issue URL obtained through the existing
 Linear specialist route, but standalone Calendar events do not require one.
 This module never reads Linear credentials or calls Linear. It mutates only
-stable standalone or optionally Linear-linked blocks in the primary calendar
-and verifies each outcome by deterministic read-back.
+stable standalone or optionally Linear-linked blocks in the protected
+profile-local Calendar target and verifies each outcome by deterministic read-back.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 KYIV = ZoneInfo("Europe/Kyiv")
-WRITE_CALENDAR_ID = "primary"
+
 PUBLIC_ISSUE_URL = re.compile(
     r"^https://linear\.app/[A-Za-z0-9_-]+/issue/(SIS-[1-9][0-9]*)/"
     r"[A-Za-z0-9][A-Za-z0-9_-]*$"
@@ -34,6 +34,7 @@ BLOCK_KEY = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 OPERATIONS = ("create", "update", "delete")
 EVENT_ID_DOMAIN = b"google-calendar-linear-block:v1\0"
 STANDALONE_EVENT_ID_DOMAIN = b"google-calendar-standalone-block:v1\0"
+CALENDAR_TARGET_DOMAIN = b"google-calendar-target:v1\0"
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 UUID = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
@@ -75,6 +76,28 @@ def _canonical_sha256(value: Any) -> str:
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def calendar_target_hash(calendar_id: str) -> str:
+    return hashlib.sha256(
+        CALENDAR_TARGET_DOMAIN + calendar_id.encode("utf-8")
+    ).hexdigest()
+
+
+def _is_legacy_primary_plan(plan: Any) -> bool:
+    return (
+        isinstance(plan, dict)
+        and "calendarTargetHash" not in plan
+        and plan.get("calendarId") == "primary"
+    )
+
+
+def _plan_matches_protected_target(
+    plan: dict[str, Any], calendar_id: str
+) -> bool:
+    if _is_legacy_primary_plan(plan):
+        return calendar_id == "primary"
+    return plan.get("calendarTargetHash") == calendar_target_hash(calendar_id)
 
 
 def _plan_checksum(plan: dict[str, Any]) -> str:
@@ -188,6 +211,13 @@ def _load_verified_plan(
             )
         except (CalendarWriteError, KeyError, TypeError):
             pass
+    if rebuilt is not None and _is_legacy_primary_plan(plan):
+        calendar_id = creds_mod.load_calendar_target()
+        if not _plan_matches_protected_target(plan, calendar_id):
+            raise CalendarWriteError("Calendar plan workflow provenance is invalid")
+        rebuilt.pop("calendarTargetHash")
+        rebuilt["calendarId"] = "primary"
+        rebuilt["checksum"] = _plan_checksum(rebuilt)
     if (
         history.get("id") != run_id
         or history.get("workflowName") != PLAN_WORKFLOW
@@ -387,6 +417,8 @@ def build_plan(
     details: str = "",
     operation: str = "create",
     block_key: str = "primary",
+    profile: str = "personal-assistant",
+    hermes_home: Path | None = None,
 ) -> dict[str, Any]:
     if operation not in OPERATIONS:
         raise CalendarWriteError("operation must be create, update, or delete")
@@ -424,12 +456,13 @@ def build_plan(
             "start": {"dateTime": start_dt.isoformat(), "timeZone": str(KYIV)},
             "end": {"dateTime": end_dt.isoformat(), "timeZone": str(KYIV)},
         }
+    calendar_id = creds_mod.load_calendar_target(profile, hermes_home)
     plan: dict[str, Any] = {
         "schemaVersion": 1,
         "mode": "plan",
         "readOnly": True,
         "ready": True,
-        "calendarId": WRITE_CALENDAR_ID,
+        "calendarTargetHash": calendar_target_hash(calendar_id),
         "operation": operation,
         "blockKey": block_key,
         "eventId": event_id_value,
@@ -439,7 +472,7 @@ def build_plan(
             else None
         ),
         "event": event,
-        "requiredApproval": f"{operation.title()} this exact checksum-bound primary-calendar event",
+        "requiredApproval": f"{operation.title()} this exact checksum-bound configured-calendar event",
         "blockers": [],
     }
     plan["checksum"] = _plan_checksum(plan)
@@ -447,12 +480,11 @@ def build_plan(
 
 
 def _validate_plan_schema(plan: Any) -> None:
-    top_level_keys = {
+    base_keys = {
         "schemaVersion",
         "mode",
         "readOnly",
         "ready",
-        "calendarId",
         "operation",
         "blockKey",
         "eventId",
@@ -462,7 +494,11 @@ def _validate_plan_schema(plan: Any) -> None:
         "blockers",
         "checksum",
     }
-    if not isinstance(plan, dict) or set(plan) != top_level_keys:
+    allowed_key_sets = (
+        base_keys | {"calendarTargetHash"},
+        base_keys | {"calendarId"},
+    )
+    if not isinstance(plan, dict) or set(plan) not in allowed_key_sets:
         raise CalendarWriteError("approved plan schema is invalid")
     linear = plan.get("linearIssue")
     event = plan.get("event")
@@ -477,6 +513,13 @@ def _validate_plan_schema(plan: Any) -> None:
     )
     if (
         operation not in OPERATIONS
+        or not (
+            (
+                isinstance(plan.get("calendarTargetHash"), str)
+                and SHA256.fullmatch(plan["calendarTargetHash"]) is not None
+            )
+            or _is_legacy_primary_plan(plan)
+        )
         or not isinstance(block_key, str)
         or len(block_key) > 64
         or BLOCK_KEY.fullmatch(block_key) is None
@@ -514,10 +557,12 @@ def _http_status(exc: BaseException) -> int | None:
     return getattr(response, "status", None)
 
 
-def _get_event(service: Any, event_id: str) -> dict[str, Any] | None:
+def _get_event(
+    service: Any, event_id: str, calendar_id: str
+) -> dict[str, Any] | None:
     try:
         payload = service.events().get(
-            calendarId=WRITE_CALENDAR_ID, eventId=event_id
+            calendarId=calendar_id, eventId=event_id
         ).execute()
     except Exception as exc:
         if _http_status(exc) == 404:
@@ -529,12 +574,14 @@ def _get_event(service: Any, event_id: str) -> dict[str, Any] | None:
 
 
 def snapshot_target(
-    *, linear_url: str, block_key: str, service: Any
+    *, linear_url: str, block_key: str, service: Any,
+    profile: str = "personal-assistant", hermes_home: Path | None = None,
 ) -> dict[str, Any]:
     """Return a PII-free fingerprint of the exact deterministic Calendar target."""
     _canonical_url, identifier = validate_linear_url(linear_url)
     target_id = stable_event_id(identifier, block_key)
-    existing = _get_event(service, target_id)
+    calendar_id = creds_mod.load_calendar_target(profile, hermes_home)
+    existing = _get_event(service, target_id, calendar_id)
     state_hash = _event_state_hash(existing)
     return {
         "operation": "snapshot",
@@ -643,6 +690,8 @@ def apply_plan(
     service: Any,
     authorization: VerifiedApproval | None = None,
     expected_before_state_hash: str | None = None,
+    profile: str = "personal-assistant",
+    hermes_home: Path | None = None,
 ) -> dict[str, Any]:
     if (
         not isinstance(authorization, VerifiedApproval)
@@ -658,12 +707,13 @@ def apply_plan(
     ):
         raise CalendarWriteError("approved before-state hash must be a SHA-256 digest")
     _validate_plan_schema(plan)
+    calendar_id = creds_mod.load_calendar_target(profile, hermes_home)
     if (
         plan.get("schemaVersion") != 1
         or plan.get("mode") != "plan"
         or plan.get("readOnly") is not True
         or plan.get("ready") is not True
-        or plan.get("calendarId") != WRITE_CALENDAR_ID
+        or not _plan_matches_protected_target(plan, calendar_id)
         or plan.get("blockers") != []
         or plan.get("checksum") != approved_checksum
         or not verify_plan_checksum(plan)
@@ -695,7 +745,14 @@ def apply_plan(
         raise CalendarWriteError("approved event description is not linked to Linear")
 
     event_id = expected_event_id
-    existing = _get_event(service, event_id)
+    existing = _get_event(service, event_id, calendar_id)
+    if existing is not None and existing.get("attendees"):
+        if (
+            expected_before_state_hash is not None
+            and _event_state_hash(existing) != expected_before_state_hash
+        ):
+            raise CalendarWriteError("Calendar target changed after owner preview")
+        raise CalendarWriteError("Calendar targets with attendees are not managed")
 
     if operation == "delete" and (
         existing is None or existing.get("status") == "cancelled"
@@ -725,7 +782,7 @@ def apply_plan(
             raise CalendarWriteError("Calendar target is linked to a different Linear issue")
         try:
             request = service.events().delete(
-                calendarId=WRITE_CALENDAR_ID,
+                calendarId=calendar_id,
                 eventId=event_id,
                 sendUpdates="none",
             )
@@ -737,7 +794,7 @@ def apply_plan(
             raise
         except Exception:
             pass
-        remaining = _get_event(service, event_id)
+        remaining = _get_event(service, event_id, calendar_id)
         if remaining is not None and remaining.get("status") != "cancelled":
             raise CalendarWriteError("Calendar delete outcome is ambiguous and event remains")
         return _sanitized_result(
@@ -758,7 +815,7 @@ def apply_plan(
         except CalendarWriteError:
             try:
                 request = service.events().update(
-                    calendarId=WRITE_CALENDAR_ID,
+                    calendarId=calendar_id,
                     eventId=event_id,
                     body=body,
                     sendUpdates="none",
@@ -771,7 +828,7 @@ def apply_plan(
                 raise
             except Exception:
                 pass
-            read_back = _get_event(service, event_id)
+            read_back = _get_event(service, event_id, calendar_id)
             if read_back is None:
                 raise CalendarWriteError(
                     "Calendar update outcome is ambiguous and event is absent"
@@ -790,7 +847,7 @@ def apply_plan(
         restore_body = {**body, "status": "confirmed"}
         try:
             request = service.events().update(
-                calendarId=WRITE_CALENDAR_ID,
+                calendarId=calendar_id,
                 eventId=event_id,
                 body=restore_body,
                 sendUpdates="none",
@@ -803,7 +860,7 @@ def apply_plan(
             raise
         except Exception:
             pass
-        existing = _get_event(service, event_id)
+        existing = _get_event(service, event_id, calendar_id)
         if existing is None:
             raise CalendarWriteError("Calendar restore outcome is ambiguous and event is absent")
         _verify_event(existing, expected)
@@ -815,12 +872,12 @@ def apply_plan(
     if existing is None:
         try:
             created = service.events().insert(
-                calendarId=WRITE_CALENDAR_ID,
+                calendarId=calendar_id,
                 body=body,
                 sendUpdates="none",
             ).execute()
         except Exception:
-            existing = _get_event(service, event_id)
+            existing = _get_event(service, event_id, calendar_id)
             if existing is None:
                 raise CalendarWriteError(
                     "Calendar create outcome is ambiguous and exact event is absent"
@@ -828,14 +885,14 @@ def apply_plan(
             reused = True
         else:
             if not isinstance(created, dict) or created.get("id") != event_id:
-                existing = _get_event(service, event_id)
+                existing = _get_event(service, event_id, calendar_id)
                 if existing is None:
                     raise CalendarWriteError(
                         "Calendar create outcome is ambiguous and exact event is absent"
                     )
                 reused = True
             else:
-                existing = _get_event(service, event_id)
+                existing = _get_event(service, event_id, calendar_id)
         if existing is None:
             raise CalendarWriteError("created Calendar event could not be read back")
 
@@ -904,12 +961,14 @@ def main(argv: list[str] | None = None) -> int:
             end=args.end,
             linear_url=args.linear_url,
             details=args.details,
+            profile=args.profile,
         )
     elif args.mode == "snapshot":
         result = snapshot_target(
             linear_url=args.linear_url,
             block_key=args.block_key,
             service=_build_service(args.profile),
+            profile=args.profile,
         )
     elif args.mode == "attest":
         result = build_approval_attestation(
@@ -932,6 +991,7 @@ def main(argv: list[str] | None = None) -> int:
             authorization=authorization,
             service=_build_service(args.profile),
             expected_before_state_hash=args.before_state_hash,
+            profile=args.profile,
         )
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0
