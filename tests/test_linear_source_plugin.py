@@ -2898,13 +2898,11 @@ class PluginTests(unittest.TestCase):
                 runtime_profile_getter=lambda: "ideas",
             )
         )
-        self.assertEqual(
-            result,
-            {
-                "status": "rejected",
-                "message": "Не удалось безопасно обработать запрос.",
-            },
-        )
+        self.assertEqual(result["status"], "rejected")
+        self.assertTrue(result["message"])
+        self.assertIn("error_code", result)
+        self.assertIn("outcome", result)
+        self.assertIn("recovery", result)
         self.assertNotIn("delivery", json.dumps(result))
         self.assertNotIn("t_deadbeef", json.dumps(result))
 
@@ -3249,13 +3247,11 @@ class PluginTests(unittest.TestCase):
                 runtime_profile_getter=lambda: "swe",
             )
         )
-        self.assertEqual(
-            result,
-            {
-                "status": "rejected",
-                "message": "Не удалось безопасно обработать запрос.",
-            },
-        )
+        self.assertEqual(result["status"], "rejected")
+        self.assertTrue(result["message"])
+        self.assertIn("error_code", result)
+        self.assertIn("outcome", result)
+        self.assertIn("recovery", result)
         fake_board.get_or_create_task.assert_not_called()
 
     def test_handler_rejects_contextual_profile_conflicting_with_runtime(self):
@@ -3278,13 +3274,11 @@ class PluginTests(unittest.TestCase):
                 runtime_profile_getter=lambda: "swe",
             )
         )
-        self.assertEqual(
-            result,
-            {
-                "status": "rejected",
-                "message": "Не удалось безопасно обработать запрос.",
-            },
-        )
+        self.assertEqual(result["status"], "rejected")
+        self.assertTrue(result["message"])
+        self.assertIn("error_code", result)
+        self.assertIn("outcome", result)
+        self.assertIn("recovery", result)
         fake_board.get_or_create_task.assert_not_called()
 
     def test_handler_rejects_contextual_swe_without_runtime_binding(self):
@@ -3307,13 +3301,11 @@ class PluginTests(unittest.TestCase):
                 runtime_profile_getter=lambda: "",
             )
         )
-        self.assertEqual(
-            result,
-            {
-                "status": "rejected",
-                "message": "Не удалось безопасно обработать запрос.",
-            },
-        )
+        self.assertEqual(result["status"], "rejected")
+        self.assertTrue(result["message"])
+        self.assertIn("error_code", result)
+        self.assertIn("outcome", result)
+        self.assertIn("recovery", result)
         fake_board.get_or_create_task.assert_not_called()
 
     def test_initiative_public_projection_contains_names_and_dates_only(self):

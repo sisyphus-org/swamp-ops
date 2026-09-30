@@ -1694,8 +1694,11 @@ def route_request(
     board: Any,
     uuid_factory: UUIDFactory = _uuid4,
     now_factory: Callable[[], datetime] = _utc_now,
+    stage_callback: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Create or replay one audited PM task and promote only after route pass."""
+    if stage_callback is not None:
+        stage_callback("validation")
     validate_source_context(source)
     parsed = parse_linear_request(
         request,
@@ -1705,6 +1708,10 @@ def route_request(
     command = parsed.command
     idempotency_key = command["idempotency_key"]
     delivery_key = _delivery_key(idempotency_key, source)
+    # From the first board access onward, replay or reservation may refer to a
+    # dispatched mutation. Exception type/message cannot prove absence of writes.
+    if stage_callback is not None:
+        stage_callback("routing")
     if isinstance(request, str):
         task = board.find_task(delivery_key)
         if task is None:
