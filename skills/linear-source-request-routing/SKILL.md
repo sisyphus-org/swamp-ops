@@ -1,7 +1,7 @@
 ---
 name: linear-source-request-routing
 description: Route Linear reads/writes through broker and Project Manager.
-version: 1.6.0
+version: 1.7.0
 author: Alexey Petrov, Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -114,6 +114,17 @@ If authoritative mutation-scoped provenance identifies one exact compatible resu
    task status alone into a claim that the entity is absent or the write failed.
    Do not expose internal identifiers unless the user explicitly asks for
    diagnostic detail.
+
+## Safe source rejection diagnostics (SIS-334)
+
+The source tool preserves `status=rejected` and a sanitized `message`, and adds bounded `error_code`, `outcome`, and `recovery.action` for source validation/routing exceptions. These are agent diagnostics, not raw exception text or permission to mutate. Existing legacy comment/move recovery text and queued/completed/blocked contracts remain unchanged.
+
+- `invalid_request_shape`, `invalid_scope`, `invalid_issue_spec`, `invalid_text`, `unsafe_text`, `invalid_state`, `invalid_priority`, `invalid_date`, `request_too_large`: explain the fixed message; compare the original request against the supported shape above. `create_project` requires `name`, not `project`; hierarchy requires project/milestone objects with names and an issue title; standalone/tree require both named scope objects and issue title/description/state/priority. Do not invent a parent or weaken user constraints. With `outcome=not_attempted` and `correct_request`, correct only the rejected fields and submit once. Do not repeat the identical invalid request.
+- `source_session_mismatch`, `source_profile_mismatch`, `source_profile_invalid`, `source_context_invalid`: `restore_source_context` means stop and restore the authoritative gateway session/runtime binding. Never supply caller identity/profile fields or substitute another session. Retry once only after that context is restored.
+- `os_error`, `key_error`, `type_error`, `value_error`, `route_unavailable`: only a safe category is known. `inspect_source_route` means stop and request source-route maintenance; no terminal/API fallback or blind repeated mutation from a source agent.
+- `result_unverified`, or **any** diagnostic with `outcome=unknown`: routing/result processing may follow a dispatched write or an existing completed delivery. `reconcile_read_only` means apply the bounded read-only reconciliation and provenance rules above before answering or retrying. Never say the mutation was not attempted, failed, or created nothing from `rejected` alone. If the read route is also unavailable, stop and report the unverified outcome; do not loop.
+
+`outcome=not_attempted` proves only that this invocation failed in local validation before task lookup/reservation. It does not prove absence of a prior invocation's external effect. Recovery is advice, not automatic retry authority. Hide codes/internal mechanics in normal human replies; convey the concrete sanitized cause and needed correction. Preserve legacy and scope-description recovery rules; never strip a user-requested scope description to work around a validation error.
 
 ## User-facing response contract
 

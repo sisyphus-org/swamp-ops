@@ -6,6 +6,7 @@ from datetime import date, datetime, timezone
 from typing import Any, Callable
 
 from .audit import audit_route as bundled_audit_route
+from .diagnostics import rejection as _source_rejection
 from .calendar_route import (
     CalendarRequestError,
     approval_plan_write_identity,
@@ -2610,6 +2611,12 @@ def _public_result(result: dict[str, Any]) -> dict[str, Any]:
 
 def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
     """Validate one live user-facing source route and create or replay its PM task."""
+    stage = "validation"
+
+    def record_stage(value: str) -> None:
+        nonlocal stage
+        stage = value
+
     try:
         if not isinstance(args, dict):
             raise RouteError("tool input must be an object")
@@ -2857,6 +2864,7 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
             session_getter=session_getter,
         )
         board_factory = kwargs.get("board_factory") or HermesKanbanBoard
+        stage = "routing"
         board = board_factory(source_profile=source.profile)
         if isinstance(request, dict) and request.get("operation") == "approve_delete_linear_entity":
             request = board.approved_delete_request(
@@ -2873,8 +2881,10 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
         if kwargs.get("now_factory") is not None:
             route_options["now_factory"] = kwargs["now_factory"]
         internal_result = route_request(
-            request, source=source, board=board, **route_options
+            request, source=source, board=board, stage_callback=record_stage,
+            **route_options
         )
+        stage = "public_result"
         return json.dumps(
             _public_result(internal_result), ensure_ascii=False, sort_keys=True
         )
@@ -2920,21 +2930,17 @@ def handle_linear_source_request(args: dict[str, Any], **kwargs: Any) -> str:
                 sort_keys=True,
             )
         return json.dumps(
-            {
-                "status": "rejected",
-                "message": "Не удалось безопасно обработать запрос.",
-            },
-            ensure_ascii=False,
-            sort_keys=True,
+            _source_rejection(
+                exc, stage=stage,
+                operation=args.get("operation") if isinstance(args, dict) else None,
+            ), ensure_ascii=False, sort_keys=True
         )
-    except (KeyError, TypeError, ValueError, OSError):
+    except (KeyError, TypeError, ValueError, OSError) as exc:
         return json.dumps(
-            {
-                "status": "rejected",
-                "message": "Не удалось безопасно обработать запрос.",
-            },
-            ensure_ascii=False,
-            sort_keys=True,
+            _source_rejection(
+                exc, stage=stage,
+                operation=args.get("operation") if isinstance(args, dict) else None,
+            ), ensure_ascii=False, sort_keys=True
         )
 
 
