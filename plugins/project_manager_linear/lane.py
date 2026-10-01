@@ -2119,6 +2119,31 @@ def _workspace_read_result(
             )
             for node in raw_nodes
         ]
+        # Rich content is returned only for a literal, exact SIS issue lookup;
+        # inventories and fuzzy searches retain the original small projection.
+        if (
+            entity_type == "issues"
+            and change["entity_types"] == ["issues"]
+            and isinstance(needle, str)
+            and ISSUE_IDENTIFIER.fullmatch(needle)
+        ):
+            if sum(item["identifier"] == needle for item in projected) > 1:
+                raise ContractError("workspace read exact issue is ambiguous")
+            for node, item in zip(raw_nodes, projected):
+                if item["identifier"] != needle:
+                    continue
+                if "description" not in node:
+                    raise ContractError("workspace read issue description is missing")
+                description = node["description"]
+                if description is not None and (
+                    not isinstance(description, str)
+                    or len(description) > MAX_DESCRIPTION_LENGTH
+                    or any(ord(char) < 32 and char not in "\n\r\t" for char in description)
+                    or any(pattern.search(description) for pattern in CREDENTIAL_SHAPES)
+                ):
+                    raise ContractError("workspace read issue description is invalid")
+                item["description"] = description
+                item["url"] = _read_text(node.get("url"), "issue URL", maximum=2000)
         scanned_counts[entity_type] = len(projected)
         if folded_needle is not None:
             if entity_type == "issues":

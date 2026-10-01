@@ -1702,6 +1702,17 @@ def _public_workspace_read(
                 }
                 identifier = item.get("identifier")
                 parent = item.get("parent_identifier")
+                has_details = bool({"description", "url"} & set(item))
+                if has_details:
+                    if (
+                        operation != "search_linear"
+                        or entity_types != ["issues"]
+                        or after.get("query") != identifier
+                        or not isinstance(identifier, str)
+                        or not PUBLIC_ISSUE_IDENTIFIER.fullmatch(identifier)
+                    ):
+                        raise RouteError("verified workspace read details require an exact issue search")
+                    expected |= {"description", "url"}
                 if (
                     set(item) != expected
                     or item.get("type") != "issue"
@@ -1735,6 +1746,20 @@ def _public_workspace_read(
                     ),
                     "archived": item.get("archived"),
                 }
+                if has_details:
+                    description = item["description"]
+                    if description is not None and (
+                        not isinstance(description, str)
+                        or len(description) > 10000
+                        or any(ord(char) < 32 and char not in "\n\r\t" for char in description)
+                        or PUBLIC_INTERNAL_MARKER.search(description)
+                        or any(pattern.search(description) for pattern in CREDENTIAL_SHAPES)
+                    ):
+                        raise RouteError("verified result has an invalid public issue description")
+                    public_item["description"] = description
+                    public_item["url"] = _public_issue_target(
+                        {"type": "issue", "identifier": identifier, "url": item["url"]}
+                    )["url"]
             elif entity_type == "initiatives":
                 if set(item) != {"type", "name", "archived"} or item.get("type") != "initiative":
                     raise RouteError("verified workspace read has invalid initiative facts")

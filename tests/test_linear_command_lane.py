@@ -4184,6 +4184,199 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(replay["result"], "no_op")
             self.assertEqual(len(client.writes), 1)
 
+    def test_update_issue_accepts_combined_list_urls_and_replays(self):
+        # Synthetic fixture, not a captured production SIS-335 description.
+        desired = (
+            "## Integration https://example.com/docs\n\n"
+            "- Compare https://a.example/x and http://b.example/y\n"
+            "  - Verify https://c.example/z\n\n"
+            "Keep the surrounding text unchanged."
+        )
+        observed = (
+            "## Integration [https://example.com/docs](<https://example.com/docs>)\n\n"
+            "* Compare [https://a.example/x](<https://a.example/x>) and "
+            "[http://b.example/y](<http://b.example/y>)\n"
+            "  * Verify [https://c.example/z](<https://c.example/z>)\n\n"
+            "Keep the surrounding text unchanged."
+        )
+
+        class CanonicalizingDescriptionClient(FakeClient):
+            def update_issue_fields(self, issue_id, **fields):
+                super().update_issue_fields(issue_id, **fields)
+                if "description" in fields:
+                    self.current["description"] = observed
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = CanonicalizingDescriptionClient()
+            raw = command(
+                "update_issue",
+                {"description": desired},
+                key="linear:SIS-77:update:synthetic-combined-description",
+            )
+            applied = lane.execute_command(
+                client, raw, mode="apply", journal_path=Path(tmp) / "apply.json"
+            )
+            self.assertEqual(applied["result"], "applied")
+            self.assertEqual(applied["after"]["description"], observed)
+            self.assertEqual(
+                client.writes,
+                [("fields", "issue-uuid", {"description": desired})],
+            )
+            self.assertEqual(raw["change"]["description"], desired)
+            self.assertEqual(
+                applied["after"], applied["before"] | {"description": observed}
+            )
+            # A fresh journal proves comparison convergence, not cached replay.
+            replay = lane.execute_command(
+                client, raw, mode="apply", journal_path=Path(tmp) / "replay.json"
+            )
+            self.assertEqual(replay["result"], "no_op")
+            self.assertEqual(replay["after"]["description"], observed)
+            self.assertEqual(len(client.writes), 1)
+
+    def test_combined_description_normalization_requires_the_whole_value(self):
+        matches = lane._COMPARISON.description_matches
+        desired = (
+            "## Integration\n"
+            "- Compare https://a.example/x and https://b.example/y\n"
+            "- Keep text"
+        )
+        observed = (
+            "## Integration\n"
+            "* Compare [https://a.example/x](<https://a.example/x>) and "
+            "[https://b.example/y](<https://b.example/y>)\n"
+            "* Keep text"
+        )
+        self.assertTrue(matches(desired, desired))
+        self.assertTrue(matches(desired, observed))
+        self.assertTrue(
+            matches(
+                desired,
+                "## Integration\n* Compare https://a.example/x and https://b.example/y\n* Keep text",
+            )
+        )
+        for changed in (
+            # Preserve the preexisting marker-only alternative, but require
+            # whole-value conversion for the composed alternative.
+            "## Integration\n- Compare [https://a.example/x](<https://a.example/x>) and "
+            "[https://b.example/y](<https://b.example/y>)\n- Keep text",
+            "## Integration\n* Compare [https://a.example/x](<https://a.example/x>) and "
+            "https://b.example/y\n* Keep text",
+            observed.replace("* Keep text", "- Keep text"),
+            observed.replace("Keep text", "Changed text"),
+            observed.replace("## Integration", "# Integration"),
+            observed.replace("* Compare", "*  Compare"),
+            observed.replace("\n", "\r\n"),
+            observed + " ",
+            observed.replace("[https://a.example/x]", "[A]"),
+            observed.replace("(<https://a.example/x>)", "(<https://changed.example/x>)"),
+            observed.replace("(<https://a.example/x>)", "(https://a.example/x)"),
+        ):
+            with self.subTest(changed=changed):
+                self.assertFalse(matches(desired, changed))
+
+    def test_combined_url_normalization_rejects_ambiguous_contexts(self):
+        matches = lane._COMPARISON.description_matches
+        # Literal synthetic pairs deliberately exercise unsafe recognition,
+        # including syntax that a URL regex could otherwise swallow.
+        cases = (
+            ("- `https://a.example/x`", "* `[https://a.example/x`](<https://a.example/x`>)"),
+            ("```\n- https://a.example/x\n```", "```\n* [https://a.example/x](<https://a.example/x>)\n```"),
+            ("~~~\n- https://a.example/x\n~~~", "~~~\n* [https://a.example/x](<https://a.example/x>)\n~~~"),
+            ("    - https://a.example/x", "    * [https://a.example/x](<https://a.example/x>)"),
+            ("- parent\n\n        - https://a.example/x", "* parent\n\n        * [https://a.example/x](<https://a.example/x>)"),
+            ("- parent\n\nProse\n    - https://a.example/x", "* parent\n\nProse\n    * [https://a.example/x](<https://a.example/x>)"),
+            ("- [ ] https://a.example/x", "* [ ] [https://a.example/x](<https://a.example/x>)"),
+            ("- [x] https://a.example/x", "* [x] [https://a.example/x](<https://a.example/x>)"),
+            ("- [X] https://a.example/x", "* [X] [https://a.example/x](<https://a.example/x>)"),
+            ("- [A](https://a.example/x)", "* [A]([https://a.example/x)](<https://a.example/x)>)"),
+            ("- <https://a.example/x>", "* <[https://a.example/x](<https://a.example/x>)>"),
+            ("- *https://a.example/x*", "* *[https://a.example/x*](<https://a.example/x*>)"),
+            ("- _https://a.example/x_", "* _[https://a.example/x_](<https://a.example/x_>)"),
+            ("- https://a.example/x`code`", "* [https://a.example/x`code`](<https://a.example/x`code`>)"),
+            ("- https://a.example/x*text*", "* [https://a.example/x*text*](<https://a.example/x*text*>)"),
+            ("- https://a.example/x_text_", "* [https://a.example/x_text_](<https://a.example/x_text_>)"),
+            ("- https://a.example/x~text~", "* [https://a.example/x~text~](<https://a.example/x~text~>)"),
+            ("- https://a.example/x\\escaped", "* [https://a.example/x\\escaped](<https://a.example/x\\escaped>)"),
+            ("- 'https://a.example/x", "* '[https://a.example/x](<https://a.example/x>)"),
+            ('- "https://a.example/x', '* "[https://a.example/x](<https://a.example/x>)'),
+            ("- prefixhttps://a.example/x", "* prefix[https://a.example/x](<https://a.example/x>)"),
+            ("- https://a.example/x. then text", "* [https://a.example/x.](<https://a.example/x.>) then text"),
+            ("- https://a.example/x, then text", "* [https://a.example/x,](<https://a.example/x,>) then text"),
+            ("- https://a.example/x? then text", "* [https://a.example/x?](<https://a.example/x?>) then text"),
+            ("- https://a.example/x) then text", "* [https://a.example/x)](<https://a.example/x)>) then text"),
+            ("- https://a.example/x' then text", "* [https://a.example/x'](<https://a.example/x'>) then text"),
+            ("- https://a.example/x\nhttps://b.example/y # Not a heading", "* [https://a.example/x](<https://a.example/x>)\n[https://b.example/y](<https://b.example/y>) # Not a heading"),
+            ("- https://a.example/x\nhttps://b.example/y * Not a list", "* [https://a.example/x](<https://a.example/x>)\n[https://b.example/y](<https://b.example/y>) * Not a list"),
+            ("- https://a.example/x\n> quoted", "* [https://a.example/x](<https://a.example/x>)\n> quoted"),
+            ("- https://a.example/x\n| table |", "* [https://a.example/x](<https://a.example/x>)\n| table |"),
+        )
+        for desired, observed in cases:
+            with self.subTest(desired=desired):
+                self.assertTrue(matches(desired, desired))
+                self.assertFalse(matches(desired, observed))
+
+    def test_url_normalization_rejects_unsupported_list_structure(self):
+        matches = lane._COMPARISON.description_matches
+        for desired, observed in (
+            (
+                "+ https://a.example/x",
+                "+ [https://a.example/x](<https://a.example/x>)",
+            ),
+            (
+                "- - -\nhttps://a.example/x",
+                "- - -\n[https://a.example/x](<https://a.example/x>)",
+            ),
+            (
+                "* * *\nhttps://a.example/x",
+                "* * *\n[https://a.example/x](<https://a.example/x>)",
+            ),
+        ):
+            with self.subTest(desired=desired):
+                self.assertFalse(matches(desired, observed))
+
+    def test_combined_url_normalization_rejects_tab_indented_code(self):
+        matches = lane._COMPARISON.description_matches
+        desired = "- parent\n \t- https://a.example/x"
+        observed = "* parent\n \t- [https://a.example/x](<https://a.example/x>)"
+        self.assertFalse(matches(desired, observed))
+
+    def test_plain_urls_in_supported_heading_and_list_contexts(self):
+        matches = lane._COMPARISON.description_matches
+        for desired, observed in (
+            (
+                "- Integration https://example.com",
+                "* Integration [https://example.com](<https://example.com>)",
+            ),
+            (
+                "## Heading https://example.com\n\nText",
+                "## Heading [https://example.com](<https://example.com>)\n\nText",
+            ),
+            (
+                "- parent\n  - child\n    - https://example.com\n",
+                "* parent\n  * child\n    * [https://example.com](<https://example.com>)\n",
+            ),
+            (
+                "## Heading\r\n- https://example.com/path_name?q=one&v=two#part\r\n",
+                "## Heading\r\n* [https://example.com/path_name?q=one&v=two#part]"
+                "(<https://example.com/path_name?q=one&v=two#part>)\r\n",
+            ),
+            (
+                "* Integration https://example.com",
+                "* Integration [https://example.com](<https://example.com>)",
+            ),
+        ):
+            with self.subTest(desired=desired):
+                self.assertTrue(matches(desired, observed))
+                self.assertTrue(matches(desired, desired))
+                self.assertFalse(matches(desired, None))
+
+    def test_combined_fix_preserves_existing_url_only_list_alternative(self):
+        matches = lane._COMPARISON.description_matches
+        desired = "- Integration https://example.com\n- Keep text"
+        observed = "- Integration [https://example.com](<https://example.com>)\n- Keep text"
+        self.assertTrue(matches(desired, observed))
+
     def test_linear_unordered_list_marker_equivalence_is_exact_and_narrow(self):
         matches = lane._COMPARISON.description_matches
         nested = "- parent\n  - child\n    - grandchild"

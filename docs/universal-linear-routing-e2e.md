@@ -46,6 +46,32 @@ Outcome evidence is stage-bound: handler input/context and route parsing before 
 
 Deployment must ship the complete `plugins/linear_source_route` directory at plugin version **2.0.2** (including `diagnostics.py`) together with source-routing skill **1.7.0** to every existing user-facing source profile and the bootstrap baseline for future profiles. Restart affected source gateways through the approved rollout after review. Do not change the PM command/result schema or deploy only the skill/handler in isolation. Local implementation does not claim live rollout: verify installed plugin/skill version, a safe malformed-request diagnostic, exact-session/profile rejection, queued/wake/literal replay, and no secret or internal metadata leakage before declaring deployment complete. Diagnostics must not introduce a new source mutation route or repeat a queued mutation.
 
+## SIS-77 description reconciliation follow-up
+
+An issues-only `search_linear` with a literal uppercase `SIS-N` query now returns
+`description` and the validated canonical `url` **only on the entity whose
+identifier equals that query**. Inventory, fuzzy/name search, lowercase query,
+other entity types, and prefix matches retain the small hierarchy projection.
+Legacy exact-search results without these optional details remain replayable.
+Both detail fields must be present together. Description bytes (including empty,
+null, newline and tab) are preserved; missing provider fields are unknown, not an
+empty description. Oversized values, unsafe controls, credential-shaped content,
+internal metadata in the public projection, and mismatched canonical URLs fail
+closed. This read creates no mutation or recovery journal.
+
+Description verification preserves the submitted payload and accepts exact
+whole-value provider representations only. Proven plain-URL autolinking and
+unordered-list marker serialization may compose in supported heading/list/prose
+contexts; changed prose, partial URL/list conversion, code/tasks/ambiguous markup,
+link label/target changes, and whitespace drift still reject. Local literal
+fixtures prove the seam, not the precise production cause of SIS-335. Deployment
+is not complete until the original failed request is reconciled read-only and
+its exact safe replay is verified; never retry the write solely from a mismatch.
+
+Ship the paired source **2.0.3** and PM **1.6.2** plugin trees after review and
+coordinate affected source/broker reloads. No runtime installation or merge is
+performed by this change.
+
 ## Project Manager lane
 
 `plugins/project_manager_linear` remains the only write-capable Linear lane. `pm_linear_execute()` reads the authoritative command from the persisted Kanban task and accepts no model-supplied command object.
