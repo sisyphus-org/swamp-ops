@@ -69,8 +69,10 @@ def description_matches(desired: str, live: Any) -> bool:
     """Match exact text or a narrowly confirmed Linear serialization.
 
     Mutation payloads stay byte-for-byte unchanged. Accepted alternate whole-
-    value serializations are deterministic plain-URL autolinking and unordered
-    Markdown list markers changing from ``- `` to ``* ``.
+    value serializations are deterministic plain-URL autolinking, unordered
+    Markdown list markers changing from ``- `` to ``* ``, and their composition.
+    Autolinking recognizes only plain prose and narrow heading/list prefixes;
+    ambiguous code, markup, token boundaries, and punctuation fail closed.
     """
     if live == desired:
         return True
@@ -81,29 +83,68 @@ def description_matches(desired: str, live: Any) -> bool:
     if canonical_list is not None and live == canonical_list:
         return True
 
-    urls = list(re.finditer(r"https?://[^\s\[\]<>]+", desired))
-    if not urls or any(
+    # Compose marker serialization and autolinking over the entire value.
+    source = canonical_list if canonical_list is not None else desired
+    urls = list(re.finditer(r"https?://[^\s\[\]<>]+", source))
+    if not urls:
+        return False
+    if any(
         match.group(0).endswith(
-            (".", ",", ";", ":", "!", "?", ")", "]", "}", "'", '"')
+            (".", ",", ";", ":", "!", "?", ")", "]", "}", "'", '"', "_")
         )
+        or re.search(r"[()<>`*~|{}\\\"']", match.group(0))
+        or (match.start() > 0 and not source[match.start() - 1].isspace())
         for match in urls
     ):
         return False
-    plain_context = "".join(
-        desired[end : match.start()]
-        for end, match in zip(
-            [0, *(item.end() for item in urls[:-1])],
-            urls,
-        )
-    ) + desired[urls[-1].end() :]
-    if re.search(r"[\[\]()<>`*_~|{}#\\]", plain_context):
+    # Inspect the original lines before removing URLs: removal must not turn
+    # inline punctuation after a URL into an apparent heading/list prefix.
+    context_lines: list[str] = []
+    list_indents: list[int] = []
+    for line in source.splitlines(keepends=True):
+        if re.match(r"^ *\+ ", line) or re.fullmatch(r" *(?:[-*] *){3,}(?:\r?\n)?", line):
+            return False
+        item = re.match(r"^( *)([-*]) ", line)
+        if item is not None:
+            indent = len(item.group(1))
+            if indent > 4 or (
+                indent >= 4
+                and not any(parent < indent for parent in list_indents)
+            ):
+                return False
+            list_indents.append(indent)
+            line = line[item.end() :]
+        else:
+            if line.startswith("    ") or re.match(r"^ *\t", line):
+                return False
+            if line.strip():
+                list_indents.clear()
+            line = re.sub(r"^ {0,3}#{1,6} ", "", line)
+        context_lines.append(line)
+    plain_context = re.sub(r"https?://[^\s\[\]<>]+", "", "".join(context_lines))
+    if re.search(r"[\[\]()<>`*_~|{}#\\\"']", plain_context):
         return False
     canonical = re.sub(
         r"https?://[^\s\[\]<>]+",
         lambda match: f"[{match.group(0)}](<{match.group(0)}>)",
-        desired,
+        source,
     )
-    return live == canonical
+    if live == canonical:
+        return True
+    # Keep the preexisting URL-only alternative for original plain contexts
+    # (including hyphen lists). Rich heading/list contexts use the complete
+    # composed representation above, not partial marker conversion.
+    original_context = re.sub(r"https?://[^\s\[\]<>]+", "", desired)
+    if canonical_list is not None and not re.search(
+        r"[\[\]()<>`*_~|{}#\\]", original_context
+    ):
+        canonical_urls = re.sub(
+            r"https?://[^\s\[\]<>]+",
+            lambda match: f"[{match.group(0)}](<{match.group(0)}>)",
+            desired,
+        )
+        return live == canonical_urls
+    return False
 
 
 def ordered_mismatch_fields(fields: Iterable[str]) -> list[str]:

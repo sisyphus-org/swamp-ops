@@ -1,5 +1,5 @@
 name: project-manager-linear
-version: 1.6.1
+version: 1.6.2
 description: >-
   Deterministic PM Linear lane with compare-before-set issue moves, direct
   writable-state transitions, reserved duplicate relation handling,
