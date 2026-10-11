@@ -61,7 +61,9 @@ class _KanbanCompat:
         for module_name in self._MODULES:
             try:
                 module = importlib.import_module(module_name)
-            except ImportError:
+            except ModuleNotFoundError as exc:
+                if exc.name is None or not (module_name == exc.name or module_name.startswith(exc.name + ".")):
+                    raise
                 continue
             if hasattr(module, name):
                 return getattr(module, name)
