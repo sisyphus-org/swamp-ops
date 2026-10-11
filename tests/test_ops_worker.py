@@ -1,3 +1,7 @@
+try:
+    import kanban_compat
+except ImportError:  # discovered as package (-t .)
+    from tests import kanban_compat
 import json
 import tempfile
 import unittest
@@ -187,12 +191,12 @@ class OperationsManagerWorkerTests(unittest.TestCase):
             "idempotency_key": "operations-delivery:v1:5edaebfc879eb54af4195b9e89a1912f",
         }
         with mock.patch(
-            "hermes_cli.kanban_db.connect", return_value=Connection(base_row)
+            kanban_compat.connect_target(), return_value=Connection(base_row)
         ):
             self.assertTrue(_verify_source_route(owner_task, owner_command, Path("/tmp/kanban.db")))
         wrong_user = {**base_row, "user_id": "123456"}
         with mock.patch(
-            "hermes_cli.kanban_db.connect", return_value=Connection(wrong_user)
+            kanban_compat.connect_target(), return_value=Connection(wrong_user)
         ):
             self.assertFalse(_verify_source_route(owner_task, owner_command, Path("/tmp/kanban.db")))
 

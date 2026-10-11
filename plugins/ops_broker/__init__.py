@@ -76,6 +76,36 @@ OPS_BROKER_SCHEMA = {
 }
 
 
+class _KanbanCompat:
+    """Resolve Kanban DB API across Hermes core versions (pre/post module split)."""
+
+    _MODULES = (
+        "hermes_cli.kanban_db",
+        "hermes_cli.kanban_db_connect",
+        "hermes_cli.kanban_db_notify",
+        "hermes_cli.kanban_db_dispatch",
+        "hermes_cli.kanban_db_boards",
+    )
+
+    def __getattr__(self, name: str):
+        import importlib
+
+        for module_name in self._MODULES:
+            try:
+                module = importlib.import_module(module_name)
+            except ModuleNotFoundError as exc:
+                if exc.name is None or not (module_name == exc.name or module_name.startswith(exc.name + ".")):
+                    raise
+                continue
+            if hasattr(module, name):
+                return getattr(module, name)
+        raise AttributeError(f"Hermes Kanban API has no attribute {name!r}")
+
+
+def _kanban_api() -> "_KanbanCompat":
+    return _KanbanCompat()
+
+
 def default_runner(argv: list[str], *, cwd: Path, timeout: int) -> dict[str, Any]:
     env = {
         "LC_ALL": "C",
@@ -456,8 +486,7 @@ def _task_value(task: Any, field: str) -> Any:
 
 
 def _load_current_task(task_id: str, db_path: Path) -> Any:
-    from hermes_cli import kanban_db as kb
-
+    kb = _kanban_api()
     if not db_path.is_file():
         raise FileNotFoundError("pinned Kanban database does not exist")
     conn = kb.connect(db_path=db_path)
@@ -473,8 +502,7 @@ def _load_current_task(task_id: str, db_path: Path) -> Any:
 def _reserve_current_run(
     task_id: str, run_id: int, db_path: Path, claim_lock: str
 ) -> bool:
-    from hermes_cli import kanban_db as kb
-
+    kb = _kanban_api()
     conn = kb.connect(db_path=db_path)
     try:
         if not kb.heartbeat_claim(conn, task_id, claimer=claim_lock):
@@ -561,8 +589,7 @@ def _command_from_task(task: Any) -> dict[str, Any]:
 def _verify_source_route(
     task: Any, command: dict[str, Any], db_path: Path
 ) -> bool:
-    from hermes_cli import kanban_db as kb
-
+    kb = _kanban_api()
     conn = kb.connect(db_path=db_path)
     try:
         rows = conn.execute(

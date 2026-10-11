@@ -436,7 +436,10 @@ class AdapterTests(unittest.TestCase):
         self.assertNotIn("relation_id", parameters["properties"])
 
     def test_protected_delete_preview_and_broker_grant_round_trip_in_real_kanban_db(self):
-        from hermes_cli import kanban_db as kb
+        try:
+            from kanban_compat import kb
+        except ImportError:  # discovered as package (-t .)
+            from tests.kanban_compat import kb
 
         source = SourceContext(
             session_id="20260906_120000_abcdef12",
@@ -504,7 +507,7 @@ class AdapterTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "kanban.db"
-            with mock.patch.dict(os.environ, {"HERMES_KANBAN_DB": str(db_path)}):
+            with mock.patch.dict(os.environ, {"HERMES_KANBAN_DB": str(db_path), "HERMES_HOME": str(db_path.parent)}):
                 kb.init_db(db_path=db_path)
                 board = HermesKanbanBoard(
                     board="default", source_profile="default", kb=kb
@@ -680,11 +683,14 @@ class AdapterTests(unittest.TestCase):
         )
 
     def test_adapter_reads_latest_persisted_block_reason(self):
-        from hermes_cli import kanban_db as kb
+        try:
+            from kanban_compat import kb
+        except ImportError:  # discovered as package (-t .)
+            from tests.kanban_compat import kb
 
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "kanban.db"
-            with mock.patch.dict(os.environ, {"HERMES_KANBAN_DB": str(db_path)}):
+            with mock.patch.dict(os.environ, {"HERMES_KANBAN_DB": str(db_path), "HERMES_HOME": str(db_path.parent)}):
                 kb.init_db(db_path=db_path)
                 board = HermesKanbanBoard(
                     board="default", source_profile="default", kb=kb
@@ -726,7 +732,10 @@ class AdapterTests(unittest.TestCase):
                 )
 
     def test_atomic_get_or_create_race_persists_one_task_and_one_wake_subscription(self):
-        from hermes_cli import kanban_db as kb
+        try:
+            from kanban_compat import kb
+        except ImportError:  # discovered as package (-t .)
+            from tests.kanban_compat import kb
 
         source = SourceContext(
             session_id="20260828_120000_abcdef12",
@@ -744,7 +753,7 @@ class AdapterTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "kanban.db"
-            with mock.patch.dict(os.environ, {"HERMES_KANBAN_DB": str(db_path)}):
+            with mock.patch.dict(os.environ, {"HERMES_KANBAN_DB": str(db_path), "HERMES_HOME": str(db_path.parent)}):
                 kb.init_db(db_path=db_path)
 
                 def dispatch():

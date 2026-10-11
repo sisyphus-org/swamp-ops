@@ -8,7 +8,10 @@ from pathlib import Path
 from unittest import mock
 
 import jsonschema
-from hermes_cli import kanban_db as kb
+try:
+    from kanban_compat import kb
+except ImportError:  # discovered as package (-t .)
+    from tests.kanban_compat import kb
 
 
 ROOT = Path(__file__).parents[1]
@@ -37,7 +40,7 @@ class CalendarSourcePluginTests(unittest.TestCase):
     def test_board_atomically_prefers_active_legacy_delivery(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "kanban.db"
-            with mock.patch.dict(os.environ, {"HERMES_KANBAN_DB": str(db_path)}):
+            with mock.patch.dict(os.environ, {"HERMES_KANBAN_DB": str(db_path), "HERMES_HOME": str(db_path.parent)}):
                 kb.init_db(db_path=db_path)
                 board = HermesKanbanBoard(
                     board="default", source_profile="default", kb=kb
@@ -78,7 +81,7 @@ class CalendarSourcePluginTests(unittest.TestCase):
     def test_board_rejects_coexisting_legacy_and_direct_deliveries(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "kanban.db"
-            with mock.patch.dict(os.environ, {"HERMES_KANBAN_DB": str(db_path)}):
+            with mock.patch.dict(os.environ, {"HERMES_KANBAN_DB": str(db_path), "HERMES_HOME": str(db_path.parent)}):
                 kb.init_db(db_path=db_path)
                 board = HermesKanbanBoard(
                     board="default", source_profile="default", kb=kb
@@ -312,14 +315,17 @@ class CalendarSourcePluginTests(unittest.TestCase):
         for forbidden in ("GOOGLE_CLIENT_SECRET", "googleapiclient", "google.oauth2", "from google"):
             self.assertNotIn(forbidden, source)
     def test_literal_replay_uses_one_real_task_and_one_wake_subscription(self):
-        from hermes_cli import kanban_db as kb
+        try:
+            from kanban_compat import kb
+        except ImportError:  # discovered as package (-t .)
+            from tests.kanban_compat import kb
         source = SourceContext(
             session_id="20260904_120000_abcdef12", profile="default", platform="telegram",
             chat_id="442308262", user_id="442308262", chat_type="dm", thread_id="448864",
         )
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "kanban.db"
-            with mock.patch.dict(os.environ, {"HERMES_KANBAN_DB": str(db_path)}):
+            with mock.patch.dict(os.environ, {"HERMES_KANBAN_DB": str(db_path), "HERMES_HOME": str(db_path.parent)}):
                 kb.init_db(db_path=db_path)
                 def dispatch():
                     board = HermesKanbanBoard(

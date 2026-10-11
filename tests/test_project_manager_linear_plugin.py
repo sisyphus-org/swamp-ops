@@ -413,13 +413,16 @@ class PluginTests(unittest.TestCase):
         self.assertEqual(lane.calls[0], ("validate", command()))
 
     def test_default_loader_reads_claimed_task_from_pinned_real_db(self):
-        from hermes_cli import kanban_db as kb
+        try:
+            from kanban_compat import kb
+        except ImportError:  # discovered as package (-t .)
+            from tests.kanban_compat import kb
 
         lane = FakeLane()
         lifecycle = FakeLifecycle()
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "kanban.db"
-            with mock.patch.dict(os.environ, {"HERMES_KANBAN_DB": str(db_path)}):
+            with mock.patch.dict(os.environ, {"HERMES_KANBAN_DB": str(db_path), "HERMES_HOME": str(db_path.parent)}):
                 conn = kb.connect()
                 try:
                     task_id = kb.create_task(
