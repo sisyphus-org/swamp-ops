@@ -16,6 +16,34 @@ from uuid import UUID, uuid4
 from . import linear_approval_contract as linear_approval
 
 
+class _KanbanCompat:
+    """Resolve Kanban DB API across Hermes core versions (pre/post module split)."""
+
+    _MODULES = (
+        "hermes_cli.kanban_db",
+        "hermes_cli.kanban_db_connect",
+        "hermes_cli.kanban_db_notify",
+        "hermes_cli.kanban_db_dispatch",
+        "hermes_cli.kanban_db_boards",
+    )
+
+    def __getattr__(self, name: str):
+        import importlib
+
+        for module_name in self._MODULES:
+            try:
+                module = importlib.import_module(module_name)
+            except ImportError:
+                continue
+            if hasattr(module, name):
+                return getattr(module, name)
+        raise AttributeError(f"Hermes Kanban API has no attribute {name!r}")
+
+
+def _kanban_api() -> "_KanbanCompat":
+    return _KanbanCompat()
+
+
 class BrokerError(ValueError):
     pass
 
@@ -1593,8 +1621,7 @@ def _load_linear_delete_preview(
         else "preview_delete_linear_entity"
     )
     if kb is None:
-        from hermes_cli import kanban_db as kb_module
-
+        kb_module = _kanban_api()
         kb = kb_module
     conn = kb.connect(board="default")
     try:
@@ -1807,8 +1834,7 @@ def _record_linear_delete_approval(
 ) -> dict[str, Any]:
     """Persist one idempotent protected grant on the exact preview task."""
     if kb is None:
-        from hermes_cli import kanban_db as kb_module
-
+        kb_module = _kanban_api()
         kb = kb_module
     task_id = preview.get("task_id")
     bulk_preview = bool(
@@ -1891,8 +1917,7 @@ def _record_linear_delete_approval_attempt(
 ) -> dict[str, Any]:
     """Consume one opaque reference before any external approval side effect."""
     if kb is None:
-        from hermes_cli import kanban_db as kb_module
-
+        kb_module = _kanban_api()
         kb = kb_module
     task_id = preview.get("task_id")
     bulk_preview = bool(

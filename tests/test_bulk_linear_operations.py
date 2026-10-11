@@ -1635,7 +1635,10 @@ class BulkExecutionTests(unittest.TestCase):
 
 class BulkSourceTests(unittest.TestCase):
     def test_handle_round_trip_persists_protected_bulk_preview_in_kanban(self):
-        from hermes_cli import kanban_db as kb
+        try:
+            from kanban_compat import kb
+        except ImportError:  # discovered as package (-t .)
+            from tests.kanban_compat import kb
 
         request = requested_owner_batch()
         session_values = {
@@ -1651,7 +1654,7 @@ class BulkSourceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "kanban.db"
             with mock.patch.dict(
-                os.environ, {"HERMES_KANBAN_DB": str(db_path)}
+                os.environ, {"HERMES_KANBAN_DB": str(db_path), "HERMES_HOME": str(db_path.parent)}
             ), mock.patch.object(kb, "_assert_not_delegated_child_mutation"):
                 kb.init_db(db_path=db_path)
 

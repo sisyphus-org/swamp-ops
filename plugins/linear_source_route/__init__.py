@@ -917,6 +917,34 @@ LINEAR_SOURCE_REQUEST_SCHEMA = {
 }
 
 
+class _KanbanCompat:
+    """Resolve Kanban DB API across Hermes core versions (pre/post module split)."""
+
+    _MODULES = (
+        "hermes_cli.kanban_db",
+        "hermes_cli.kanban_db_connect",
+        "hermes_cli.kanban_db_notify",
+        "hermes_cli.kanban_db_dispatch",
+        "hermes_cli.kanban_db_boards",
+    )
+
+    def __getattr__(self, name: str):
+        import importlib
+
+        for module_name in self._MODULES:
+            try:
+                module = importlib.import_module(module_name)
+            except ImportError:
+                continue
+            if hasattr(module, name):
+                return getattr(module, name)
+        raise AttributeError(f"Hermes Kanban API has no attribute {name!r}")
+
+
+def _kanban_api() -> "_KanbanCompat":
+    return _KanbanCompat()
+
+
 def _task_dict(task: Any) -> dict[str, Any]:
     if isinstance(task, dict):
         return dict(task)
@@ -938,8 +966,7 @@ class HermesKanbanBoard:
         if not is_source_profile(source_profile):
             raise RouteError("source profile is not an allowed user-facing profile")
         if kb is None:
-            from hermes_cli import kanban_db as kb_module
-
+            kb_module = _kanban_api()
             kb = kb_module
         self.board = board
         self.source_profile = source_profile

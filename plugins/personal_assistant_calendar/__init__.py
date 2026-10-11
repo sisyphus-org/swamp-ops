@@ -62,6 +62,34 @@ PA_CALENDAR_EXECUTE_SCHEMA = {
 }
 
 
+class _KanbanCompat:
+    """Resolve Kanban DB API across Hermes core versions (pre/post module split)."""
+
+    _MODULES = (
+        "hermes_cli.kanban_db",
+        "hermes_cli.kanban_db_connect",
+        "hermes_cli.kanban_db_notify",
+        "hermes_cli.kanban_db_dispatch",
+        "hermes_cli.kanban_db_boards",
+    )
+
+    def __getattr__(self, name: str):
+        import importlib
+
+        for module_name in self._MODULES:
+            try:
+                module = importlib.import_module(module_name)
+            except ImportError:
+                continue
+            if hasattr(module, name):
+                return getattr(module, name)
+        raise AttributeError(f"Hermes Kanban API has no attribute {name!r}")
+
+
+def _kanban_api() -> "_KanbanCompat":
+    return _KanbanCompat()
+
+
 class CalendarWorkerError(RuntimeError):
     """The persisted Calendar job failed a bounded worker contract."""
 
@@ -186,8 +214,7 @@ def _task_value(task: Any, field: str) -> Any:
 
 
 def _load_current_task(task_id: str, db_path: Path) -> Any:
-    from hermes_cli import kanban_db as kb
-
+    kb = _kanban_api()
     if not db_path.is_file():
         raise FileNotFoundError("pinned Kanban database does not exist")
     conn = kb.connect(db_path=db_path)
@@ -201,8 +228,7 @@ def _load_current_task(task_id: str, db_path: Path) -> Any:
 
 
 def _reserve_current_run(task_id: str, run_id: int, db_path: Path, claim_lock: str) -> bool:
-    from hermes_cli import kanban_db as kb
-
+    kb = _kanban_api()
     if not db_path.is_file():
         raise FileNotFoundError("pinned Kanban database does not exist")
     conn = kb.connect(db_path=db_path)
@@ -291,8 +317,7 @@ def _command_from_task(task: Any) -> dict[str, Any]:
 
 
 def _load_approval_plan(reference: str, db_path: Path) -> dict[str, Any]:
-    from hermes_cli import kanban_db as kb
-
+    kb = _kanban_api()
     if not db_path.is_file():
         raise FileNotFoundError("pinned Kanban database does not exist")
     conn = kb.connect(db_path=db_path)
