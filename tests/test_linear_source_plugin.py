@@ -3008,6 +3008,8 @@ class PluginTests(unittest.TestCase):
                     "Не удалось выполнить: create_issue read-back mismatched fields: "
                     "description."
                 ),
+                "outcome": "unknown",
+                "recovery": {"action": "reconcile_read_only"},
             },
         )
 
@@ -3174,7 +3176,44 @@ class PluginTests(unittest.TestCase):
                             "reason": f"Linear command failed: {reason}",
                         }
                     ),
-                    {"status": "blocked", "message": f"Не удалось выполнить: {reason}."},
+                    {
+                        "status": "blocked",
+                        "message": f"Не удалось выполнить: {reason}.",
+                        "outcome": "unknown",
+                        "recovery": {"action": "reconcile_read_only"},
+                    },
+                )
+
+        tree = "converge_issue_tree read-back mismatched fields: description (SIS-342)"
+        self.assertEqual(
+            _public_result(
+                {
+                    "status": "blocked",
+                    "operation": "converge_issue_tree",
+                    "reason": f"Linear command failed: {tree}",
+                }
+            ),
+            {
+                "status": "blocked",
+                "message": f"Не удалось выполнить: {tree}.",
+                "outcome": "unknown",
+                "recovery": {"action": "reconcile_read_only"},
+            },
+        )
+        for unsafe_suffix in (" (SIS-0)", " (ENG-1)", " (SIS-1) x", " (secret)"):
+            with self.subTest(unsafe_suffix=unsafe_suffix):
+                self.assertEqual(
+                    _public_result(
+                        {
+                            "status": "blocked",
+                            "operation": "converge_issue_tree",
+                            "reason": (
+                                "converge_issue_tree read-back mismatched fields: "
+                                f"description{unsafe_suffix}"
+                            ),
+                        }
+                    )["message"],
+                    "Не удалось выполнить запрос: безопасная причина недоступна.",
                 )
 
         unsafe = "create_issue read-back mismatched fields: description, live=secret"

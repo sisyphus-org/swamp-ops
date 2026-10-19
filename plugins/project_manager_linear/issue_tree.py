@@ -437,7 +437,10 @@ def _reconcile(
 ) -> None:
     blockers = [field for field in fields if field in {"id/title", "team"}]
     if blockers:
-        _fail(error_cls, _COMPARISON.mismatch_message(operation, blockers))
+        _fail(
+            error_cls,
+            _COMPARISON.mismatch_message(operation, blockers, live.get("identifier")),
+        )
     kwargs: dict[str, Any] = {}
     if "description" in fields:
         kwargs["description"] = spec["description"]
@@ -452,7 +455,10 @@ def _reconcile(
     if "milestone" in fields:
         kwargs["milestone_id"] = scope.milestone["id"]
     if not kwargs:
-        _fail(error_cls, _COMPARISON.mismatch_message(operation, fields))
+        _fail(
+            error_cls,
+            _COMPARISON.mismatch_message(operation, fields, live.get("identifier")),
+        )
     client.update_scoped_issue(live["id"], **kwargs)
 
 
@@ -620,7 +626,10 @@ def execute(
         parent=None,
     )
     if fields:
-        _fail(error_cls, _COMPARISON.mismatch_message(operation, fields))
+        _fail(
+            error_cls,
+            _COMPARISON.mismatch_message(operation, fields, issue.get("identifier")),
+        )
 
     children = []
     for index, spec in enumerate(child_specs):
@@ -717,7 +726,12 @@ def execute(
             parent=issue,
         )
         if child_fields:
-            _fail(error_cls, _COMPARISON.mismatch_message(operation, child_fields))
+            _fail(
+                error_cls,
+                _COMPARISON.mismatch_message(
+                    operation, child_fields, child.get("identifier")
+                ),
+            )
         children.append(child)
 
     return _safe_result(

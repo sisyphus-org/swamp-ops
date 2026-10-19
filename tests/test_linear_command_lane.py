@@ -2668,7 +2668,7 @@ class ExecutionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaisesRegex(
                 lane.ContractError,
-                r"^create_standalone_issue read-back mismatched fields: priority$",
+                r"^create_standalone_issue read-back mismatched fields: priority \(SIS-100\)$",
             ):
                 lane.execute_command(
                     TamperedClient(),
@@ -2868,13 +2868,119 @@ class ExecutionTests(unittest.TestCase):
             client.issues[1]["id"] = "non-deterministic-child"
             with self.assertRaisesRegex(
                 lane.ContractError,
-                r"^converge_issue_tree read-back mismatched fields: id/title$",
+                r"^converge_issue_tree read-back mismatched fields: id/title \(SIS-201\)$",
             ):
                 lane.execute_command(
                     client,
                     raw,
                     mode="apply",
                     journal_path=Path(tmp) / "replay.json",
+                )
+
+    def test_issue_tree_accepts_linear_escaped_prose_punctuation_readback(self):
+        # Regression for SIS-339..342: Linear stored "~114" as "\~114" and the
+        # tree blocked with a false description mismatch after a full write.
+        class EscapingClient(FakeIssueTreeClient):
+            @staticmethod
+            def _escape(text):
+                return re.sub(r"([~*_])", r"\\\1", text)
+
+            def create_project_issue(self, **kwargs):
+                super().create_project_issue(**kwargs)
+                self.issues[-1]["description"] = self._escape(kwargs["description"])
+
+            def create_issue(self, **kwargs):
+                super().create_issue(**kwargs)
+                self.issues[-1]["description"] = self._escape(kwargs["description"])
+
+        raw = issue_tree_command("linear:SIS:tree:bible")
+        raw["change"]["issue"]["description"] = (
+            "Сравнительное чтение: Екклесиаст, Матфей и Фома.\n\n"
+            "Критерий готовности: выводы — комментарием, разбор — в Obsidian."
+        )
+        raw["change"]["sub_issues"] = [
+            {
+                "title": "Книга Екклесиаста",
+                "description": "Ключевое понятие — hevel («суета», «пар»).",
+                "state": "Todo",
+                "priority": "Medium",
+            },
+            {
+                "title": "Евангелие от Фомы",
+                "description": (
+                    "Неканонический сборник из ~114 изречений "
+                    "(наг-хаммадийская находка).\n\nЧитать после Матфея, *_ок_*."
+                ),
+                "state": "Todo",
+                "priority": "Medium",
+            },
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            client = EscapingClient(
+                project_name="Книги", milestone_name="Английская литература"
+            )
+            applied = lane.execute_command(
+                client, raw, mode="apply", journal_path=Path(tmp) / "create.json"
+            )
+            self.assertEqual(applied["result"], "applied")
+            self.assertTrue(applied["verified"])
+            self.assertIn("\\~114", client.issues[-1]["description"])
+            writes = [c for c in client.calls if c[0].startswith(("create_", "update_"))]
+            self.assertEqual(len(writes), 3)
+
+            replay = lane.execute_command(
+                client, raw, mode="apply", journal_path=Path(tmp) / "replay.json"
+            )
+            self.assertEqual(replay["result"], "no_op")
+            self.assertEqual(
+                [c for c in client.calls if c[0].startswith(("create_", "update_"))],
+                writes,
+            )
+
+    def test_escaped_punctuation_equivalence_is_exact_and_narrow(self):
+        matches = lane._COMPARISON.description_matches
+        desired = "Сборник из ~114 изречений — «Фома».\n\nВторой абзац *a* _b_."
+        live = "Сборник из \\~114 изречений — «Фома».\n\nВторой абзац \\*a\\* \\_b\\_."
+        self.assertTrue(matches(desired, live))
+        self.assertTrue(matches(desired + "\n", desired))
+        self.assertTrue(matches(desired.replace("\n", "\r\n"), desired))
+        for changed in (
+            live.replace("114", "115"),
+            live.replace("\\~", "\\\\~"),
+            live.replace("\\~", "\\#"),
+            live.replace("«Фома»", "\"Фома\""),
+            live.replace("\n\n", "\n"),
+            live + " extra",
+            None,
+        ):
+            with self.subTest(changed=changed):
+                self.assertFalse(matches(desired, changed))
+        # A caller-authored backslash keeps exact semantics: no unescape.
+        self.assertFalse(matches("path \\~x", "path ~x"))
+        self.assertFalse(matches("a \\~ b", "a \\\\~ b"))
+
+    def test_issue_tree_real_child_description_mismatch_names_issue(self):
+        class DivergingClient(FakeIssueTreeClient):
+            def create_issue(self, **kwargs):
+                super().create_issue(**kwargs)
+                self.issues[-1]["description"] = "something else"
+
+            def update_scoped_issue(self, issue_id, **changes):
+                self.calls.append(("update_scoped_issue", issue_id, dict(changes)))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = DivergingClient(
+                project_name="Книги", milestone_name="Английская литература"
+            )
+            with self.assertRaisesRegex(
+                lane.ContractError,
+                r"^converge_issue_tree read-back mismatched fields: description \(SIS-201\)$",
+            ):
+                lane.execute_command(
+                    client,
+                    issue_tree_command("linear:SIS:tree:diverge"),
+                    mode="apply",
+                    journal_path=Path(tmp) / "create.json",
                 )
 
     def test_issue_tree_partial_plan_preserves_declared_child_positions(self):
