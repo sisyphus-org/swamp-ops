@@ -548,6 +548,57 @@ def _validate_scoped_issue_request(request: dict[str, Any]) -> dict[str, Any]:
     return change
 
 
+_BULK_ISSUE_OPS = frozenset({
+    "change_state", "move_issue", "update_issue", "update_sub_issues", "add_comment",
+    "create_issue_relation", "remove_issue_relation", "replace_issue_relation",
+})
+_BULK_TEAM_OPS = frozenset({
+    "create_issue", "converge_hierarchy", "create_standalone_issue",
+    "converge_issue_tree", "create_project", "create_milestone",
+    "update_project", "update_milestone", "link_project_to_initiative",
+})
+_BULK_WORKSPACE_OPS = frozenset({"create_initiative", "update_initiative"})
+
+
+def _canonicalize_bulk_item(item: dict[str, Any], index: int) -> dict[str, Any]:
+    """Expand the source shorthand targets the public tool schema invites.
+
+    The tool schema leaves ``target`` an open object, so callers naturally send
+    the same selectors they use for single requests: ``{"identifier": "SIS-N"}``
+    or ``{"issue_number": N}`` for issue operations, ``{"parent_identifier":
+    "SIS-N"}`` or ``{}`` for ``create_issue``, and ``{}`` for team/workspace
+    operations. Each shorthand has exactly one canonical lane target, so it is
+    expanded deterministically; anything else is left untouched for the strict
+    canonical validator to reject. Canonical items pass through unchanged, so
+    replay identity of already-canonical batches is preserved.
+    """
+    operation = item["operation"]
+    target = item["target"]
+    change = item["change"]
+    if operation in _BULK_ISSUE_OPS:
+        if set(target) == {"identifier"} and isinstance(target["identifier"], str):
+            return {**item, "target": {"type": "issue", "identifier": target["identifier"]}}
+        if set(target) == {"issue_number"}:
+            number = target["issue_number"]
+            if isinstance(number, bool) or not isinstance(number, int) or number < 1:
+                raise RouteError(f"bulk item {index} requires an exact issue target")
+            return {**item, "target": {"type": "issue", "identifier": f"SIS-{number}"}}
+        return item
+    if operation in _BULK_TEAM_OPS:
+        team = {"type": "team", "identifier": "SIS"}
+        if target in ({}, {"type": "team"}, {"identifier": "SIS"}):
+            return {**item, "target": team}
+        if operation == "create_issue" and set(target) == {"parent_identifier"}:
+            parent = target["parent_identifier"]
+            if "parent_identifier" in change and change["parent_identifier"] != parent:
+                raise RouteError(f"bulk item {index} has conflicting parent targets")
+            return {**item, "target": team, "change": {**change, "parent_identifier": parent}}
+        return item
+    if operation in _BULK_WORKSPACE_OPS and target in ({}, {"type": "workspace"}):
+        return {**item, "target": {"type": "workspace", "identifier": "current"}}
+    return item
+
+
 def _validate_canonical_bulk_item(item: dict[str, Any], index: int) -> None:
     """Apply source-side lane-shape checks without importing the credentialed lane."""
     operation = item["operation"]
@@ -787,6 +838,8 @@ def _validate_bulk_request(
             raise RouteError(f"bulk item {index} is not an allowed mutating operation")
         if not isinstance(target, dict) or not isinstance(change, dict):
             raise RouteError(f"bulk item {index} target/change must be objects")
+        item = _canonicalize_bulk_item(item, index)
+        change = item["change"]
         _validate_canonical_bulk_item(item, index)
         encoded = json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         digest = hashlib.sha256(encoded.encode()).hexdigest()
