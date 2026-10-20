@@ -98,6 +98,13 @@ def _desired_variants(desired: str) -> list[str]:
 
 
 def description_matches(desired: str, live: Any) -> bool:
+    """Match exact text, a known Linear serialization, or the same document."""
+    if strict_description_matches(desired, live):
+        return True
+    return rendered_markdown_equal(desired, live)
+
+
+def strict_description_matches(desired: str, live: Any) -> bool:
     """Match exact text or a narrowly confirmed Linear serialization.
 
     Mutation payloads stay byte-for-byte unchanged. Accepted alternate whole-
@@ -105,8 +112,8 @@ def description_matches(desired: str, live: Any) -> bool:
     Markdown list markers changing from ``- `` to ``* ``, backslash escaping
     of literal ``~``/``*``/``_`` in a backslash-free desired value, CRLF/
     trailing-whitespace trimming of the desired value, and their composition.
-    Autolinking recognizes only plain prose and narrow heading/list prefixes;
-    ambiguous code, markup, token boundaries, and punctuation fail closed.
+    Ambiguous code, markup, token boundaries, and punctuation fail closed
+    here; ``description_matches`` adds the rendered-document fallback.
     """
     if live == desired:
         return True
@@ -120,6 +127,61 @@ def description_matches(desired: str, live: Any) -> bool:
         if any(_serialization_matches(variant, item) for item in candidates):
             return True
     return False
+
+
+_AUTOLINK_ANCHOR = re.compile(r'<a href="([^"<>]*)">([^<>]*)</a>')
+_PLAIN_AUTOLINK = re.compile(r"https?://[A-Za-z0-9\-._~:/?#@!$&+,;=%]+")
+
+
+def _render_markdown(text: str) -> str | None:
+    """Render CommonMark to a canonical HTML document, or ``None``.
+
+    Linear stores descriptions as Markdown and re-serializes them on write
+    (backslash escapes, list markers, emphasis delimiters, plain-URL
+    autolinks, line endings, trailing whitespace). Those rewrites never change
+    the rendered document, so the rendered form is the stable equivalence
+    class. A Linear autolink ``[U](<U>)`` renders as an anchor whose visible
+    text equals its target; it is folded back to the plain URL text so it
+    compares equal to the unlinked original. Any anchor whose label differs
+    from its target is kept, so changed link targets still fail closed.
+    """
+    try:
+        from markdown_it import MarkdownIt
+    except Exception:  # pragma: no cover - dependency of the Hermes runtime
+        return None
+    from html import unescape
+    from urllib.parse import unquote
+
+    # Linear renders GFM strikethrough and tables; enable them so ``~~x~~``
+    # and ``\~\~x\~\~`` stay visibly different instead of both being literal.
+    parser = MarkdownIt("commonmark").enable(["strikethrough", "table"])
+    html = parser.render(text.replace("\r\n", "\n"))
+
+    def fold(match: re.Match[str]) -> str:
+        href = unquote(unescape(match.group(1)))
+        label = unescape(match.group(2))
+        # Fold only a link a plain-URL autolinker could have produced: label
+        # equals target, RFC 3986 characters only, and no trailing sentence
+        # punctuation (an autolinker would have left it outside the link).
+        if (
+            href == label
+            and _PLAIN_AUTOLINK.fullmatch(label)
+            and not label.endswith((".", ",", ";", ":", "!", "?", ")", "'", '"', "_", "*", "~"))
+        ):
+            return match.group(2)
+        return match.group(0)
+
+    return _AUTOLINK_ANCHOR.sub(fold, html).strip()
+
+
+def rendered_markdown_equal(desired: str, live: Any) -> bool:
+    """True when both values render to the same visible Markdown document."""
+    if not isinstance(desired, str) or not isinstance(live, str):
+        return False
+    rendered_desired = _render_markdown(desired)
+    if rendered_desired is None:
+        return False
+    return rendered_desired == _render_markdown(live)
 
 
 def _serialization_matches(desired: str, live: str) -> bool:

@@ -2938,7 +2938,7 @@ class ExecutionTests(unittest.TestCase):
             )
 
     def test_escaped_punctuation_equivalence_is_exact_and_narrow(self):
-        matches = lane._COMPARISON.description_matches
+        matches = lane._COMPARISON.strict_description_matches
         desired = "Сборник из ~114 изречений — «Фома».\n\nВторой абзац *a* _b_."
         live = "Сборник из \\~114 изречений — «Фома».\n\nВторой абзац \\*a\\* \\_b\\_."
         self.assertTrue(matches(desired, live))
@@ -2958,6 +2958,44 @@ class ExecutionTests(unittest.TestCase):
         # A caller-authored backslash keeps exact semantics: no unescape.
         self.assertFalse(matches("path \\~x", "path ~x"))
         self.assertFalse(matches("a \\~ b", "a \\\\~ b"))
+
+    def test_description_matches_any_serialization_of_the_same_document(self):
+        # Literal fixtures: the SIS-342 production read-back plus other
+        # Linear re-serializations that leave the rendered document intact.
+        matches = lane._COMPARISON.description_matches
+        for desired, live in (
+            ("Сборник из ~114 изречений", "Сборник из \\~114 изречений"),
+            ("Путь C:\\temp и ~x", "Путь C:\\temp и \\~x"),
+            ("- *one*\n- two", "* _one_\n* two"),
+            ("+ item", "* item"),
+            ("- [ ] task", "* [ ] task"),
+            ("1) первый\n2) второй", "1. первый\n2. второй"),
+            ("Текст 1+1=2 и a_b_c", "Текст 1\\+1=2 и a\\_b\\_c"),
+            ("См. https://a.example/x.", "См. [https://a.example/x](<https://a.example/x>)."),
+            ("A\r\nB\r\n", "A\nB"),
+            ("Заголовок\n===", "# Заголовок"),
+        ):
+            with self.subTest(desired=desired):
+                self.assertTrue(matches(desired, live))
+
+    def test_rendered_description_match_still_fails_closed_on_real_change(self):
+        matches = lane._COMPARISON.description_matches
+        desired = "Сборник из ~114 изречений — «Фома».\n\n- пункт https://a.example/x"
+        for live in (
+            "Сборник из \\~115 изречений — «Фома».\n\n- пункт https://a.example/x",
+            "Сборник из \\~114 изречений — \"Фома\".\n\n- пункт https://a.example/x",
+            "Сборник из \\~114 изречений — «Фома».\n\nпункт https://a.example/x",
+            "Сборник из ~~114 изречений~~ — «Фома».\n\n- пункт https://a.example/x",
+            "Сборник из *~114* изречений — «Фома».\n\n- пункт https://a.example/x",
+            "Сборник из `~114` изречений — «Фома».\n\n- пункт https://a.example/x",
+            "Сборник из \\~114 изречений — «Фома».\n\n1. пункт https://a.example/x",
+            "Сборник из \\~114 изречений — «Фома».\n\n- пункт [https://a.example/x](<https://b.example/x>)",
+            "Сборник из \\~114 изречений — «Фома».\n\n- пункт [A](<https://a.example/x>)",
+            "",
+            None,
+        ):
+            with self.subTest(live=live):
+                self.assertFalse(matches(desired, live))
 
     def test_issue_tree_real_child_description_mismatch_names_issue(self):
         class DivergingClient(FakeIssueTreeClient):
@@ -3537,9 +3575,9 @@ class ExecutionTests(unittest.TestCase):
     def test_hierarchy_url_canonicalization_is_exact_and_narrow(self):
         hierarchy = lane._load_hierarchy()
         desired = "https://solomia.in.ua"
-        self.assertTrue(hierarchy._description_matches(desired, desired))
+        self.assertTrue(lane._COMPARISON.strict_description_matches(desired, desired))
         self.assertTrue(
-            hierarchy._description_matches(
+            lane._COMPARISON.strict_description_matches(
                 desired, "[https://solomia.in.ua](<https://solomia.in.ua>)"
             )
         )
@@ -3550,9 +3588,9 @@ class ExecutionTests(unittest.TestCase):
             "https://solomia.in.ua/",
         ):
             with self.subTest(live=live):
-                self.assertFalse(hierarchy._description_matches(desired, live))
+                self.assertFalse(lane._COMPARISON.strict_description_matches(desired, live))
         self.assertFalse(
-            hierarchy._description_matches(
+            lane._COMPARISON.strict_description_matches(
                 "Visit https://solomia.in.ua",
                 "[Visit https://solomia.in.ua](<Visit https://solomia.in.ua>)",
             )
@@ -3562,14 +3600,14 @@ class ExecutionTests(unittest.TestCase):
             "Visit [https://a.example/x](<https://a.example/x>)\n"
             "Then [https://b.example/y](<https://b.example/y>)"
         )
-        self.assertTrue(hierarchy._description_matches(inline, canonical))
+        self.assertTrue(lane._COMPARISON.strict_description_matches(inline, canonical))
         for live in (
             "Visit [https://a.example/x](<https://a.example/x>)\nThen https://b.example/y",
             "Visit [A](<https://a.example/x>)\nThen [https://b.example/y](<https://b.example/y>)",
             canonical + " ",
         ):
             with self.subTest(inline_live=live):
-                self.assertFalse(hierarchy._description_matches(inline, live))
+                self.assertFalse(lane._COMPARISON.strict_description_matches(inline, live))
         unsafe_contexts = (
             (
                 "See [A](https://a.example/x) and https://b.example/y",
@@ -3602,7 +3640,7 @@ class ExecutionTests(unittest.TestCase):
         for desired_unsafe, live_unsafe in unsafe_contexts:
             with self.subTest(desired_unsafe=desired_unsafe):
                 self.assertFalse(
-                    hierarchy._description_matches(desired_unsafe, live_unsafe)
+                    lane._COMPARISON.strict_description_matches(desired_unsafe, live_unsafe)
                 )
 
     def test_hierarchy_omitted_fields_are_not_sent_or_compared(self):
@@ -4341,7 +4379,7 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(len(client.writes), 1)
 
     def test_combined_description_normalization_requires_the_whole_value(self):
-        matches = lane._COMPARISON.description_matches
+        matches = lane._COMPARISON.strict_description_matches
         desired = (
             "## Integration\n"
             "- Compare https://a.example/x and https://b.example/y\n"
@@ -4382,7 +4420,7 @@ class ExecutionTests(unittest.TestCase):
                 self.assertFalse(matches(desired, changed))
 
     def test_combined_url_normalization_rejects_ambiguous_contexts(self):
-        matches = lane._COMPARISON.description_matches
+        matches = lane._COMPARISON.strict_description_matches
         # Literal synthetic pairs deliberately exercise unsafe recognition,
         # including syntax that a URL regex could otherwise swallow.
         cases = (
@@ -4423,7 +4461,7 @@ class ExecutionTests(unittest.TestCase):
                 self.assertFalse(matches(desired, observed))
 
     def test_url_normalization_rejects_unsupported_list_structure(self):
-        matches = lane._COMPARISON.description_matches
+        matches = lane._COMPARISON.strict_description_matches
         for desired, observed in (
             (
                 "+ https://a.example/x",
@@ -4442,7 +4480,7 @@ class ExecutionTests(unittest.TestCase):
                 self.assertFalse(matches(desired, observed))
 
     def test_combined_url_normalization_rejects_tab_indented_code(self):
-        matches = lane._COMPARISON.description_matches
+        matches = lane._COMPARISON.strict_description_matches
         desired = "- parent\n \t- https://a.example/x"
         observed = "* parent\n \t- [https://a.example/x](<https://a.example/x>)"
         self.assertFalse(matches(desired, observed))
@@ -4484,7 +4522,7 @@ class ExecutionTests(unittest.TestCase):
         self.assertTrue(matches(desired, observed))
 
     def test_linear_unordered_list_marker_equivalence_is_exact_and_narrow(self):
-        matches = lane._COMPARISON.description_matches
+        matches = lane._COMPARISON.strict_description_matches
         nested = "- parent\n  - child\n    - grandchild"
         self.assertTrue(matches(nested, "* parent\n  * child\n    * grandchild"))
         self.assertTrue(matches("before - inline\n- item\n---", "before - inline\n* item\n---"))
