@@ -1,5 +1,10 @@
 """Fixed source diagnostics: exception text is lookup input, never public data."""
+import re
 from typing import Any
+
+# Validator-generated bulk shape failures ("bulk item 3 requires ...",
+# "bulk request contains ..."). Matched only to select a fixed public message.
+BULK_SHAPE_REASON = re.compile(r"bulk (?:item (?:[0-9]|[1-4][0-9]) [a-z][a-zA-Z0-9 /,\-]*|request [a-z][a-zA-Z0-9 /,\-]*)")
 
 
 DIAGNOSTICS = {
@@ -95,6 +100,7 @@ for field in ("issue", *(f"sub_issues[{index}]" for index in range(10))):
 
 
 SHAPE_MESSAGES = {
+    "bulk_linear_operations": "Each bulk item must be exactly {operation,target,change} in a supported single-operation shape: issue operations target {identifier:SIS-N}; create_issue targets {parent_identifier:SIS-N} or {} with parent_identifier, title, description, state and priority in change; omit unsupported fields.",
     "create_project": "The bounded create_project shape requires name and allows only description and target_date; omit project and unsupported fields.",
     "converge_hierarchy": "The bounded converge_hierarchy shape requires project and milestone objects with name, and an issue object with title; descriptions and a safe issue state are optional.",
     "create_standalone_issue": "The bounded create_standalone_issue shape requires project and milestone objects with name, and issue with exactly title, description, state and priority.",
@@ -114,7 +120,13 @@ def rejection(exc: Exception, *, stage: str, operation: Any = None) -> dict[str,
     elif stage == "public_result":
         code = "result_unverified"
     elif stage == "validation":
-        code = REASONS.get(str(exc), "route_unavailable")
+        code = REASONS.get(str(exc))
+        if code is None and BULK_SHAPE_REASON.fullmatch(str(exc)):
+            # Bulk item/request shape violations are caller-correctable data
+            # errors, not a broken route; the message stays fixed text.
+            code = "invalid_request_shape"
+            operation = "bulk_linear_operations"
+        code = code or "route_unavailable"
     else:
         code = "route_unavailable"
     message, action = DIAGNOSTICS[code]

@@ -1993,3 +1993,60 @@ class BulkBrokerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BulkShorthandTargetTests(unittest.TestCase):
+    """Regression: a books batch of 8 items was rejected as route_unavailable."""
+
+    def _parse(self, items):
+        from plugins.linear_source_route import route as source_route
+        return source_route.parse_linear_request(
+            {"operation": "bulk_linear_operations", "items": items},
+            source_profile="books",
+        ).command["change"]["items"]
+
+    def test_issue_and_create_shorthand_targets_canonicalize(self):
+        items = self._parse([
+            {"operation": "update_issue", "target": {"identifier": "SIS-268"},
+             "change": {"state": "In Progress", "description": "x"}},
+            {"operation": "update_issue", "target": {"issue_number": 273},
+             "change": {"state": "Todo"}},
+            {"operation": "create_issue", "target": {"parent_identifier": "SIS-32"},
+             "change": {"title": "t", "description": "d", "state": "Backlog", "priority": "Medium"}},
+            {"operation": "create_issue", "target": {},
+             "change": {"title": "u", "description": "d", "parent_identifier": "SIS-32",
+                        "state": "Backlog", "priority": "Low"}},
+        ])
+        self.assertEqual(
+            [item["target"] for item in items],
+            [{"type": "issue", "identifier": "SIS-268"},
+             {"type": "issue", "identifier": "SIS-273"},
+             {"type": "team", "identifier": "SIS"},
+             {"type": "team", "identifier": "SIS"}],
+        )
+        self.assertEqual(items[2]["change"]["parent_identifier"], "SIS-32")
+
+    def test_canonical_items_are_unchanged(self):
+        canonical = {"operation": "update_issue",
+                     "target": {"type": "issue", "identifier": "SIS-5"},
+                     "change": {"state": "Todo"}}
+        self.assertEqual(self._parse([canonical])[0], canonical)
+
+    def test_ambiguous_shorthand_still_rejects_as_shape_error(self):
+        from plugins.linear_source_route import route as source_route
+        from plugins.linear_source_route.diagnostics import rejection
+        for item in (
+            {"operation": "update_issue", "target": {"foo": "SIS-1"}, "change": {"state": "Todo"}},
+            {"operation": "update_issue", "target": {"issue_number": True}, "change": {"state": "Todo"}},
+            {"operation": "create_issue", "target": {"parent_identifier": "SIS-1"},
+             "change": {"title": "t", "description": "d", "parent_identifier": "SIS-2",
+                        "state": "Backlog", "priority": "Low"}},
+        ):
+            with self.subTest(item=item):
+                with self.assertRaises(source_route.RouteError) as caught:
+                    self._parse([item])
+                result = rejection(caught.exception, stage="validation",
+                                   operation="bulk_linear_operations")
+                self.assertEqual(result["status"], "rejected")
+                self.assertNotIn("route", result["message"].lower().split("bulk")[0])
+                self.assertIn("{operation,target,change}", result["message"])
