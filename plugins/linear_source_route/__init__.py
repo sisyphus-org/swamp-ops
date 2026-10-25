@@ -53,6 +53,8 @@ PUBLIC_MISMATCH_FIELDS = (
     r"(?:id/title|description|state|priority|assignee|labels|due_date|estimate|parent|project|milestone|team|url|archived)"
 )
 PUBLIC_MISMATCH_LIST = rf"{PUBLIC_MISMATCH_FIELDS}(?:, {PUBLIC_MISMATCH_FIELDS})*"
+# Issue-tree read-back may name the exact mismatched public issue.
+PUBLIC_MISMATCH_ISSUE = r"(?: \(SIS-[1-9][0-9]*\))?"
 PUBLIC_BLOCK_REASON_PATTERNS = {
     "bulk_linear_operations": (
         re.compile(
@@ -139,7 +141,8 @@ PUBLIC_BLOCK_REASON_PATTERNS = {
         re.compile(r"^(?:project|milestone) supplied description conflicts with live state$"),
         re.compile(r"^(?:project|milestone) exact-name match conflicts with live scope or name$"),
         re.compile(
-            rf"^create_standalone_issue read-back mismatched fields: {PUBLIC_MISMATCH_LIST}$"
+            rf"^create_standalone_issue read-back mismatched fields: {PUBLIC_MISMATCH_LIST}"
+            rf"{PUBLIC_MISMATCH_ISSUE}$"
         ),
         re.compile(
             r"^create_standalone_issue provider unavailable after verified absent read-back$"
@@ -152,7 +155,8 @@ PUBLIC_BLOCK_REASON_PATTERNS = {
         re.compile(r"^(?:project|milestone) supplied description conflicts with live state$"),
         re.compile(r"^(?:project|milestone) exact-name match conflicts with live scope or name$"),
         re.compile(
-            rf"^converge_issue_tree read-back mismatched fields: {PUBLIC_MISMATCH_LIST}$"
+            rf"^converge_issue_tree read-back mismatched fields: {PUBLIC_MISMATCH_LIST}"
+            rf"{PUBLIC_MISMATCH_ISSUE}$"
         ),
         re.compile(
             r"^converge_issue_tree provider unavailable after verified absent read-back$"
@@ -2617,6 +2621,14 @@ def _public_result(result: dict[str, Any]) -> dict[str, Any]:
             in {"converge_hierarchy", "create_standalone_issue", "converge_issue_tree"}
             else None
         )
+        if (
+            message != "Не удалось выполнить запрос: безопасная причина недоступна."
+            and " read-back mismatched fields: " in reason
+        ):
+            # The write was attempted and may have committed; the source must
+            # reconcile with a read-only lookup instead of blindly retrying.
+            public["outcome"] = "unknown"
+            public["recovery"] = {"action": "reconcile_read_only"}
         if scope_conflict is not None:
             public["recovery"] = {
                 "action": "retry_without_scope_description",
